@@ -1,0 +1,47 @@
+# OS
+.DS_Store
+
+# Runtime logs / temp
+.run/
+*.log
+*.pid
+*.out
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+
+# Frontend build artifacts
+frontend/dist/
+frontend/.vite/
+frontend/node_modules/
+
+# Generic build artifacts
+dist/
+build/
+coverage/
+
+# IDE
+.vscode/
+.idea/
+
+# Local reports/artifacts
+incident_report_*.json
+incident_report_*.md

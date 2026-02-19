@@ -1,0 +1,30 @@
+{
+  "name": "sre-debate-frontend",
+  "version": "0.1.0",
+  "description": "多模型辩论式 SRE 智能体平台前端",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.22.0",
+    "antd": "^5.14.0",
+    "@ant-design/icons": "^5.3.0",
+    "axios": "^1.6.0",
+    "zustand": "^4.5.0",
+    "dayjs": "^1.11.10"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "typescript": "^5.3.2",
+    "vite": "^5.0.0"
+  }
+}

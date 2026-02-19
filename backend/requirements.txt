@@ -1,0 +1,28 @@
+# FastAPI 框架
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# 数据验证
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Multi-Agent Orchestration
+pyautogen>=0.2.35
+
+# HTTP 客户端
+httpx>=0.26.0
+
+# 异步支持
+asyncio-pool>=0.6.0
+
+# 日志
+structlog>=24.1.0
+
+# 工具库
+python-multipart>=0.0.6
+python-dotenv>=1.0.0
+
+# 测试
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+httpx>=0.26.0

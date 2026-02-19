@@ -1,0 +1,58 @@
+{
+  "name": "sre-debate-platform",
+  "version": "1.0.0",
+  "description": "多模型辩论式 SRE 智能体平台 - 三态资产融合与 AI 技术委员会决策系统",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "start:all": "bash ./scripts/start-all.sh",
+    "stop:all": "bash ./scripts/stop-all.sh",
+    "stop:all:force": "bash ./scripts/stop-all.sh --force-ports",
+    "smoke:e2e": "node ./scripts/smoke-e2e.mjs"
+  },
+  "keywords": [
+    "sre",
+    "multi-agent",
+    "debate",
+    "ddd",
+    "root-cause-analysis",
+    "ai",
+    "llm"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "zod": "^3.22.4",
+    "yaml": "^2.3.4",
+    "chalk": "^5.3.0",
+    "ora": "^7.0.1",
+    "uuid": "^9.0.1",
+    "dayjs": "^1.11.10",
+    "lodash-es": "^4.17.21"
+  },
+  "devDependencies": {
+    "@types/lodash-es": "^4.17.12",
+    "@types/node": "^20.10.0",
+    "@types/uuid": "^9.0.7",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "prettier": "^3.1.0",
+    "tsx": "^4.6.0",
+    "typescript": "^5.3.2",
+    "vitest": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
