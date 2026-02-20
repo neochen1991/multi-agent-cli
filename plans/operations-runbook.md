@@ -13,9 +13,9 @@ npm run dev
 ```
 
 ## 关键配置
-- `OPENCODE_BASE_URL=https://ark.cn-beijing.volces.com/api/coding/v3`
-- `OPENCODE_API_KEY=b0f69e9a-7708-4bf8-af61-7b7822947ce4`
-- `OPENCODE_MODEL_NAME=kimi-k2.5`
+- `LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/coding`
+- `LLM_API_KEY=b0f69e9a-7708-4bf8-af61-7b7822947ce4`
+- `LLM_MODEL=kimi-k2.5`
 - `AUTH_ENABLED=false`（默认关闭；上线可设为 `true`）
 - `RATE_LIMIT_REQUESTS_PER_MINUTE=120`
 
@@ -39,5 +39,4 @@ python tests/load/smoke_load_test.py --base-url http://localhost:8000 --requests
 ## 故障演练建议
 - 演练 401/403（`AUTH_ENABLED=true`）
 - 演练 429（压高并发触发限流）
-- 演练 OpenCode 不可用（观察熔断行为）
-
+- 演练 LLM 网关不可用（观察熔断行为）

@@ -109,7 +109,48 @@ class AIDebateOrchestrator:
                 }
             )
 
-            for agent_name, agent_role, phase in self.AGENT_SEQUENCE:
+            # 分析阶段并行执行，减少整体耗时；随后进入顺序质疑/反驳/裁决。
+            analysis_agents = [item for item in self.AGENT_SEQUENCE if item[2] == "analysis"]
+            non_analysis_agents = [item for item in self.AGENT_SEQUENCE if item[2] != "analysis"]
+
+            base_round_number = len(self.turns) + 1
+            history_snapshot = list(dialogue_history)
+            parallel_tasks = []
+            for idx, (agent_name, agent_role, phase) in enumerate(analysis_agents):
+                prompt = self._build_agent_prompt(
+                    context=context,
+                    dialogue_history=history_snapshot,
+                    agent_name=agent_name,
+                    agent_role=agent_role,
+                    phase=phase,
+                    loop_round=loop_round,
+                )
+                parallel_tasks.append(
+                    self._call_agent(
+                        agent_name=agent_name,
+                        agent_role=agent_role,
+                        phase=phase,
+                        prompt=prompt,
+                        round_number=base_round_number + idx,
+                    )
+                )
+
+            if parallel_tasks:
+                parallel_turns = await asyncio.gather(*parallel_tasks)
+                for turn in parallel_turns:
+                    self.turns.append(turn)
+                    dialogue_history.append(
+                        {
+                            "round_number": turn.round_number,
+                            "phase": turn.phase,
+                            "agent_name": turn.agent_name,
+                            "agent_role": turn.agent_role,
+                            "output_content": turn.output_content,
+                            "confidence": turn.confidence,
+                        }
+                    )
+
+            for agent_name, agent_role, phase in non_analysis_agents:
                 prompt = self._build_agent_prompt(
                     context=context,
                     dialogue_history=dialogue_history,

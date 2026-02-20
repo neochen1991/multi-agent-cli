@@ -10,18 +10,24 @@ from uuid import uuid4
 from app.models.debate import DebateResult
 from app.repositories.report_repository import (
     InMemoryReportRepository,
+    FileReportRepository,
     ReportRepository,
 )
 from app.services.debate_service import debate_service
 from app.services.incident_service import incident_service
 from app.services.report_generation_service import report_generation_service
+from app.config import settings
 
 
 class ReportService:
     """报告查询与导出服务"""
 
     def __init__(self, repository: Optional[ReportRepository] = None):
-        self._repository = repository or InMemoryReportRepository()
+        self._repository = repository or (
+            FileReportRepository()
+            if settings.LOCAL_STORE_BACKEND == "file"
+            else InMemoryReportRepository()
+        )
 
     async def get_report(self, incident_id: str) -> Optional[Dict[str, Any]]:
         return await self._repository.get_latest(incident_id)
@@ -129,4 +135,3 @@ class ReportService:
 
 
 report_service = ReportService()
-

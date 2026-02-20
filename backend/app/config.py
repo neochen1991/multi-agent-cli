@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     NEO4J_USER: str = "neo4j"
     NEO4J_PASSWORD: str = "password"
 
+    # 本地存储配置（无外部数据库场景）
+    LOCAL_STORE_BACKEND: str = Field(default="file")  # file | memory
+    LOCAL_STORE_DIR: str = Field(default="/tmp/sre_debate_store")
+
     # LLM / AutoGen 配置
     # 新字段（推荐）
     LLM_MODEL: Optional[str] = Field(default=None)
@@ -93,6 +97,16 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",")]
         return v
+
+    @field_validator("LOCAL_STORE_BACKEND", mode="before")
+    @classmethod
+    def normalize_local_store_backend(cls, v):
+        if not v:
+            return "file"
+        value = str(v).strip().lower()
+        if value not in {"file", "memory"}:
+            return "file"
+        return value
 
     @property
     def is_development(self) -> bool:

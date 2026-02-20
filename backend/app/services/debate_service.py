@@ -32,6 +32,7 @@ from app.config import settings
 from app.repositories.debate_repository import (
     DebateRepository,
     InMemoryDebateRepository,
+    FileDebateRepository,
 )
 
 logger = structlog.get_logger()
@@ -41,7 +42,11 @@ class DebateService:
     """辩论服务 - 整合三大核心模块"""
     
     def __init__(self, repository: Optional[DebateRepository] = None):
-        self._repository = repository or InMemoryDebateRepository()
+        self._repository = repository or (
+            FileDebateRepository()
+            if settings.LOCAL_STORE_BACKEND == "file"
+            else InMemoryDebateRepository()
+        )
     
     async def create_session(self, incident: Incident) -> DebateSession:
         """

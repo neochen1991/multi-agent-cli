@@ -21,7 +21,9 @@ from app.tools.log_parser import LogParserTool
 from app.repositories.incident_repository import (
     IncidentRepository,
     InMemoryIncidentRepository,
+    FileIncidentRepository,
 )
+from app.config import settings
 
 logger = structlog.get_logger()
 
@@ -30,7 +32,11 @@ class IncidentService:
     """故障事件服务"""
     
     def __init__(self, repository: Optional[IncidentRepository] = None):
-        self._repository = repository or InMemoryIncidentRepository()
+        self._repository = repository or (
+            FileIncidentRepository()
+            if settings.LOCAL_STORE_BACKEND == "file"
+            else InMemoryIncidentRepository()
+        )
         self._log_parser = LogParserTool()
     
     async def create_incident(self, data: IncidentCreate) -> Incident:
