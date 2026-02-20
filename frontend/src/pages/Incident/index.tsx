@@ -1,10 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  Avatar,
   Button,
   Card,
   Collapse,
   Descriptions,
+  Empty,
   Input,
   Progress,
   Select,
@@ -40,10 +42,20 @@ type EventRecord = {
   data?: unknown;
 };
 
+type DialogueMessage = {
+  id: string;
+  timeText: string;
+  agentName: string;
+  side: 'agent' | 'system';
+  phase: string;
+  status: 'streaming' | 'done' | 'error';
+  summary: string;
+  detail: string;
+};
+
 const IncidentPage: React.FC = () => {
   const [searchParams] = useSearchParams();
   const { incidentId: routeIncidentId } = useParams();
-  const [currentStep, setCurrentStep] = useState(0);
   const [activeStep, setActiveStep] = useState(0);
   const [loading, setLoading] = useState(false);
   const [incidentForm, setIncidentForm] = useState({
@@ -62,10 +74,13 @@ const IncidentPage: React.FC = () => {
   const [shareUrl, setShareUrl] = useState<string>('');
   const [fusion, setFusion] = useState<AssetFusion | null>(null);
   const [eventRecords, setEventRecords] = useState<EventRecord[]>([]);
+  const [streamedMessageText, setStreamedMessageText] = useState<Record<string, string>>({});
+  const [expandedDialogueIds, setExpandedDialogueIds] = useState<Record<string, boolean>>({});
   const [running, setRunning] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const pollingRef = useRef(false);
   const runningRef = useRef(false);
+  const streamTimersRef = useRef<Record<string, number>>({});
 
   const steps = useMemo(
     () => [
@@ -139,6 +154,117 @@ const IncidentPage: React.FC = () => {
     return '';
   };
 
+  const normalizeInlineText = (value: string): string =>
+    value
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
+      .trim();
+
+  const normalizeMarkdownText = (value: string): string =>
+    value
+      .replace(/\r/g, '')
+      .split('\n')
+      .map((line) => line.replace(/^\s{0,3}#{1,6}\s+/, '').replace(/^\s*[-*]\s+/, '• '))
+      .join('\n');
+
+  const buildDialogueMessage = (row: EventRecord): DialogueMessage | null => {
+    const data = asRecord(row.data);
+    const kind = row.kind;
+    const phase = String(data.phase || '');
+    const agentRaw = firstTextValue(data, ['agent_name', 'agent']) || '';
+    const agentName = agentRaw || 'System';
+    const prompt = firstTextValue(data, ['prompt_preview', 'input_message', 'prompt', 'command']);
+    const output = firstTextValue(data, [
+      'response_preview',
+      'output_preview',
+      'content_preview',
+      'text_preview',
+      'event_preview',
+      'stderr_preview',
+    ]);
+    const outputJson = data.output_json;
+    const messageText = row.text || '';
+
+    const isRequestKind =
+      kind === 'llm_http_request' ||
+      kind === 'llm_prompt_started' ||
+      kind === 'llm_call_started' ||
+      kind === 'autogen_call_started' ||
+      kind === 'opencode_call_started';
+    const isResponseKind =
+      kind === 'llm_http_response' ||
+      kind === 'llm_prompt_completed' ||
+      kind === 'llm_call_completed' ||
+      kind === 'llm_cli_command_completed' ||
+      kind === 'autogen_call_completed' ||
+      kind === 'opencode_call_completed' ||
+      kind === 'agent_round';
+    const isErrorKind =
+      kind.includes('failed') || kind.includes('error') || kind === 'session_failed';
+
+    const side: 'agent' | 'system' = agentRaw ? 'agent' : 'system';
+    let status: 'streaming' | 'done' | 'error' = 'done';
+    let summary = normalizeInlineText(messageText || kind);
+    let detail = '';
+
+    if (isRequestKind) {
+      status = 'streaming';
+      summary = `${agentName} 开始分析`;
+      detail = normalizeMarkdownText(prompt || messageText || '正在调用模型，请稍候...');
+    } else if (isResponseKind) {
+      status = 'done';
+      summary = `${agentName} 输出结论`;
+      if (typeof outputJson !== 'undefined') {
+        detail = normalizeMarkdownText(toDisplayText(outputJson));
+      } else {
+        detail = normalizeMarkdownText(output || messageText || '已完成该轮分析');
+      }
+    } else if (isErrorKind) {
+      status = 'error';
+      summary = `${agentName} 分析异常`;
+      detail = normalizeMarkdownText(firstTextValue(data, ['error', 'message']) || messageText);
+    } else if (kind === 'asset_interface_mapping_completed') {
+      const matched = typeof data.matched === 'boolean' ? (data.matched ? '命中' : '未命中') : '未知';
+      const domain = firstTextValue(data, ['domain']) || '-';
+      const aggregate = firstTextValue(data, ['aggregate']) || '-';
+      const ownerTeam = firstTextValue(data, ['owner_team']) || '-';
+      const confidence =
+        typeof data.confidence === 'number' ? `${(Number(data.confidence) * 100).toFixed(1)}%` : '-';
+      status = 'done';
+      summary = `责任田映射${matched}`;
+      detail = normalizeMarkdownText(
+        [
+          `命中状态: ${matched}`,
+          `领域: ${domain}`,
+          `聚合根: ${aggregate}`,
+          `责任团队: ${ownerTeam}`,
+          `置信度: ${confidence}`,
+        ].join('\n'),
+      );
+    } else if (kind === 'asset_collection_completed' || kind === 'runtime_assets_collected') {
+      status = 'done';
+      summary = normalizeInlineText(messageText || '资产采集完成');
+      detail = normalizeMarkdownText(toDisplayText(data) || messageText || '资产采集阶段已完成');
+    } else if (kind === 'phase_changed' || kind === 'snapshot' || kind === 'session_started') {
+      summary = normalizeInlineText(messageText || '状态更新');
+      detail = normalizeMarkdownText(messageText || '');
+    } else {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      timeText: row.timeText,
+      agentName,
+      side,
+      phase,
+      status,
+      summary,
+      detail,
+    };
+  };
+
   const formatEventText = (kind: string, data?: Record<string, unknown>) => {
     const phase = String(data?.phase || '');
     const stage = String(data?.stage || '');
@@ -188,120 +314,6 @@ const IncidentPage: React.FC = () => {
     }
   };
 
-  const formatEventDetail = (row: EventRecord) => {
-    const data = asRecord(row.data);
-    const phase = firstTextValue(data, ['phase']);
-    const stage = firstTextValue(data, ['stage']);
-    const model = firstTextValue(data, ['model']);
-    const agent = firstTextValue(data, ['agent_name']);
-    const session = firstTextValue(data, ['session_id', 'llm_session_id', 'opencode_session_id']);
-    const endpoint = firstTextValue(data, ['endpoint']);
-    const target = firstTextValue(data, ['target']);
-    const latency =
-      typeof data.latency_ms === 'number' ? `${Number(data.latency_ms).toFixed(2)} ms` : '';
-    const round =
-      typeof data.round_number === 'number' ? String(data.round_number) : firstTextValue(data, ['round_number']);
-    const confidence =
-      typeof data.confidence === 'number' ? `${(Number(data.confidence) * 100).toFixed(1)}%` : '';
-    const parsedFlag = typeof data.parsed === 'boolean' ? (data.parsed ? '成功' : '失败') : '';
-    const usage = asRecord(data.usage);
-    const totalTokens =
-      typeof usage.total_tokens === 'number' ? String(usage.total_tokens) : '';
-    const matchedFlag = typeof data.matched === 'boolean' ? (data.matched ? '命中' : '未命中') : '';
-    const domain = firstTextValue(data, ['domain']);
-    const aggregate = firstTextValue(data, ['aggregate']);
-    const ownerTeam = firstTextValue(data, ['owner_team']);
-    const prompt = firstTextValue(data, ['prompt_preview', 'input_message', 'prompt', 'command']);
-    const output = firstTextValue(data, [
-      'response_preview',
-      'output_preview',
-      'content_preview',
-      'text_preview',
-      'event_preview',
-      'stderr_preview',
-    ]);
-    const requestPayload = data.request_payload;
-    const responsePayload = data.response_payload;
-    const error = firstTextValue(data, ['error', 'message']);
-    const outputJson = data.output_json;
-    const hasFriendlyBlocks = Boolean(
-      phase ||
-        stage ||
-        model ||
-        agent ||
-        session ||
-        endpoint ||
-        target ||
-        latency ||
-        round ||
-        confidence ||
-        prompt ||
-        output ||
-        requestPayload !== undefined ||
-        responsePayload !== undefined ||
-        error ||
-        outputJson !== undefined,
-    );
-
-    return (
-      <Space direction="vertical" style={{ width: '100%' }}>
-        <Space wrap>
-          <Tag color="blue">{row.kind}</Tag>
-          {phase && <Tag>阶段: {phase}</Tag>}
-          {stage && <Tag>步骤: {stage}</Tag>}
-          {agent && <Tag color="geekblue">Agent: {agent}</Tag>}
-          {model && <Tag color="purple">模型: {model}</Tag>}
-          {session && <Tag>会话: {session}</Tag>}
-          {endpoint && <Tag color="cyan">端点: {endpoint}</Tag>}
-          {round && <Tag>轮次: {round}</Tag>}
-          {target && <Tag>目标: {target}</Tag>}
-          {latency && <Tag color="processing">耗时: {latency}</Tag>}
-          {confidence && <Tag color="green">置信度: {confidence}</Tag>}
-          {parsedFlag && <Tag color={parsedFlag === '成功' ? 'success' : 'error'}>解析: {parsedFlag}</Tag>}
-          {totalTokens && <Tag color="purple">Tokens: {totalTokens}</Tag>}
-          {matchedFlag && <Tag color={matchedFlag === '命中' ? 'success' : 'warning'}>映射: {matchedFlag}</Tag>}
-          {domain && <Tag>领域: {domain}</Tag>}
-          {aggregate && <Tag>聚合根: {aggregate}</Tag>}
-          {ownerTeam && <Tag>责任团队: {ownerTeam}</Tag>}
-        </Space>
-        {prompt && (
-          <>
-            <Text type="secondary">模型输入</Text>
-            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{prompt}</pre>
-          </>
-        )}
-        {requestPayload !== undefined && (
-          <>
-            <Text type="secondary">LLM请求参数</Text>
-            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{toDisplayText(requestPayload)}</pre>
-          </>
-        )}
-        {output && (
-          <>
-            <Text type="secondary">模型输出</Text>
-            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{output}</pre>
-          </>
-        )}
-        {responsePayload !== undefined && (
-          <>
-            <Text type="secondary">LLM响应参数</Text>
-            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{toDisplayText(responsePayload)}</pre>
-          </>
-        )}
-        {outputJson !== undefined && (
-          <>
-            <Text type="secondary">结构化输出</Text>
-            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{toDisplayText(outputJson)}</pre>
-          </>
-        )}
-        {error && <Alert type="error" showIcon message={error} />}
-        {!hasFriendlyBlocks && (
-          <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{toDisplayText(data)}</pre>
-        )}
-      </Space>
-    );
-  };
-
   const inferStepForEvent = (row: EventRecord): number => {
     const data = (row.data || {}) as Record<string, unknown>;
     const phase = String(data.phase || '').toLowerCase();
@@ -335,7 +347,6 @@ const IncidentPage: React.FC = () => {
   };
 
   const advanceStep = (nextStep: number) => {
-    setCurrentStep((prev) => (nextStep > prev ? nextStep : prev));
     setActiveStep((prev) => (nextStep > prev ? nextStep : prev));
   };
 
@@ -633,11 +644,249 @@ const IncidentPage: React.FC = () => {
   useEffect(() => {
     return () => {
       if (wsRef.current) wsRef.current.close();
+      Object.values(streamTimersRef.current).forEach((timerId) => window.clearInterval(timerId));
+      streamTimersRef.current = {};
     };
   }, []);
 
   const stageEvents =
     activeStep === 0 ? [] : eventRecords.filter((row) => inferStepForEvent(row) === activeStep);
+
+  const dialogueMessages = useMemo(
+    () =>
+      stageEvents
+        .slice()
+        .reverse()
+        .map((row) => buildDialogueMessage(row))
+        .filter((item): item is DialogueMessage => Boolean(item)),
+    [stageEvents],
+  );
+
+  useEffect(() => {
+    const currentIds = new Set(dialogueMessages.map((item) => item.id));
+    setStreamedMessageText((prev) => {
+      const next: Record<string, string> = {};
+      for (const [key, value] of Object.entries(prev)) {
+        if (currentIds.has(key)) next[key] = value;
+      }
+      return next;
+    });
+
+    Object.entries(streamTimersRef.current).forEach(([id, timerId]) => {
+      if (!currentIds.has(id)) {
+        window.clearInterval(timerId);
+        delete streamTimersRef.current[id];
+      }
+    });
+
+    dialogueMessages.forEach((message, index) => {
+      const isRecent = index >= Math.max(0, dialogueMessages.length - 8);
+      if (!isRecent) {
+        setStreamedMessageText((prev) =>
+          prev[message.id] === message.detail ? prev : { ...prev, [message.id]: message.detail },
+        );
+        return;
+      }
+      if (streamTimersRef.current[message.id]) return;
+      setStreamedMessageText((prev) => {
+        if (typeof prev[message.id] === 'string' && prev[message.id].length > 0) return prev;
+        return { ...prev, [message.id]: '' };
+      });
+
+      const content = message.detail || '';
+      if (!content) {
+        setStreamedMessageText((prev) => ({ ...prev, [message.id]: '' }));
+        return;
+      }
+
+      streamTimersRef.current[message.id] = window.setInterval(() => {
+        setStreamedMessageText((prev) => {
+          const current = prev[message.id] || '';
+          if (current.length >= content.length) {
+            const timerId = streamTimersRef.current[message.id];
+            if (timerId) {
+              window.clearInterval(timerId);
+              delete streamTimersRef.current[message.id];
+            }
+            return prev;
+          }
+          const step = Math.max(2, Math.ceil(content.length / 120));
+          const nextText = content.slice(0, current.length + step);
+          return { ...prev, [message.id]: nextText };
+        });
+      }, 18);
+    });
+  }, [dialogueMessages]);
+
+  const reportSections = useMemo(() => {
+    const content = report?.content || '';
+    if (!content.trim()) return [];
+    const lines = content.replace(/\r/g, '').split('\n');
+    const sections: Array<{ title: string; lines: string[] }> = [];
+    let currentTitle = '报告概览';
+    let currentLines: string[] = [];
+    const pushCurrent = () => {
+      if (currentLines.length === 0) return;
+      sections.push({ title: currentTitle, lines: [...currentLines] });
+      currentLines = [];
+    };
+    for (const rawLine of lines) {
+      const line = rawLine.trimEnd();
+      if (/^#\s+/.test(line)) continue;
+      const sectionMatch = /^##\s+(.+)$/.exec(line.trim());
+      if (sectionMatch) {
+        pushCurrent();
+        currentTitle = normalizeInlineText(sectionMatch[1]);
+        continue;
+      }
+      if (line.trim() === '---') continue;
+      currentLines.push(line);
+    }
+    pushCurrent();
+    if (sections.length === 0) {
+      return [{ title: '报告详情', lines }];
+    }
+    return sections;
+  }, [report?.content]);
+
+  const renderReportSectionBody = (lines: string[]) => {
+    const blocks: React.ReactNode[] = [];
+    let listBuffer: string[] = [];
+    const flushList = () => {
+      if (listBuffer.length === 0) return;
+      blocks.push(
+        <ul key={`list_${blocks.length}`} style={{ paddingInlineStart: 18, marginBottom: 12 }}>
+          {listBuffer.map((item, index) => (
+            <li key={`${item}_${index}`} style={{ marginBottom: 6 }}>
+              {normalizeInlineText(item)}
+            </li>
+          ))}
+        </ul>,
+      );
+      listBuffer = [];
+    };
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        flushList();
+        continue;
+      }
+      const listMatch = /^[-*]\s+(.+)$/.exec(trimmed) || /^\d+\.\s+(.+)$/.exec(trimmed);
+      if (listMatch) {
+        listBuffer.push(listMatch[1]);
+        continue;
+      }
+      flushList();
+      const text = normalizeInlineText(trimmed.replace(/^###\s+/, ''));
+      blocks.push(
+        <Paragraph key={`p_${blocks.length}`} style={{ marginBottom: 10 }}>
+          {text}
+        </Paragraph>,
+      );
+    }
+    flushList();
+    if (blocks.length === 0) {
+      return <Text type="secondary">暂无内容</Text>;
+    }
+    return <>{blocks}</>;
+  };
+
+  const buildCompactDetail = (value: string): string => {
+    const normalized = normalizeMarkdownText(value || '');
+    const lines = normalized
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length === 0) return '';
+    const compact = lines.slice(0, 3).join('\n');
+    if (compact.length > 220) {
+      return `${compact.slice(0, 220).trim()}...`;
+    }
+    if (lines.length > 3) return `${compact}\n...`;
+    return compact;
+  };
+
+  const renderDialogueStream = () => {
+    if (dialogueMessages.length === 0) {
+      return <Empty description="暂无事件明细" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
+    }
+    return (
+      <div className="dialogue-stream">
+        {dialogueMessages.map((msg) => {
+          const renderedText = streamedMessageText[msg.id] ?? '';
+          const fullText = msg.status === 'streaming' ? renderedText : msg.detail;
+          const compactText = buildCompactDetail(fullText || msg.detail);
+          const showCursor =
+            msg.status === 'streaming' && renderedText.length < (msg.detail || '').length;
+          const isExpanded = Boolean(expandedDialogueIds[msg.id]);
+          const canExpand = (msg.detail || '').length > 220 || (msg.detail || '').split('\n').length > 3;
+          return (
+            <div
+              key={msg.id}
+              className={`dialogue-row ${msg.side === 'agent' ? 'dialogue-row-agent' : 'dialogue-row-system'}`}
+            >
+              <Avatar size="small" className="dialogue-avatar">
+                {msg.agentName.slice(0, 1).toUpperCase()}
+              </Avatar>
+              <div className={`dialogue-bubble dialogue-bubble-${msg.status}`}>
+                <div className="dialogue-meta">
+                  <Text strong>{msg.agentName}</Text>
+                  {msg.phase && <Tag style={{ marginLeft: 8 }}>{msg.phase}</Tag>}
+                  <Text type="secondary" style={{ marginLeft: 8 }}>
+                    {msg.timeText}
+                  </Text>
+                </div>
+                <Paragraph style={{ marginBottom: 8 }}>{msg.summary}</Paragraph>
+                {isExpanded ? (
+                  <pre className="dialogue-content">
+                    {fullText}
+                    {showCursor ? <span className="dialogue-cursor">▋</span> : ''}
+                  </pre>
+                ) : (
+                  <pre className="dialogue-content dialogue-content-compact">
+                    {compactText || '暂无关键信息'}
+                    {showCursor ? <span className="dialogue-cursor">▋</span> : ''}
+                  </pre>
+                )}
+                {canExpand && (
+                  <Button
+                    type="link"
+                    size="small"
+                    style={{ paddingInline: 0, marginTop: 6 }}
+                    onClick={() =>
+                      setExpandedDialogueIds((prev) => ({
+                        ...prev,
+                        [msg.id]: !prev[msg.id],
+                      }))
+                    }
+                  >
+                    {isExpanded ? '收起详情' : '展开详情'}
+                  </Button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const switchToStep = async (nextStep: number) => {
+    if (nextStep > 0 && !incidentId) {
+      message.warning('请先创建故障并初始化会话');
+      return;
+    }
+    setActiveStep(nextStep);
+    if (nextStep === 3 && incidentId && sessionId) {
+      setLoading(true);
+      try {
+        await loadSessionArtifacts(sessionId, incidentId);
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
 
   const roundCollapseItems = (sessionDetail?.rounds || []).map((round) => ({
     key: `${round.round_number}_${round.agent_name}_${round.phase}`,
@@ -658,16 +907,25 @@ const IncidentPage: React.FC = () => {
   return (
     <div className="incident-page">
       <Card>
-        <Steps current={currentStep} items={steps} onChange={(idx) => setActiveStep(idx)} />
+        <Steps
+          type="navigation"
+          current={activeStep}
+          items={steps}
+          onChange={(idx) => {
+            void switchToStep(idx);
+          }}
+        />
         <Space style={{ marginTop: 16 }}>
-          <Button onClick={() => setActiveStep(0)}>输入故障信息</Button>
-          <Button onClick={() => setActiveStep(1)}>
+          <Button type={activeStep === 0 ? 'primary' : 'default'} onClick={() => void switchToStep(0)}>
+            输入故障信息
+          </Button>
+          <Button type={activeStep === 1 ? 'primary' : 'default'} onClick={() => void switchToStep(1)}>
             资产与辩论
           </Button>
-          <Button onClick={() => setActiveStep(2)}>
+          <Button type={activeStep === 2 ? 'primary' : 'default'} onClick={() => void switchToStep(2)}>
             辩论结果
           </Button>
-          <Button onClick={() => setActiveStep(3)}>
+          <Button type={activeStep === 3 ? 'primary' : 'default'} onClick={() => void switchToStep(3)}>
             报告与图谱
           </Button>
           <Tag color="processing">当前查看：{steps[activeStep]?.title}</Tag>
@@ -742,6 +1000,10 @@ const IncidentPage: React.FC = () => {
               </Button>
             </Card>
 
+            <Card title="事件明细（流式对话）">
+              {renderDialogueStream()}
+            </Card>
+
             <Card title="资产与辩论过程记录">
               {stageEvents.length === 0 ? (
                 <Text type="secondary">尚无过程记录</Text>
@@ -753,35 +1015,13 @@ const IncidentPage: React.FC = () => {
                 />
               )}
             </Card>
-
-            <Card title="事件明细">
-              {stageEvents.length === 0 ? (
-                <Text type="secondary">暂无明细</Text>
-              ) : (
-                <Collapse
-                  items={stageEvents.map((row) => ({
-                    key: row.id,
-                    label: `${row.timeText} [${row.kind}] ${row.text}`,
-                    children: formatEventDetail(row),
-                  }))}
-                />
-              )}
-            </Card>
           </Space>
         )}
 
         {activeStep === 2 && (
           <Space direction="vertical" size="large" style={{ width: '100%' }}>
-            <Card title="分析过程记录">
-              {stageEvents.length === 0 ? (
-                <Text type="secondary">尚无过程记录</Text>
-              ) : (
-                <Timeline
-                  items={stageEvents.map((row) => ({
-                    children: `${row.timeText} [${row.kind}] ${row.text}`,
-                  }))}
-                />
-              )}
+            <Card title="事件明细（流式对话）">
+              {renderDialogueStream()}
             </Card>
 
             <Card title="辩论结论">
@@ -816,25 +1056,7 @@ const IncidentPage: React.FC = () => {
               )}
             </Card>
 
-            <Card title="事件明细">
-              {stageEvents.length === 0 ? (
-                <Text type="secondary">暂无明细</Text>
-              ) : (
-                <Collapse
-                  items={stageEvents.map((row) => ({
-                    key: row.id,
-                    label: `${row.timeText} [${row.kind}] ${row.text}`,
-                    children: formatEventDetail(row),
-                  }))}
-                />
-              )}
-            </Card>
-          </Space>
-        )}
-
-        {activeStep === 3 && (
-          <Space direction="vertical" size="large" style={{ width: '100%' }}>
-            <Card title="报告阶段过程记录">
+            <Card title="分析过程记录">
               {stageEvents.length === 0 ? (
                 <Text type="secondary">尚无过程记录</Text>
               ) : (
@@ -845,19 +1067,13 @@ const IncidentPage: React.FC = () => {
                 />
               )}
             </Card>
+          </Space>
+        )}
 
-            <Card title="报告阶段事件明细">
-              {stageEvents.length === 0 ? (
-                <Text type="secondary">暂无明细</Text>
-              ) : (
-                <Collapse
-                  items={stageEvents.map((row) => ({
-                    key: row.id,
-                    label: `${row.timeText} [${row.kind}] ${row.text}`,
-                    children: formatEventDetail(row),
-                  }))}
-                />
-              )}
+        {activeStep === 3 && (
+          <Space direction="vertical" size="large" style={{ width: '100%' }}>
+            <Card title="事件明细（流式对话）">
+              {renderDialogueStream()}
             </Card>
 
             <Card
@@ -873,8 +1089,28 @@ const IncidentPage: React.FC = () => {
                 </Space>
               }
             >
-              {shareUrl && <Alert type="success" message={`分享地址：${shareUrl}`} showIcon style={{ marginBottom: 12 }} />}
-              <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{report?.content || '暂无报告'}</pre>
+              {shareUrl && (
+                <Alert type="success" message={`分享地址：${shareUrl}`} showIcon style={{ marginBottom: 12 }} />
+              )}
+              {!report?.content ? (
+                <Empty description="暂无报告" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+              ) : (
+                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                  <Descriptions column={2} size="small">
+                    <Descriptions.Item label="报告ID">{report.report_id}</Descriptions.Item>
+                    <Descriptions.Item label="生成时间">
+                      {new Date(report.generated_at).toLocaleString()}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="格式">{report.format}</Descriptions.Item>
+                    <Descriptions.Item label="关联会话">{report.debate_session_id || '-'}</Descriptions.Item>
+                  </Descriptions>
+                  {reportSections.map((section, index) => (
+                    <Card key={`${section.title}_${index}`} size="small" title={section.title}>
+                      {renderReportSectionBody(section.lines)}
+                    </Card>
+                  ))}
+                </Space>
+              )}
             </Card>
             <Card title="资产融合结果">
               {fusion ? (
@@ -886,6 +1122,18 @@ const IncidentPage: React.FC = () => {
                 </Descriptions>
               ) : (
                 <Text type="secondary">暂无融合结果</Text>
+              )}
+            </Card>
+
+            <Card title="报告阶段过程记录">
+              {stageEvents.length === 0 ? (
+                <Text type="secondary">尚无过程记录</Text>
+              ) : (
+                <Timeline
+                  items={stageEvents.map((row) => ({
+                    children: `${row.timeText} [${row.kind}] ${row.text}`,
+                  }))}
+                />
               )}
             </Card>
           </Space>
