@@ -158,6 +158,15 @@ const AssetsPage: React.FC = () => {
                 </Descriptions.Item>
               </Descriptions>
 
+              {!locateResult.matched && locateResult.guidance?.length > 0 && (
+                <Alert
+                  style={{ marginTop: 12 }}
+                  type="info"
+                  showIcon
+                  message={`补充建议：${locateResult.guidance.join('；')}`}
+                />
+              )}
+
               <Table
                 style={{ marginTop: 16 }}
                 rowKey={(row, index) => `${row.path}-${row.symbol}-${index}`}

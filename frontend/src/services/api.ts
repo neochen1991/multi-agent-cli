@@ -107,6 +107,7 @@ export interface InterfaceLocateResult {
   matched: boolean;
   confidence: number;
   reason: string;
+  guidance: string[];
   interface_hints: Array<{ method: string; path: string }>;
   domain?: string;
   aggregate?: string;
@@ -188,6 +189,10 @@ export const debateApi = {
   },
   async executeAsync(sessionId: string): Promise<{ task_id: string; status: string }> {
     const { data } = await api.post(`/debates/${sessionId}/execute-async`);
+    return data;
+  },
+  async cancel(sessionId: string): Promise<{ session_id: string; cancelled: boolean }> {
+    const { data } = await api.post(`/debates/${sessionId}/cancel`);
     return data;
   },
   async getTask(taskId: string): Promise<{ task_id: string; status: string; result?: Record<string, unknown> }> {

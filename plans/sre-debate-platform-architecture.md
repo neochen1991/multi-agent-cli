@@ -3,14 +3,14 @@
 ## 1. 项目概述
 
 ### 1.1 项目目标
-基于 OpenCode SDK 构建多模型辩论式 SRE 智能体平台，实现：
+基于 AutoGen Runtime 构建多模型辩论式 SRE 智能体平台，实现：
 - 三态资产（设计态/开发态/运行态）统一建模
 - 多模型专家分工协作
 - AI 内部质疑 + 反驳 + 仲裁机制
 - 自动生成根因、修复方案与影响分析
 
 ### 1.2 技术栈
-- **后端**: Python + FastAPI + OpenCode SDK
+- **后端**: Python + FastAPI + AutoGen Runtime
 - **前端**: React + TypeScript + Ant Design
 - **数据库**: PostgreSQL + Neo4j (图数据库)
 - **消息队列**: Redis + Celery
@@ -158,7 +158,7 @@ multi-agent-cli_v2/
 │   │   │   └── report_gen.py  # 报告生成
 │   │   └── core/              # 核心组件
 │   │       ├── __init__.py
-│   │       ├── opencode_client.py # OpenCode SDK 封装
+│   │       ├── autogen_client.py # AutoGen Runtime 封装
 │   │       └── model_router.py    # 模型路由
 │   ├── tests/                 # 测试
 │   ├── requirements.txt
@@ -197,18 +197,18 @@ multi-agent-cli_v2/
 
 ## 3. 后端架构设计
 
-### 3.1 OpenCode SDK 集成
+### 3.1 AutoGen Runtime 集成
 
 ```python
-# backend/app/core/opencode_client.py
-from opencode import OpenCode, Agent, Tool, Flow
+# backend/app/core/autogen_client.py
+from autogen import AutoGen, Agent, Tool, Flow
 from typing import Dict, Any, List
 
-class OpenCodeClient:
-    """OpenCode SDK 封装客户端"""
+class AutoGenClient:
+    """AutoGen Runtime 封装客户端"""
     
     def __init__(self, config: Dict[str, Any]):
-        self.client = OpenCode(api_key=config['api_key'])
+        self.client = AutoGen(api_key=config['api_key'])
         self.model_router = ModelRouter(config['models'])
     
     async def create_agent(
@@ -237,7 +237,7 @@ class OpenCodeClient:
 # backend/app/agents/base.py
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List
-from opencode import Agent, Tool
+from autogen import Agent, Tool
 
 class BaseAgent(ABC):
     """Agent 基类"""
@@ -299,7 +299,7 @@ class LogAgent(BaseAgent):
     async def process(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """处理日志分析"""
         runtime_asset = context.get('runtime_asset', {})
-        # 调用 OpenCode SDK 进行分析
+        # 调用 AutoGen Runtime 进行分析
         result = await self.agent.run(
             input={"logs": runtime_asset.get('rawLogs', [])}
         )
@@ -373,7 +373,7 @@ class CodeAgent(BaseAgent):
 ```python
 # backend/app/flows/debate_flow.py
 from typing import Dict, Any, List
-from opencode import Flow
+from autogen import Flow
 
 class DebateFlow:
     """辩论流程编排"""
@@ -786,7 +786,7 @@ services:
       - DATABASE_URL=postgresql://postgres:password@postgres:5432/sre_debate
       - REDIS_URL=redis://redis:6379
       - NEO4J_URI=bolt://neo4j:7687
-      - OPENCODE_API_KEY=${OPENCODE_API_KEY}
+      - LLM_API_KEY=${LLM_API_KEY}
     depends_on:
       - postgres
       - redis
@@ -859,7 +859,7 @@ graph TB
     end
 
     subgraph AI服务
-        OC[OpenCode API]
+        OC[LLM API]
         LLM[LLM Models]
     end
 
@@ -933,7 +933,7 @@ graph TB
 ### 阶段一：基础框架搭建
 
 - [ ] 初始化后端项目结构
-- [ ] 集成 OpenCode SDK
+- [ ] 集成 AutoGen Runtime
 - [ ] 实现基础 Agent 框架
 - [ ] 搭建数据库和缓存
 - [ ] 实现基础 API
@@ -972,13 +972,13 @@ graph TB
 
 ## 10. 附录
 
-### 10.1 OpenCode SDK 使用示例
+### 10.1 AutoGen Runtime 使用示例
 
 ```python
-from opencode import OpenCode, Agent, Tool, Flow
+from autogen import AutoGen, Agent, Tool, Flow
 
 # 初始化客户端
-client = OpenCode(api_key="your-api-key")
+client = AutoGen(api_key="your-api-key")
 
 # 定义工具
 @tool

@@ -116,3 +116,6 @@ minversion = "7.0"
 addopts = "-ra -q --strict-markers --asyncio-mode=auto"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "integration: marks tests that call external systems like live LLM",
+]

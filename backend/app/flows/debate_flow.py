@@ -53,20 +53,31 @@ class AIDebateOrchestrator:
         ("LogAgent", "日志分析专家", "analysis"),
         ("DomainAgent", "领域映射专家", "analysis"),
         ("CodeAgent", "代码分析专家", "analysis"),
+        ("JudgeAgent", "技术委员会主席", "judgment"),
+    ]
+    OPTIONAL_SEQUENCE = [
         ("CriticAgent", "架构质疑专家", "critique"),
         ("RebuttalAgent", "技术反驳专家", "rebuttal"),
-        ("JudgeAgent", "技术委员会主席", "judgment"),
     ]
     MAX_HISTORY_ITEMS = 3
     MAX_LOG_CHARS = 1600
     MAX_SUMMARY_CHARS = 96
     MAX_EVIDENCE_ITEMS = 2
     MAX_EVIDENCE_CHARS = 72
+    PROMPT_CHAR_BUDGETS = {
+        "LogAgent": 4200,
+        "DomainAgent": 4200,
+        "CodeAgent": 4600,
+        "CriticAgent": 5000,
+        "RebuttalAgent": 5000,
+        "JudgeAgent": 5600,
+    }
 
     def __init__(self, consensus_threshold: float = 0.85, max_rounds: int = 3):
         self.consensus_threshold = consensus_threshold
         self.max_rounds = max_rounds
         self.session_id: Optional[str] = None
+        self.trace_id: str = ""
         self.turns: List[DebateTurn] = []
         self._event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
 
@@ -75,6 +86,7 @@ class AIDebateOrchestrator:
             consensus_threshold=consensus_threshold,
             max_rounds=max_rounds,
             model=settings.llm_model,
+            critique_enabled=settings.DEBATE_ENABLE_CRITIQUE,
         )
 
     async def execute(
@@ -85,6 +97,7 @@ class AIDebateOrchestrator:
         self.turns = []
         self._event_callback = event_callback
         self.session_id = await self._create_session()
+        self.trace_id = str(context.get("trace_id") or "")
 
         await self._emit_event(
             {
@@ -110,8 +123,9 @@ class AIDebateOrchestrator:
             )
 
             # 分析阶段并行执行，减少整体耗时；随后进入顺序质疑/反驳/裁决。
-            analysis_agents = [item for item in self.AGENT_SEQUENCE if item[2] == "analysis"]
-            non_analysis_agents = [item for item in self.AGENT_SEQUENCE if item[2] != "analysis"]
+            round_sequence = self._resolve_agent_sequence()
+            analysis_agents = [item for item in round_sequence if item[2] == "analysis"]
+            non_analysis_agents = [item for item in round_sequence if item[2] != "analysis"]
 
             base_round_number = len(self.turns) + 1
             history_snapshot = list(dialogue_history)
@@ -274,7 +288,7 @@ class AIDebateOrchestrator:
 要求：结论简明，不要复述长篇历史。
 """
         shared_instructions = judge_instructions if agent_name == "JudgeAgent" else non_judge_instructions
-        return f"""你是 {agent_name}（{agent_role}）。
+        prompt = f"""你是 {agent_name}（{agent_role}）。
 当前处于第 {loop_round}/{self.max_rounds} 轮，阶段：{phase}。
 
 故障上下文：
@@ -289,6 +303,7 @@ class AIDebateOrchestrator:
 
 {shared_instructions}
 """
+        return self._trim_prompt(agent_name, prompt)
 
     async def _call_agent(
         self,
@@ -322,6 +337,7 @@ class AIDebateOrchestrator:
                     parts=[{"type": "text", "text": prompt}],
                     model=model,
                     agent=agent_name,
+                    format={"type": "json_schema", "schema": self._schema_for_agent(agent_name)},
                     max_tokens=self._resolve_max_tokens(agent_name, phase),
                     use_session_history=False,
                     trace_context={
@@ -329,6 +345,7 @@ class AIDebateOrchestrator:
                         "stage": "autogen_round",
                         "agent_name": agent_name,
                         "round_number": round_number,
+                        "trace_id": self.trace_id,
                     },
                 ),
                 timeout=max(45, min(settings.llm_timeout, 180)),
@@ -544,10 +561,49 @@ class AIDebateOrchestrator:
     @staticmethod
     def _resolve_max_tokens(agent_name: str, phase: str) -> int:
         if agent_name == "JudgeAgent" or phase == "judgment":
-            return 1100
+            return 850
         if agent_name in {"CriticAgent", "RebuttalAgent"}:
-            return 900
-        return 800
+            return 700
+        return 620
+
+    def _resolve_agent_sequence(self) -> List[tuple[str, str, str]]:
+        sequence = list(self.AGENT_SEQUENCE)
+        if settings.DEBATE_ENABLE_CRITIQUE:
+            sequence = sequence[:-1] + self.OPTIONAL_SEQUENCE + [sequence[-1]]
+        return sequence
+
+    def _trim_prompt(self, agent_name: str, prompt: str) -> str:
+        budget = int(self.PROMPT_CHAR_BUDGETS.get(agent_name, 4200))
+        if len(prompt) <= budget:
+            return prompt
+        head = prompt[: int(budget * 0.7)]
+        tail = prompt[-int(budget * 0.25):]
+        omitted = len(prompt) - len(head) - len(tail)
+        return f"{head}\n\n[...已省略 {omitted} 字符以控制 token 预算...]\n\n{tail}"
+
+    @staticmethod
+    def _schema_for_agent(agent_name: str) -> Dict[str, Any]:
+        if agent_name == "JudgeAgent":
+            return {
+                "type": "object",
+                "properties": {
+                    "final_judgment": {"type": "object"},
+                    "decision_rationale": {"type": "object"},
+                    "action_items": {"type": "array"},
+                    "responsible_team": {"type": "object"},
+                    "confidence": {"type": "number"},
+                },
+                "required": ["final_judgment", "confidence"],
+            }
+        return {
+            "type": "object",
+            "properties": {
+                "analysis": {"type": "string"},
+                "evidence_chain": {"type": "array"},
+                "confidence": {"type": "number"},
+            },
+            "required": ["analysis", "confidence"],
+        }
 
     def _build_final_payload(
         self,

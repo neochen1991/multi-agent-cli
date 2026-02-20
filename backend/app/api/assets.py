@@ -155,6 +155,7 @@ class InterfaceLocateResponse(BaseModel):
     matched: bool
     confidence: float
     reason: str
+    guidance: List[str]
     interface_hints: List[Dict[str, str]]
     domain: Optional[str]
     aggregate: Optional[str]
@@ -589,7 +590,12 @@ async def get_asset_fusion(incident_id: str):
     runtime_assets = assets.get("runtime_assets", [])
     dev_assets = assets.get("dev_assets", [])
     design_assets = assets.get("design_assets", [])
-    relationships = _build_fusion_relationships(runtime_assets, dev_assets, design_assets)
+    relationships = _build_fusion_relationships(
+        runtime_assets,
+        dev_assets,
+        design_assets,
+        assets.get("interface_mapping", {}),
+    )
 
     return AssetFusionResponse(
         incident_id=incident_id,
@@ -647,6 +653,7 @@ def _build_fusion_relationships(
     runtime_assets: List[Dict[str, Any]],
     dev_assets: List[Dict[str, Any]],
     design_assets: List[Dict[str, Any]],
+    interface_mapping: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     relationships: List[Dict[str, Any]] = []
 
@@ -698,5 +705,38 @@ def _build_fusion_relationships(
                             "relation": "domain_alignment",
                         }
                     )
+
+    mapping = interface_mapping if isinstance(interface_mapping, dict) else {}
+    endpoint = mapping.get("matched_endpoint") if isinstance(mapping.get("matched_endpoint"), dict) else {}
+    endpoint_id = ""
+    if endpoint:
+        endpoint_id = f"{endpoint.get('method', 'ANY')} {endpoint.get('path', '-')}"
+
+    if endpoint_id:
+        # 反向追溯：数据库表 -> 接口
+        for table in mapping.get("db_tables", []) or []:
+            relationships.append(
+                {
+                    "source_id": table,
+                    "source_type": "database",
+                    "target_id": endpoint_id,
+                    "target_type": "interface",
+                    "relation": "db_table_to_interface",
+                }
+            )
+        # 反向追溯：代码符号 -> 接口
+        for artifact in mapping.get("code_artifacts", []) or []:
+            symbol = artifact.get("symbol") if isinstance(artifact, dict) else None
+            if not symbol:
+                continue
+            relationships.append(
+                {
+                    "source_id": symbol,
+                    "source_type": "development",
+                    "target_id": endpoint_id,
+                    "target_type": "interface",
+                    "relation": "code_symbol_to_interface",
+                }
+            )
 
     return relationships

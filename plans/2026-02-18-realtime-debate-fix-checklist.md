@@ -6,10 +6,10 @@
 ## 任务清单
 - [x] 读取 `.run/logs` 前后端日志并定位根因（`DEBATING` 状态枚举异常）
 - [x] 修复后端辩论状态枚举缺失（新增 `DebateStatus.DEBATING`）
-- [x] 修复 OpenCode 会话创建失败导致流程中断（降级到本地会话 ID）
+- [x] 修复 AutoGen 会话创建失败导致流程中断（降级到本地会话 ID）
 - [x] 优化 LLM 不可用时的降级链路（跳过无效调用，避免连续 error 日志）
 - [x] 增加前后端闭环联调脚本（前端可达 + WebSocket 实时辩论 + 报告 + 资产定位）
-- [x] 修复一键启停脚本稳定性（`stop:all:force` 不再误退出；`start:all` 可复用已有 opencode）
+- [x] 修复一键启停脚本稳定性（`stop:all:force` 不再误退出；`start:all` 可复用已有 autogen）
 - [x] 执行联调验证并确认会话状态为 `completed`
 
 ## 验证结论

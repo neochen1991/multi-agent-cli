@@ -41,7 +41,7 @@ async function jsonRequest(url, init = {}, token = '') {
   return data;
 }
 
-async function runRealtimeDebate(sessionId, token = '', timeoutMs = 180000) {
+async function runRealtimeDebate(sessionId, token = '', timeoutMs = 420000) {
   const params = new URLSearchParams();
   params.set('auto_start', 'true');
   if (token) params.set('token', token);

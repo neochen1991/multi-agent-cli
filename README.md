@@ -39,8 +39,8 @@
 - Python 3.11+
 - FastAPI
 - AutoGen (pyautogen)
-- PostgreSQL + Neo4j
-- Redis + Celery
+- 本地文件仓储（默认）/ 内存仓储（可选）
+- Redis + Celery（可选）
 
 ### 前端
 - React 18
@@ -119,10 +119,12 @@ multi-agent-cli_v2/
 
 2. **配置模型提供商**
 
-   通过环境变量配置 OpenAI 兼容网关：
-   - `LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/coding`
-   - `LLM_API_KEY=b0f69e9a-7708-4bf8-af61-7b7822947ce4`
-   - `LLM_MODEL=kimi-k2.5`
+通过环境变量配置 OpenAI 兼容网关：
+- `LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/coding`
+- `LLM_API_KEY=b0f69e9a-7708-4bf8-af61-7b7822947ce4`
+- `LLM_MODEL=kimi-k2.5`
+- `LOCAL_STORE_BACKEND=file`
+- `LOCAL_STORE_DIR=/tmp/sre_debate_store`
 
 ### 环境要求
 - Python 3.11+
@@ -146,6 +148,7 @@ pip install -r requirements.txt
 export LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/coding
 export LLM_API_KEY=b0f69e9a-7708-4bf8-af61-7b7822947ce4
 export LLM_MODEL=kimi-k2.5
+export LOCAL_STORE_BACKEND=file
 
 # 启动服务
 uvicorn app.main:app --reload
@@ -200,6 +203,16 @@ npm run stop:all
 
 # 如果有端口残留占用，强制清理 8000/5173
 npm run stop:all:force
+```
+
+本地仓储维护命令：
+
+```bash
+# 迁移历史仓储文件，补齐 schema_version
+npm run store:migrate
+
+# 清理本地仓储临时文件与备份文件
+npm run store:clean
 ```
 
 ### Docker 部署

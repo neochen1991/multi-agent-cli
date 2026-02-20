@@ -9,6 +9,7 @@ Asset Knowledge Service
 from __future__ import annotations
 
 from datetime import datetime
+from difflib import SequenceMatcher
 import json
 import os
 from pathlib import Path
@@ -98,6 +99,11 @@ class AssetKnowledgeService:
                 "matched": False,
                 "confidence": 0.0,
                 "reason": "未命中责任田映射，请补充接口 URL 或方法名",
+                "guidance": [
+                    "请补充 HTTP 方法 + URL，例如：POST /api/v1/orders",
+                    "请补充关键异常信息，例如：NullPointerException / Timeout / 502",
+                    "请补充服务名或模块名，例如：order-service",
+                ],
                 "interface_hints": interface_hints,
                 "domain": None,
                 "aggregate": None,
@@ -123,6 +129,7 @@ class AssetKnowledgeService:
             "matched": True,
             "confidence": round(confidence, 3),
             "reason": "已根据接口 URL 命中责任田映射",
+            "guidance": [],
             "interface_hints": interface_hints,
             "domain": domain,
             "aggregate": aggregate,
@@ -399,6 +406,7 @@ class AssetKnowledgeService:
         domain = mapping.get("domain")
         aggregate = mapping.get("aggregate")
         corpus_lower = corpus.lower()
+        expanded_terms = self._expand_terms(corpus_lower)
 
         ranked: List[Tuple[int, Dict[str, Any]]] = []
         for case in cases:
@@ -417,6 +425,14 @@ class AssetKnowledgeService:
             for signature in case.get("log_signatures", []):
                 if signature and signature.lower() in corpus_lower:
                     score += 2
+                elif signature:
+                    fuzzy = self._text_similarity(signature.lower(), corpus_lower)
+                    if fuzzy >= 0.72:
+                        score += 1
+
+            for term in expanded_terms:
+                if term and term in str(case).lower():
+                    score += 1
 
             if score > 0:
                 ranked.append((score, case))
@@ -437,6 +453,32 @@ class AssetKnowledgeService:
                 }
             )
         return output
+
+    def _expand_terms(self, text: str) -> List[str]:
+        aliases = {
+            "下单": ["create order", "place order", "order create", "/orders"],
+            "支付": ["pay", "payment", "/payments"],
+            "超时": ["timeout", "time out", "timed out", "gateway timeout"],
+            "空指针": ["nullpointerexception", "null pointer", "npe"],
+            "502": ["bad gateway", "gateway", "upstream"],
+            "库存": ["inventory", "stock"],
+        }
+        found = set()
+        for key, values in aliases.items():
+            if key in text:
+                found.update(values)
+            for value in values:
+                if value in text:
+                    found.add(key)
+                    found.update(values)
+        return sorted(found)
+
+    @staticmethod
+    def _text_similarity(a: str, b: str) -> float:
+        if not a or not b:
+            return 0.0
+        span = b[: min(len(b), max(len(a) * 3, 400))]
+        return SequenceMatcher(None, a, span).ratio()
 
 
 asset_knowledge_service = AssetKnowledgeService()

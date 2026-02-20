@@ -122,6 +122,7 @@ class FileIncidentRepository(IncidentRepository):
 
     def _persist_to_disk(self) -> None:
         payload = {
+            "schema_version": 1,
             "incidents": [item.model_dump(mode="json") for item in self._incidents.values()],
         }
         tmp = self._file.with_suffix(".json.tmp")

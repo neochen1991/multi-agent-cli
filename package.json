@@ -18,7 +18,9 @@
     "start:all": "bash ./scripts/start-all.sh",
     "stop:all": "bash ./scripts/stop-all.sh",
     "stop:all:force": "bash ./scripts/stop-all.sh --force-ports",
-    "smoke:e2e": "node ./scripts/smoke-e2e.mjs"
+    "smoke:e2e": "node ./scripts/smoke-e2e.mjs",
+    "store:migrate": "python3 ./scripts/local-store-migrate.py",
+    "store:clean": "bash ./scripts/local-store-clean.sh"
   },
   "keywords": [
     "sre",

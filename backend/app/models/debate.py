@@ -13,12 +13,16 @@ from pydantic import BaseModel, Field
 class DebateStatus(str, Enum):
     """辩论状态"""
     PENDING = "pending"          # 待开始
+    RUNNING = "running"          # 任务运行态（总状态）
     ANALYZING = "analyzing"      # 分析阶段
     DEBATING = "debating"        # 辩论执行中
     CRITIQUING = "critiquing"    # 质疑阶段
     REBUTTING = "rebutting"      # 反驳阶段
     JUDGING = "judging"          # 裁决阶段
+    WAITING = "waiting"          # 等待外部条件/重试窗口
+    RETRYING = "retrying"        # 重试中
     COMPLETED = "completed"      # 已完成
+    CANCELLED = "cancelled"      # 已取消
     FAILED = "failed"            # 失败
 
 
@@ -91,7 +95,8 @@ class DebateSession(BaseModel):
     context: Dict[str, Any] = Field(default_factory=dict, description="上下文数据")
     
     # LLM 会话（兼容历史字段名）
-    opencode_session_id: Optional[str] = Field(None, description="LLM 会话ID（兼容字段名）")
+    llm_session_id: Optional[str] = Field(None, description="LLM 会话ID")
+    opencode_session_id: Optional[str] = Field(None, description="历史兼容字段（已废弃）")
     
     # 时间戳
     created_at: datetime = Field(default_factory=datetime.utcnow, description="创建时间")

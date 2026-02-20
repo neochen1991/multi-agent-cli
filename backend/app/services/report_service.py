@@ -32,6 +32,24 @@ class ReportService:
     async def get_report(self, incident_id: str) -> Optional[Dict[str, Any]]:
         return await self._repository.get_latest(incident_id)
 
+    async def save_generated_report(
+        self,
+        report: Dict[str, Any],
+        debate_session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload = dict(report or {})
+        if debate_session_id:
+            payload["debate_session_id"] = debate_session_id
+        generated_at = payload.get("generated_at")
+        if isinstance(generated_at, str):
+            try:
+                payload["generated_at"] = datetime.fromisoformat(generated_at)
+            except ValueError:
+                payload["generated_at"] = datetime.utcnow()
+        elif not isinstance(generated_at, datetime):
+            payload["generated_at"] = datetime.utcnow()
+        return await self._repository.save(payload)
+
     async def get_or_generate_report(
         self,
         incident_id: str,

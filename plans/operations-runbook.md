@@ -16,6 +16,8 @@ npm run dev
 - `LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/coding`
 - `LLM_API_KEY=b0f69e9a-7708-4bf8-af61-7b7822947ce4`
 - `LLM_MODEL=kimi-k2.5`
+- `LOCAL_STORE_BACKEND=file`（默认）
+- `LOCAL_STORE_DIR=/tmp/sre_debate_store`
 - `AUTH_ENABLED=false`（默认关闭；上线可设为 `true`）
 - `RATE_LIMIT_REQUESTS_PER_MINUTE=120`
 
@@ -29,6 +31,12 @@ npm run dev
 2. 恢复环境变量（尤其是模型与鉴权开关）
 3. 重启后端与前端服务
 4. 验证 `health`、核心 API、前端主流程
+
+## 本地仓储维护
+```bash
+npm run store:migrate
+npm run store:clean
+```
 
 ## 压测（简易脚本）
 ```bash

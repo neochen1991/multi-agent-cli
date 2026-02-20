@@ -66,6 +66,13 @@ class DebateWebSocketManager:
         task.add_done_callback(_cleanup)
         return task
 
+    def cancel_running(self, session_id: str) -> bool:
+        task = self.get_running_task(session_id)
+        if not task:
+            return False
+        task.cancel()
+        return True
+
 
 ws_manager = DebateWebSocketManager()
 
@@ -107,6 +114,20 @@ async def _run_debate_with_events(session_id: str):
                     "root_cause": result.root_cause,
                     "confidence": result.confidence,
                     "created_at": result.created_at.isoformat(),
+                },
+            },
+        )
+    except asyncio.CancelledError:
+        await debate_service.cancel_session(session_id, reason="ws_cancel")
+        await ws_manager.broadcast(
+            session_id,
+            {
+                "type": "event",
+                "data": {
+                    "type": "session_cancelled",
+                    "session_id": session_id,
+                    "phase": "cancelled",
+                    "status": "cancelled",
                 },
             },
         )
@@ -167,7 +188,7 @@ async def debate_ws(websocket: WebSocket, session_id: str):
         )
 
         auto_start = websocket.query_params.get("auto_start", "true").lower() == "true"
-        if auto_start and session.status.value in {"pending", "analyzing", "debating"}:
+        if auto_start and session.status.value in {"pending", "running", "analyzing", "debating", "waiting", "retrying"}:
             running_task = ws_manager.ensure_running(
                 session_id,
                 lambda: _run_debate_with_events(session_id),
@@ -181,6 +202,21 @@ async def debate_ws(websocket: WebSocket, session_id: str):
                 running_task = ws_manager.ensure_running(
                     session_id,
                     lambda: _run_debate_with_events(session_id),
+                )
+            elif message == "resume":
+                running_task = ws_manager.ensure_running(
+                    session_id,
+                    lambda: _run_debate_with_events(session_id),
+                )
+                await websocket.send_json({"type": "ack", "message": "resume accepted"})
+            elif message == "cancel":
+                cancelled = ws_manager.cancel_running(session_id)
+                await debate_service.cancel_session(session_id, reason="ws_cancel")
+                await websocket.send_json(
+                    {
+                        "type": "ack",
+                        "message": "cancel accepted" if cancelled else "no running task",
+                    }
                 )
             elif message == "snapshot":
                 latest = await debate_service.get_session(session_id)

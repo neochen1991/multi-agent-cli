@@ -127,6 +127,11 @@ class TaskResponse(BaseModel):
     error: Optional[str] = None
 
 
+class CancelResponse(BaseModel):
+    session_id: str
+    cancelled: bool
+
+
 # ==================== API 端点 ====================
 
 @router.post(
@@ -254,6 +259,23 @@ async def execute_debate_async(session_id: str):
 
     task_id = task_queue.submit(_run)
     return TaskResponse(task_id=task_id, status="pending")
+
+
+@router.post(
+    "/{session_id}/cancel",
+    response_model=CancelResponse,
+    summary="取消辩论任务",
+    description="将会话标记为取消状态（若运行中会由 WS 任务协同中断）",
+)
+async def cancel_debate(session_id: str):
+    session = await debate_service.get_session(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Debate session {session_id} not found",
+        )
+    cancelled = await debate_service.cancel_session(session_id, reason="api_cancel")
+    return CancelResponse(session_id=session_id, cancelled=cancelled)
 
 
 @router.get(

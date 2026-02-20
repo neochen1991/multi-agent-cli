@@ -5,6 +5,7 @@ Debate Service
 整合资产采集、AI辩论分析和报告生成三个核心模块。
 """
 
+import asyncio
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -29,6 +30,7 @@ from app.services.asset_collection_service import asset_collection_service
 from app.services.asset_service import asset_service
 from app.services.report_generation_service import report_generation_service
 from app.config import settings
+from app.core.event_schema import enrich_event, new_trace_id
 from app.repositories.debate_repository import (
     DebateRepository,
     InMemoryDebateRepository,
@@ -40,6 +42,50 @@ logger = structlog.get_logger()
 
 class DebateService:
     """辩论服务 - 整合三大核心模块"""
+
+    _STATUS_TRANSITIONS: Dict[DebateStatus, set[DebateStatus]] = {
+        DebateStatus.PENDING: {DebateStatus.RUNNING, DebateStatus.CANCELLED, DebateStatus.FAILED},
+        DebateStatus.RUNNING: {
+            DebateStatus.ANALYZING,
+            DebateStatus.DEBATING,
+            DebateStatus.JUDGING,
+            DebateStatus.WAITING,
+            DebateStatus.RETRYING,
+            DebateStatus.CANCELLED,
+            DebateStatus.FAILED,
+            DebateStatus.COMPLETED,
+        },
+        DebateStatus.ANALYZING: {
+            DebateStatus.RUNNING,
+            DebateStatus.DEBATING,
+            DebateStatus.WAITING,
+            DebateStatus.RETRYING,
+            DebateStatus.CANCELLED,
+            DebateStatus.FAILED,
+        },
+        DebateStatus.DEBATING: {
+            DebateStatus.RUNNING,
+            DebateStatus.JUDGING,
+            DebateStatus.WAITING,
+            DebateStatus.RETRYING,
+            DebateStatus.CANCELLED,
+            DebateStatus.FAILED,
+        },
+        DebateStatus.JUDGING: {
+            DebateStatus.COMPLETED,
+            DebateStatus.WAITING,
+            DebateStatus.RETRYING,
+            DebateStatus.CANCELLED,
+            DebateStatus.FAILED,
+        },
+        DebateStatus.WAITING: {DebateStatus.RUNNING, DebateStatus.ANALYZING, DebateStatus.DEBATING, DebateStatus.RETRYING, DebateStatus.CANCELLED, DebateStatus.FAILED},
+        DebateStatus.RETRYING: {DebateStatus.RUNNING, DebateStatus.ANALYZING, DebateStatus.DEBATING, DebateStatus.JUDGING, DebateStatus.CANCELLED, DebateStatus.FAILED},
+        DebateStatus.FAILED: {DebateStatus.RETRYING, DebateStatus.CANCELLED},
+        DebateStatus.CANCELLED: {DebateStatus.RETRYING},
+        DebateStatus.COMPLETED: set(),
+        DebateStatus.CRITIQUING: {DebateStatus.REBUTTING, DebateStatus.JUDGING, DebateStatus.FAILED},
+        DebateStatus.REBUTTING: {DebateStatus.JUDGING, DebateStatus.FAILED},
+    }
     
     def __init__(self, repository: Optional[DebateRepository] = None):
         self._repository = repository or (
@@ -108,20 +154,39 @@ class DebateService:
         session = await self._repository.get_session(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
+        if session.status == DebateStatus.COMPLETED:
+            existed = await self._repository.get_result(session_id)
+            if existed:
+                return existed
+        if session.status == DebateStatus.CANCELLED:
+            raise RuntimeError(f"Session {session_id} is cancelled")
         
-        # 更新状态
-        session.status = DebateStatus.ANALYZING
-        session.updated_at = datetime.utcnow()
+        trace_id = str(session.context.get("trace_id") or "").strip() or new_trace_id("deb")
+        session.context["trace_id"] = trace_id
+        session.context["is_cancel_requested"] = False
+        await self._transition_status(
+            session,
+            DebateStatus.RUNNING,
+            event_callback=event_callback,
+            phase="running",
+            trace_id=trace_id,
+        )
+        await self._transition_status(
+            session,
+            DebateStatus.ANALYZING,
+            event_callback=event_callback,
+            phase=DebatePhase.ANALYSIS.value,
+            trace_id=trace_id,
+        )
         await context_manager.init_session_context(session_id, session.context)
         event_log: List[Dict[str, Any]] = []
 
         async def _emit_and_record(event: Dict[str, Any]) -> None:
-            if not event.get("timestamp"):
-                event["timestamp"] = datetime.utcnow().isoformat()
+            payload = enrich_event(event, trace_id=trace_id)
             event_log.append(
                 {
                     "timestamp": datetime.utcnow().isoformat(),
-                    "event": event,
+                    "event": payload,
                 }
             )
             if len(event_log) > 500:
@@ -130,13 +195,14 @@ class DebateService:
             session.context["event_log"] = event_log
             session.updated_at = datetime.utcnow()
             await self._repository.save_session(session)
-            await self._emit_event(event_callback, event)
+            await self._emit_event(event_callback, payload)
 
         await _emit_and_record(
             {
                 "type": "session_started",
                 "session_id": session_id,
                 "status": session.status.value,
+                "phase": DebatePhase.ANALYSIS.value,
             }
         )
         
@@ -173,7 +239,13 @@ class DebateService:
             
             # ========== 模块2: AI辩论分析 ==========
             logger.info("ai_debate_started", session_id=session_id)
-            session.status = DebateStatus.DEBATING
+            await self._transition_status(
+                session,
+                DebateStatus.DEBATING,
+                event_callback=_emit_and_record,
+                phase="debating",
+                trace_id=trace_id,
+            )
             await _emit_and_record(
                 {
                     "type": "phase_changed",
@@ -181,13 +253,57 @@ class DebateService:
                     "status": session.status.value,
                 }
             )
-            
-            debate_result = await self._execute_ai_debate(
-                session.context,
-                assets,
-                event_callback=_emit_and_record,
-                session_id=session_id,
-            )
+
+            max_attempts = 2
+            attempt = 0
+            debate_result: Dict[str, Any] = {}
+            while attempt < max_attempts:
+                if bool(session.context.get("is_cancel_requested")):
+                    raise asyncio.CancelledError("session cancel requested")
+                try:
+                    debate_result = await self._execute_ai_debate(
+                        session.context,
+                        assets,
+                        event_callback=_emit_and_record,
+                        session_id=session_id,
+                    )
+                    session.llm_session_id = getattr(ai_debate_orchestrator, "session_id", None)
+                    break
+                except Exception as exc:
+                    attempt += 1
+                    if attempt >= max_attempts:
+                        raise
+                    await self._transition_status(
+                        session,
+                        DebateStatus.RETRYING,
+                        event_callback=_emit_and_record,
+                        phase="debating",
+                        trace_id=trace_id,
+                    )
+                    await _emit_and_record(
+                        {
+                            "type": "debate_retry_scheduled",
+                            "phase": "debating",
+                            "attempt": attempt + 1,
+                            "max_attempts": max_attempts,
+                            "error": str(exc),
+                        }
+                    )
+                    await self._transition_status(
+                        session,
+                        DebateStatus.WAITING,
+                        event_callback=_emit_and_record,
+                        phase="waiting",
+                        trace_id=trace_id,
+                    )
+                    await asyncio.sleep(min(3, 2 ** attempt))
+                    await self._transition_status(
+                        session,
+                        DebateStatus.DEBATING,
+                        event_callback=_emit_and_record,
+                        phase="debating",
+                        trace_id=trace_id,
+                    )
             
             # 更新辩论历史
             session.rounds = [
@@ -220,7 +336,13 @@ class DebateService:
             
             # ========== 模块3: 报告生成 ==========
             logger.info("report_generation_started", session_id=session_id)
-            session.status = DebateStatus.JUDGING
+            await self._transition_status(
+                session,
+                DebateStatus.JUDGING,
+                event_callback=_emit_and_record,
+                phase=DebatePhase.JUDGMENT.value,
+                trace_id=trace_id,
+            )
             await _emit_and_record(
                 {
                     "type": "phase_changed",
@@ -235,11 +357,22 @@ class DebateService:
                 assets,
                 event_callback=_emit_and_record,
             )
+            await self._persist_report_snapshot(
+                report,
+                debate_session_id=session.id,
+                trace_id=trace_id,
+            )
             
             logger.info("report_generation_completed", session_id=session_id)
             
             # 更新会话状态
-            session.status = DebateStatus.COMPLETED
+            await self._transition_status(
+                session,
+                DebateStatus.COMPLETED,
+                event_callback=_emit_and_record,
+                phase="completed",
+                trace_id=trace_id,
+            )
             session.completed_at = datetime.utcnow()
             await _emit_and_record(
                 {
@@ -262,9 +395,37 @@ class DebateService:
             )
             
             return result
-            
+        except asyncio.CancelledError:
+            await self._transition_status(
+                session,
+                DebateStatus.CANCELLED,
+                event_callback=_emit_and_record,
+                phase="cancelled",
+                trace_id=trace_id,
+                force=True,
+            )
+            session.current_phase = None
+            session.context["last_error"] = "session cancelled by request"
+            await _emit_and_record(
+                {
+                    "type": "session_cancelled",
+                    "session_id": session_id,
+                    "status": session.status.value,
+                    "reason": "cancel requested",
+                }
+            )
+            session.context["event_log"] = event_log
+            await self._repository.save_session(session)
+            raise
         except Exception as e:
-            session.status = DebateStatus.FAILED
+            await self._transition_status(
+                session,
+                DebateStatus.FAILED,
+                event_callback=_emit_and_record,
+                phase="failed",
+                trace_id=trace_id,
+                force=True,
+            )
             session.current_phase = None
             session.context["last_error"] = str(e)
             logger.error("debate_failed", session_id=session_id, error=str(e))
@@ -286,6 +447,39 @@ class DebateService:
             session.context["event_log"] = event_log
             await self._repository.save_session(session)
             raise
+
+    async def cancel_session(self, session_id: str, reason: str = "manual_cancel") -> bool:
+        session = await self._repository.get_session(session_id)
+        if not session:
+            return False
+        if session.status in {DebateStatus.COMPLETED, DebateStatus.CANCELLED}:
+            return False
+
+        session.context["is_cancel_requested"] = True
+        session.context["cancel_reason"] = reason
+        session.current_phase = None
+        session.status = DebateStatus.CANCELLED
+        session.updated_at = datetime.utcnow()
+        trace_id = str(session.context.get("trace_id") or "").strip() or new_trace_id("deb")
+        event = enrich_event(
+            {
+                "type": "session_cancelled",
+                "session_id": session_id,
+                "status": session.status.value,
+                "reason": reason,
+                "phase": "cancelled",
+            },
+            trace_id=trace_id,
+        )
+        event_log = session.context.get("event_log")
+        if not isinstance(event_log, list):
+            event_log = []
+        event_log.append({"timestamp": datetime.utcnow().isoformat(), "event": event})
+        if len(event_log) > 500:
+            del event_log[:-500]
+        session.context["event_log"] = event_log
+        await self._repository.save_session(session)
+        return True
     
     async def _collect_assets(
         self,
@@ -377,6 +571,7 @@ class DebateService:
             "dev_assets": assets.get("dev_assets", []),
             "design_assets": assets.get("design_assets", []),
             "interface_mapping": assets.get("interface_mapping", {}),
+            "trace_id": context.get("trace_id"),
         }
         
         # 将配置下发到编排器
@@ -405,6 +600,36 @@ class DebateService:
         maybe_coro = event_callback(event)
         if hasattr(maybe_coro, "__await__"):
             await maybe_coro
+
+    async def _transition_status(
+        self,
+        session: DebateSession,
+        next_status: DebateStatus,
+        event_callback=None,
+        phase: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        force: bool = False,
+    ) -> None:
+        current = session.status
+        allowed = self._STATUS_TRANSITIONS.get(current, set())
+        if not force and next_status != current and next_status not in allowed:
+            raise RuntimeError(f"invalid status transition: {current.value} -> {next_status.value}")
+        session.status = next_status
+        session.updated_at = datetime.utcnow()
+        await self._repository.save_session(session)
+        if event_callback:
+            await self._emit_event(
+                event_callback,
+                enrich_event(
+                    {
+                        "type": "status_changed",
+                        "phase": phase or str(session.current_phase.value if session.current_phase else ""),
+                        "from_status": current.value,
+                        "status": next_status.value,
+                    },
+                    trace_id=trace_id or str(session.context.get("trace_id") or "").strip() or new_trace_id("deb"),
+                ),
+            )
     
     async def _generate_report(
         self,
@@ -433,6 +658,28 @@ class DebateService:
         )
         
         return report
+
+    async def _persist_report_snapshot(
+        self,
+        report: Dict[str, Any],
+        debate_session_id: str,
+        trace_id: Optional[str] = None,
+    ) -> None:
+        try:
+            # 延迟导入，避免 debate_service <-> report_service 的模块循环依赖。
+            from app.services.report_service import report_service
+
+            await report_service.save_generated_report(
+                report=report,
+                debate_session_id=debate_session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "report_snapshot_persist_failed",
+                debate_session_id=debate_session_id,
+                error=str(exc),
+                trace_id=trace_id,
+            )
     
     async def get_result(self, session_id: str) -> Optional[DebateResult]:
         """获取辩论结果"""

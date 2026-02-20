@@ -64,7 +64,7 @@ multi-agent-cli_v2/
 │   │   │
 │   │   ├── core/                     # 核心组件
 │   │   │   ├── __init__.py
-│   │   │   ├── opencode_client.py    # OpenCode SDK 封装
+│   │   │   ├── autogen_client.py    # AutoGen Runtime 封装
 │   │   │   ├── model_router.py       # 模型路由
 │   │   │   ├── cache.py              # 缓存管理
 │   │   │   └── security.py           # 安全组件

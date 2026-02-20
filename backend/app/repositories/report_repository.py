@@ -144,6 +144,7 @@ class FileReportRepository(ReportRepository):
 
     def _persist_to_disk(self) -> None:
         payload = {
+            "schema_version": 1,
             "reports": self._reports,
             "share_tokens": self._share_tokens,
         }

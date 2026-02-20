@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     LLM_MODEL: Optional[str] = Field(default=None)
     LLM_MAX_TURNS: Optional[int] = None
     LLM_TIMEOUT: Optional[int] = None
+    LLM_CONNECT_TIMEOUT: Optional[int] = None
+    LLM_REQUEST_TIMEOUT: Optional[int] = None
+    LLM_TOTAL_TIMEOUT: Optional[int] = None
+    LLM_MAX_RETRIES: int = 2
     LLM_PROVIDER_ID: Optional[str] = None
     # 兼容历史字段
     CLAUDE_MODEL: str = Field(default="kimi-k2.5")
@@ -73,6 +77,7 @@ class Settings(BaseSettings):
     DEBATE_MAX_ROUNDS: int = 1
     DEBATE_CONSENSUS_THRESHOLD: float = 0.85
     DEBATE_TIMEOUT: int = 600  # 10 minutes
+    DEBATE_ENABLE_CRITIQUE: bool = False
 
     # 安全配置
     SECRET_KEY: str = Field(default="your-secret-key-change-in-production")
@@ -165,6 +170,18 @@ class Settings(BaseSettings):
     @property
     def llm_timeout(self) -> int:
         return self.LLM_TIMEOUT or self.OPENCODE_TIMEOUT
+
+    @property
+    def llm_connect_timeout(self) -> int:
+        return self.LLM_CONNECT_TIMEOUT or 10
+
+    @property
+    def llm_request_timeout(self) -> int:
+        return self.LLM_REQUEST_TIMEOUT or min(self.llm_timeout, 120)
+
+    @property
+    def llm_total_timeout(self) -> int:
+        return self.LLM_TOTAL_TIMEOUT or max(30, self.llm_timeout)
 
     @property
     def llm_provider_id(self) -> str:

@@ -130,6 +130,7 @@ class FileDebateRepository(DebateRepository):
 
     def _persist_to_disk(self) -> None:
         payload = {
+            "schema_version": 1,
             "sessions": [item.model_dump(mode="json") for item in self._sessions.values()],
             "results": [item.model_dump(mode="json") for item in self._results.values()],
         }

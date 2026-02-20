@@ -49,6 +49,9 @@ type DialogueMessage = {
   agentName: string;
   side: 'agent' | 'system';
   phase: string;
+  eventType: string;
+  traceId: string;
+  latencyMs?: number;
   status: 'streaming' | 'done' | 'error';
   summary: string;
   detail: string;
@@ -77,6 +80,10 @@ const IncidentPage: React.FC = () => {
   const [eventRecords, setEventRecords] = useState<EventRecord[]>([]);
   const [streamedMessageText, setStreamedMessageText] = useState<Record<string, string>>({});
   const [expandedDialogueIds, setExpandedDialogueIds] = useState<Record<string, boolean>>({});
+  const [eventFilterAgent, setEventFilterAgent] = useState<string>('all');
+  const [eventFilterPhase, setEventFilterPhase] = useState<string>('all');
+  const [eventFilterType, setEventFilterType] = useState<string>('all');
+  const [eventSearchText, setEventSearchText] = useState<string>('');
   const [running, setRunning] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const pollingRef = useRef(false);
@@ -246,7 +253,7 @@ const IncidentPage: React.FC = () => {
       status = 'done';
       summary = normalizeInlineText(messageText || '资产采集完成');
       detail = normalizeMarkdownText(toDisplayText(data) || messageText || '资产采集阶段已完成');
-    } else if (kind === 'phase_changed' || kind === 'snapshot' || kind === 'session_started') {
+    } else if (kind === 'phase_changed' || kind === 'snapshot' || kind === 'session_started' || kind === 'ws_ack' || kind === 'ws_control') {
       summary = normalizeInlineText(messageText || '状态更新');
       detail = normalizeMarkdownText(messageText || '');
     } else {
@@ -259,6 +266,9 @@ const IncidentPage: React.FC = () => {
       agentName,
       side,
       phase,
+      eventType: kind,
+      traceId: firstTextValue(data, ['trace_id']) || '-',
+      latencyMs: typeof data.latency_ms === 'number' ? Number(data.latency_ms) : undefined,
       status,
       summary,
       detail,
@@ -309,6 +319,10 @@ const IncidentPage: React.FC = () => {
         return `责任田映射完成 domain=${String(data?.domain || '-')} aggregate=${String(data?.aggregate || '-')}`;
       case 'session_failed':
         return `会话失败 ${error}`.trim();
+      case 'ws_ack':
+        return `控制指令确认 ${String(data?.message || '')}`.trim();
+      case 'ws_control':
+        return `控制指令 ${String(data?.action || '-')}`.trim();
       default:
         return `事件: ${kind}`;
     }
@@ -544,6 +558,10 @@ const IncidentPage: React.FC = () => {
             setRunning(false);
             return;
           }
+          if (payload.type === 'ack') {
+            appendEvent('ws_ack', `控制指令已确认: ${payload.message || '-'}`, payload);
+            return;
+          }
           if (payload.type === 'error') {
             appendEvent('error', `错误: ${payload.message || 'unknown'}`, payload);
             setRunning(false);
@@ -570,6 +588,41 @@ const IncidentPage: React.FC = () => {
       message.error(e?.message || '启动失败');
       setRunning(false);
     }
+  };
+
+  const sendWsControl = async (action: 'cancel' | 'resume') => {
+    if (!sessionId) return;
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(action);
+      appendEvent(
+        'ws_control',
+        action === 'cancel' ? '已发送取消指令' : '已发送恢复指令',
+        { type: 'ws_control', action },
+      );
+      return;
+    }
+
+    if (action === 'cancel') {
+      try {
+        const res = await debateApi.cancel(sessionId);
+        if (res.cancelled) {
+          appendEvent('session_cancelled', '会话已取消', {
+            type: 'session_cancelled',
+            phase: 'cancelled',
+            status: 'cancelled',
+          });
+          setRunning(false);
+          message.success('会话已取消');
+        } else {
+          message.info('当前无可取消的运行任务');
+        }
+      } catch (e: any) {
+        message.error(e?.response?.data?.detail || e?.message || '取消失败');
+      }
+      return;
+    }
+    void startRealtimeDebate();
   };
 
   const regenerateReport = async () => {
@@ -662,8 +715,41 @@ const IncidentPage: React.FC = () => {
     [stageEvents],
   );
 
+  const filteredDialogueMessages = useMemo(() => {
+    const q = eventSearchText.trim().toLowerCase();
+    return dialogueMessages.filter((msg) => {
+      if (eventFilterAgent !== 'all' && msg.agentName !== eventFilterAgent) return false;
+      if (eventFilterPhase !== 'all' && (msg.phase || '-') !== eventFilterPhase) return false;
+      if (eventFilterType !== 'all' && msg.eventType !== eventFilterType) return false;
+      if (!q) return true;
+      const haystack = `${msg.summary}\n${msg.detail}\n${msg.eventType}\n${msg.traceId}`.toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [dialogueMessages, eventFilterAgent, eventFilterPhase, eventFilterType, eventSearchText]);
+
+  const filteredStageEvents = useMemo(() => {
+    const includeIds = new Set(filteredDialogueMessages.map((item) => item.id));
+    return stageEvents.filter((row) => includeIds.has(row.id));
+  }, [stageEvents, filteredDialogueMessages]);
+
+  const eventFilterOptions = useMemo(() => {
+    const agentSet = new Set<string>();
+    const phaseSet = new Set<string>();
+    const typeSet = new Set<string>();
+    dialogueMessages.forEach((item) => {
+      if (item.agentName) agentSet.add(item.agentName);
+      phaseSet.add(item.phase || '-');
+      typeSet.add(item.eventType);
+    });
+    return {
+      agents: ['all', ...Array.from(agentSet).sort()],
+      phases: ['all', ...Array.from(phaseSet).sort()],
+      types: ['all', ...Array.from(typeSet).sort()],
+    };
+  }, [dialogueMessages]);
+
   useEffect(() => {
-    const currentIds = new Set(dialogueMessages.map((item) => item.id));
+    const currentIds = new Set(filteredDialogueMessages.map((item) => item.id));
     setStreamedMessageText((prev) => {
       const next: Record<string, string> = {};
       for (const [key, value] of Object.entries(prev)) {
@@ -679,8 +765,8 @@ const IncidentPage: React.FC = () => {
       }
     });
 
-    dialogueMessages.forEach((message, index) => {
-      const isRecent = index >= Math.max(0, dialogueMessages.length - 8);
+    filteredDialogueMessages.forEach((message, index) => {
+      const isRecent = index >= Math.max(0, filteredDialogueMessages.length - 8);
       if (!isRecent) {
         setStreamedMessageText((prev) =>
           prev[message.id] === message.detail ? prev : { ...prev, [message.id]: message.detail },
@@ -716,7 +802,7 @@ const IncidentPage: React.FC = () => {
         });
       }, 18);
     });
-  }, [dialogueMessages]);
+  }, [filteredDialogueMessages]);
 
   const reportSections = useMemo(() => {
     const content = report?.content || '';
@@ -808,12 +894,12 @@ const IncidentPage: React.FC = () => {
   };
 
   const renderDialogueStream = () => {
-    if (dialogueMessages.length === 0) {
-      return <Empty description="暂无事件明细" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
+    if (filteredDialogueMessages.length === 0) {
+      return <Empty description="暂无匹配的事件明细" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
     }
     return (
       <div className="dialogue-stream">
-        {dialogueMessages.map((msg) => {
+        {filteredDialogueMessages.map((msg) => {
           const renderedText = streamedMessageText[msg.id] ?? '';
           const fullText = msg.status === 'streaming' ? renderedText : msg.detail;
           const compactText = buildCompactDetail(fullText || msg.detail);
@@ -833,6 +919,9 @@ const IncidentPage: React.FC = () => {
                 <div className="dialogue-meta">
                   <Text strong>{msg.agentName}</Text>
                   {msg.phase && <Tag style={{ marginLeft: 8 }}>{msg.phase}</Tag>}
+                  <Tag style={{ marginLeft: 8 }}>{msg.eventType}</Tag>
+                  {msg.latencyMs ? <Tag color="blue">{`${msg.latencyMs}ms`}</Tag> : null}
+                  {msg.traceId && msg.traceId !== '-' ? <Tag>{`trace:${msg.traceId}`}</Tag> : null}
                   <Text type="secondary" style={{ marginLeft: 8 }}>
                     {msg.timeText}
                   </Text>
@@ -871,6 +960,55 @@ const IncidentPage: React.FC = () => {
       </div>
     );
   };
+
+  const renderEventFilters = () => (
+    <Space wrap style={{ marginBottom: 12 }}>
+      <Select
+        style={{ width: 180 }}
+        value={eventFilterAgent}
+        onChange={setEventFilterAgent}
+        options={eventFilterOptions.agents.map((value) => ({
+          label: value === 'all' ? '全部Agent' : value,
+          value,
+        }))}
+      />
+      <Select
+        style={{ width: 180 }}
+        value={eventFilterPhase}
+        onChange={setEventFilterPhase}
+        options={eventFilterOptions.phases.map((value) => ({
+          label: value === 'all' ? '全部阶段' : value,
+          value,
+        }))}
+      />
+      <Select
+        style={{ width: 220 }}
+        value={eventFilterType}
+        onChange={setEventFilterType}
+        options={eventFilterOptions.types.map((value) => ({
+          label: value === 'all' ? '全部事件类型' : value,
+          value,
+        }))}
+      />
+      <Input
+        allowClear
+        style={{ width: 260 }}
+        value={eventSearchText}
+        placeholder="搜索摘要/细节/trace_id"
+        onChange={(e) => setEventSearchText(e.target.value)}
+      />
+      <Button
+        onClick={() => {
+          setEventFilterAgent('all');
+          setEventFilterPhase('all');
+          setEventFilterType('all');
+          setEventSearchText('');
+        }}
+      >
+        重置筛选
+      </Button>
+    </Space>
+  );
 
   const switchToStep = async (nextStep: number) => {
     if (nextStep > 0 && !incidentId) {
@@ -998,19 +1136,26 @@ const IncidentPage: React.FC = () => {
               <Button type="primary" icon={<PlayCircleOutlined />} loading={running} onClick={startRealtimeDebate}>
                 启动实时辩论
               </Button>
+              <Space style={{ marginLeft: 12 }}>
+                <Button danger onClick={() => void sendWsControl('cancel')}>
+                  取消分析
+                </Button>
+                <Button onClick={() => void sendWsControl('resume')}>恢复分析</Button>
+              </Space>
             </Card>
 
             <Card title="事件明细（流式对话）">
+              {renderEventFilters()}
               {renderDialogueStream()}
             </Card>
 
             <Card title="资产与辩论过程记录">
-              {stageEvents.length === 0 ? (
+              {filteredStageEvents.length === 0 ? (
                 <Text type="secondary">尚无过程记录</Text>
               ) : (
                 <Timeline
-                  items={stageEvents.map((row) => ({
-                    children: `${row.timeText} [${row.kind}] ${row.text}`,
+                  items={filteredStageEvents.map((row) => ({
+                    children: `${row.timeText} [${row.kind}] ${row.text}${String((asRecord(row.data).trace_id || '')) ? ` trace=${String(asRecord(row.data).trace_id || '')}` : ''}`,
                   }))}
                 />
               )}
@@ -1021,6 +1166,7 @@ const IncidentPage: React.FC = () => {
         {activeStep === 2 && (
           <Space direction="vertical" size="large" style={{ width: '100%' }}>
             <Card title="事件明细（流式对话）">
+              {renderEventFilters()}
               {renderDialogueStream()}
             </Card>
 
@@ -1057,12 +1203,12 @@ const IncidentPage: React.FC = () => {
             </Card>
 
             <Card title="分析过程记录">
-              {stageEvents.length === 0 ? (
+              {filteredStageEvents.length === 0 ? (
                 <Text type="secondary">尚无过程记录</Text>
               ) : (
                 <Timeline
-                  items={stageEvents.map((row) => ({
-                    children: `${row.timeText} [${row.kind}] ${row.text}`,
+                  items={filteredStageEvents.map((row) => ({
+                    children: `${row.timeText} [${row.kind}] ${row.text}${String((asRecord(row.data).trace_id || '')) ? ` trace=${String(asRecord(row.data).trace_id || '')}` : ''}`,
                   }))}
                 />
               )}
@@ -1073,6 +1219,7 @@ const IncidentPage: React.FC = () => {
         {activeStep === 3 && (
           <Space direction="vertical" size="large" style={{ width: '100%' }}>
             <Card title="事件明细（流式对话）">
+              {renderEventFilters()}
               {renderDialogueStream()}
             </Card>
 
@@ -1096,6 +1243,22 @@ const IncidentPage: React.FC = () => {
                 <Empty description="暂无报告" image={Empty.PRESENTED_IMAGE_SIMPLE} />
               ) : (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                  <Card size="small" title="报告摘要">
+                    <Descriptions column={2} size="small">
+                      <Descriptions.Item label="根因摘要">
+                        {debateResult?.root_cause || '待生成'}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="置信度">
+                        {debateResult ? `${(debateResult.confidence * 100).toFixed(1)}%` : '-'}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="影响服务">
+                        {(debateResult?.impact_analysis?.affected_services || []).join(', ') || '-'}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="风险等级">
+                        {debateResult?.risk_assessment?.risk_level || '-'}
+                      </Descriptions.Item>
+                    </Descriptions>
+                  </Card>
                   <Descriptions column={2} size="small">
                     <Descriptions.Item label="报告ID">{report.report_id}</Descriptions.Item>
                     <Descriptions.Item label="生成时间">
@@ -1126,12 +1289,12 @@ const IncidentPage: React.FC = () => {
             </Card>
 
             <Card title="报告阶段过程记录">
-              {stageEvents.length === 0 ? (
+              {filteredStageEvents.length === 0 ? (
                 <Text type="secondary">尚无过程记录</Text>
               ) : (
                 <Timeline
-                  items={stageEvents.map((row) => ({
-                    children: `${row.timeText} [${row.kind}] ${row.text}`,
+                  items={filteredStageEvents.map((row) => ({
+                    children: `${row.timeText} [${row.kind}] ${row.text}${String((asRecord(row.data).trace_id || '')) ? ` trace=${String(asRecord(row.data).trace_id || '')}` : ''}`,
                   }))}
                 />
               )}

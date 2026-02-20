@@ -65,11 +65,11 @@ class ReportGenerationService:
         
         # 根据格式生成报告
         if format == "markdown":
-            report = self._format_as_markdown(report_content, incident, debate_result)
+            report = self._format_as_markdown(report_content, incident, debate_result, assets)
         elif format == "html":
-            report = self._format_as_html(report_content, incident, debate_result)
+            report = self._format_as_html(report_content, incident, debate_result, assets)
         else:
-            report = self._format_as_json(report_content, incident, debate_result)
+            report = self._format_as_json(report_content, incident, debate_result, assets)
         
         # 保存报告
         report_path = await self._save_report(report, incident.get("id"), format)
@@ -118,6 +118,7 @@ class ReportGenerationService:
                     parts=[{"type": "text", "text": prompt}],
                     model=settings.default_model_config,
                     max_tokens=1400,
+                    format={"type": "json_schema", "schema": self._report_json_schema()},
                     trace_callback=event_callback,
                     trace_context={
                         "phase": "report_generation",
@@ -140,9 +141,10 @@ class ReportGenerationService:
                         "response_preview": result.get("content", "")[:1200],
                     },
                 )
-                # 解析 AI 生成的报告结构
-                parsed = self._parse_ai_report(result["content"])
-                return self._normalize_report_structure(parsed, incident, debate_result)
+                structured = result.get("structured") if isinstance(result, dict) else None
+                if not isinstance(structured, dict) or not structured:
+                    structured = self._parse_ai_report(result["content"])
+                return self._normalize_report_structure(structured, incident, debate_result, assets)
             
             await self._emit_event(
                 event_callback,
@@ -296,11 +298,34 @@ class ReportGenerationService:
             return parsed
         raise RuntimeError("报告生成 LLM 输出不是有效 JSON")
 
+    def _report_json_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "executive_summary": {"type": "object"},
+                "incident_overview": {"type": "object"},
+                "root_cause_analysis": {"type": "object"},
+                "impact_assessment": {"type": "object"},
+                "recommendations": {"type": "object"},
+                "lessons_learned": {"type": "array"},
+                "appendix": {"type": "object"},
+            },
+            "required": [
+                "executive_summary",
+                "incident_overview",
+                "root_cause_analysis",
+                "impact_assessment",
+                "recommendations",
+                "appendix",
+            ],
+        }
+
     def _normalize_report_structure(
         self,
         report: Dict[str, Any],
         incident: Dict[str, Any],
         debate_result: Dict[str, Any],
+        assets: Dict[str, Any],
     ) -> Dict[str, Any]:
         """确保报告结构完整，并补齐关键字段。"""
         report = report if isinstance(report, dict) else {}
@@ -380,6 +405,19 @@ class ReportGenerationService:
                 f"共执行 {debate_result.get('round_control', {}).get('executed_rounds', 0)} 轮辩论，"
                 f"置信度 {debate_result.get('confidence', 0) * 100:.1f}%"
             )
+        interface_mapping = assets.get("interface_mapping", {}) if isinstance(assets, dict) else {}
+        merged["appendix"]["responsibility_mapping"] = {
+            "matched": interface_mapping.get("matched", False),
+            "domain": interface_mapping.get("domain"),
+            "aggregate": interface_mapping.get("aggregate"),
+            "owner_team": interface_mapping.get("owner_team"),
+            "owner": interface_mapping.get("owner"),
+            "matched_endpoint": interface_mapping.get("matched_endpoint"),
+            "db_tables": interface_mapping.get("db_tables", []),
+            "code_artifacts": interface_mapping.get("code_artifacts", []),
+            "design_ref": interface_mapping.get("design_ref"),
+            "guidance": interface_mapping.get("guidance", []),
+        }
 
         return merged
 
@@ -424,7 +462,8 @@ class ReportGenerationService:
             "lessons_learned": [],
             "appendix": {
                 "related_assets": [],
-                "debate_summary": ""
+                "debate_summary": "",
+                "responsibility_mapping": {},
             }
         }
     
@@ -432,7 +471,8 @@ class ReportGenerationService:
         self,
         report_content: Dict[str, Any],
         incident: Dict[str, Any],
-        debate_result: Dict[str, Any]
+        debate_result: Dict[str, Any],
+        assets: Dict[str, Any],
     ) -> str:
         """格式化为 Markdown"""
         exec_summary = report_content.get("executive_summary", {})
@@ -441,6 +481,7 @@ class ReportGenerationService:
         impact = report_content.get("impact_assessment", {})
         recommendations = report_content.get("recommendations", {})
         
+        responsibility = (report_content.get("appendix", {}) or {}).get("responsibility_mapping", {})
         md = f"""# 故障分析报告
 
 ## 执行摘要
@@ -525,7 +566,10 @@ class ReportGenerationService:
 ### 6.2 AI 辩论摘要
 {report_content.get('appendix', {}).get('debate_summary', '无')}
 
-### 6.3 置信度
+### 6.3 责任田映射
+{self._format_responsibility_mapping_markdown(responsibility, assets)}
+
+### 6.4 置信度
 {debate_result.get('confidence', 0) * 100:.1f}%
 
 ---
@@ -538,9 +582,11 @@ class ReportGenerationService:
         self,
         report_content: Dict[str, Any],
         incident: Dict[str, Any],
-        debate_result: Dict[str, Any]
+        debate_result: Dict[str, Any],
+        assets: Dict[str, Any],
     ) -> str:
         """格式化为 HTML"""
+        _ = assets
         exec_summary = report_content.get("executive_summary", {})
         
         html = f"""<!DOCTYPE html>
@@ -650,7 +696,8 @@ class ReportGenerationService:
         self,
         report_content: Dict[str, Any],
         incident: Dict[str, Any],
-        debate_result: Dict[str, Any]
+        debate_result: Dict[str, Any],
+        assets: Dict[str, Any],
     ) -> str:
         """格式化为 JSON"""
         report = {
@@ -659,6 +706,12 @@ class ReportGenerationService:
                 "incident_id": incident.get("id"),
                 "confidence": debate_result.get("confidence", 0),
                 "generator": "SRE Debate Platform"
+            },
+            "assets_summary": {
+                "runtime_assets_count": len(assets.get("runtime_assets", [])) if isinstance(assets, dict) else 0,
+                "dev_assets_count": len(assets.get("dev_assets", [])) if isinstance(assets, dict) else 0,
+                "design_assets_count": len(assets.get("design_assets", [])) if isinstance(assets, dict) else 0,
+                "interface_mapping": (assets.get("interface_mapping", {}) if isinstance(assets, dict) else {}),
             },
             **report_content
         }
@@ -733,6 +786,33 @@ class ReportGenerationService:
             action = item.get("action", "未知行动") if isinstance(item, dict) else str(item)
             html += f'<div class="action-item">{action}</div>'
         return html
+
+    def _format_responsibility_mapping_markdown(self, mapping: Dict[str, Any], assets: Dict[str, Any]) -> str:
+        mapping = mapping if isinstance(mapping, dict) else {}
+        interface_mapping = assets.get("interface_mapping", {}) if isinstance(assets, dict) else {}
+        merged = {**interface_mapping, **mapping}
+        matched = "是" if merged.get("matched") else "否"
+        endpoint = merged.get("matched_endpoint") or {}
+        endpoint_text = "-"
+        if isinstance(endpoint, dict):
+            endpoint_text = f"{endpoint.get('method', '-')} {endpoint.get('path', '-')}"
+        code_items = merged.get("code_artifacts") or []
+        db_tables = merged.get("db_tables") or []
+        guidance = merged.get("guidance") or []
+        lines = [
+            f"- 命中: {matched}",
+            f"- 领域: {merged.get('domain') or '-'}",
+            f"- 聚合根: {merged.get('aggregate') or '-'}",
+            f"- 责任团队: {merged.get('owner_team') or '-'}",
+            f"- 负责人: {merged.get('owner') or '-'}",
+            f"- 命中接口: {endpoint_text}",
+            f"- 代码资产数: {len(code_items)}",
+            f"- 数据表: {', '.join(db_tables) if db_tables else '-'}",
+        ]
+        if guidance:
+            lines.append("- 未命中补充建议:")
+            lines.extend([f"  - {str(item)}" for item in guidance[:5]])
+        return "\n".join(lines)
     
     def _format_assets(self, assets: List[Any]) -> str:
         """格式化资产列表"""

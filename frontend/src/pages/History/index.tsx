@@ -9,9 +9,15 @@ const { Title } = Typography;
 
 const statusColor: Record<string, string> = {
   pending: 'default',
+  running: 'processing',
   analyzing: 'processing',
   debating: 'blue',
+  waiting: 'gold',
+  retrying: 'orange',
   resolved: 'success',
+  completed: 'success',
+  failed: 'error',
+  cancelled: 'default',
   closed: 'default',
 };
 
@@ -42,6 +48,17 @@ const HistoryPage: React.FC = () => {
   useEffect(() => {
     loadIncidents();
   }, []);
+
+  useEffect(() => {
+    const hasActive = items.some((item) =>
+      ['pending', 'running', 'analyzing', 'debating', 'waiting', 'retrying'].includes(item.status),
+    );
+    if (!hasActive) return;
+    const timer = window.setInterval(() => {
+      void loadIncidents();
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [items]);
 
   const columns: ColumnsType<Incident> = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 140 },

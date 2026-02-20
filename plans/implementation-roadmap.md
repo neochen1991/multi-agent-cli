@@ -3,13 +3,13 @@
 ## 1. 项目概览
 
 ### 1.1 项目目标
-基于 OpenCode SDK 构建多模型辩论式 SRE 智能体平台，实现三态资产融合与 AI 技术委员会决策系统。
+基于 AutoGen Runtime 构建多模型辩论式 SRE 智能体平台，实现三态资产融合与 AI 技术委员会决策系统。
 
 ### 1.2 技术栈确认
 | 层级 | 技术选型 |
 |------|----------|
 | 后端框架 | Python 3.11+ / FastAPI |
-| AI SDK | OpenCode SDK |
+| AI SDK | AutoGen Runtime |
 | 前端框架 | React 18 / TypeScript / Vite |
 | UI 组件库 | Ant Design 5.x |
 | 主数据库 | PostgreSQL 15 |
@@ -60,10 +60,10 @@ backend/
 │   │   └── report.py
 │   ├── services/
 │   │   ├── __init__.py
-│   │   └── opencode_service.py # OpenCode 服务
+│   │   └── autogen_service.py # AutoGen 服务
 │   └── core/
 │       ├── __init__.py
-│       ├── opencode_client.py  # OpenCode SDK 封装
+│       ├── autogen_client.py  # AutoGen Runtime 封装
 │       └── model_router.py     # 模型路由
 ├── tests/
 │   ├── __init__.py
@@ -88,7 +88,7 @@ dependencies = [
     "uvicorn[standard]>=0.27.0",
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
-    "opencode-sdk>=0.1.0",
+    "pyautogen>=0.1.0",
     "sqlalchemy>=2.0.0",
     "asyncpg>=0.29.0",
     "redis>=5.0.0",
@@ -140,26 +140,26 @@ async def health_check():
     return {"status": "healthy"}
 ```
 
-### 2.2 OpenCode SDK 集成
+### 2.2 AutoGen Runtime 集成
 
 #### 任务清单
-- [ ] 封装 OpenCode 客户端
+- [ ] 封装 AutoGen 客户端
 - [ ] 实现模型路由器
 - [ ] 创建 Agent 基类
 - [ ] 创建 Tool 基类
 
 #### 核心代码
 
-**app/core/opencode_client.py**
+**app/core/autogen_client.py**
 ```python
 from typing import Dict, Any, List, Optional
-from opencode import OpenCode, Agent, Tool, Flow
+from autogen import AutoGen, Agent, Tool, Flow
 from app.config import settings
 
-class OpenCodeClient:
-    """OpenCode SDK 封装客户端"""
+class AutoGenClient:
+    """AutoGen Runtime 封装客户端"""
     
-    _instance: Optional["OpenCodeClient"] = None
+    _instance: Optional["AutoGenClient"] = None
     
     def __new__(cls):
         if cls._instance is None:
@@ -171,7 +171,7 @@ class OpenCodeClient:
         if self._initialized:
             return
         
-        self.client = OpenCode(api_key=settings.OPENCODE_API_KEY)
+        self.client = AutoGen(api_key=settings.LLM_API_KEY)
         self._agents: Dict[str, Agent] = {}
         self._initialized = True
     
@@ -216,9 +216,9 @@ class OpenCodeClient:
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
-from opencode import Agent, Tool
+from autogen import Agent, Tool
 
-from app.core.opencode_client import OpenCodeClient
+from app.core.autogen_client import AutoGenClient
 
 class AgentResult(BaseModel):
     """Agent 执行结果"""
@@ -258,7 +258,7 @@ class BaseAgent(ABC):
     async def get_agent(self) -> Agent:
         """获取或创建 Agent 实例"""
         if self._agent is None:
-            client = OpenCodeClient()
+            client = AutoGenClient()
             self._agent = await client.create_agent(
                 name=self.name,
                 model=self.model,
@@ -366,7 +366,7 @@ CREATE TABLE case_library (
 **app/agents/log_agent.py**
 ```python
 from typing import Dict, Any, List
-from opencode import tool
+from autogen import tool
 
 from app.agents.base import BaseAgent, AgentResult
 
@@ -440,7 +440,7 @@ class LogAgent(BaseAgent):
 **app/agents/code_agent.py**
 ```python
 from typing import Dict, Any, List
-from opencode import tool
+from autogen import tool
 
 from app.agents.base import BaseAgent, AgentResult
 from app.tools.git_tool import GitTool
@@ -703,7 +703,7 @@ class DebateOrchestrator:
 import re
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
-from opencode import tool
+from autogen import tool
 
 @dataclass
 class ParsedException:
@@ -1151,7 +1151,7 @@ CMD ["nginx", "-g", "daemon off;"]
 
 | 风险 | 影响 | 应对措施 |
 |------|------|----------|
-| OpenCode SDK API 变更 | 高 | 封装 SDK 调用，便于适配 |
+| AutoGen Runtime API 变更 | 高 | 封装 SDK 调用，便于适配 |
 | 模型响应延迟 | 中 | 异步处理，WebSocket 推送 |
 | 辩论无法达成共识 | 中 | 设置最大轮次，人工介入 |
 | 敏感信息泄露 | 高 | 日志脱敏，权限控制 |
