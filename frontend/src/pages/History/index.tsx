@@ -2,8 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { Button, Card, Space, Table, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useNavigate } from 'react-router-dom';
-import dayjs from 'dayjs';
 import { incidentApi, type Incident } from '@/services/api';
+import { formatBeijingDateTime } from '@/utils/dateTime';
 
 const { Title } = Typography;
 
@@ -66,7 +66,7 @@ const HistoryPage: React.FC = () => {
       dataIndex: 'created_at',
       key: 'created_at',
       width: 180,
-      render: (value: string) => dayjs(value).format('YYYY-MM-DD HH:mm:ss'),
+      render: (value: string) => formatBeijingDateTime(value),
     },
     {
       title: '操作',

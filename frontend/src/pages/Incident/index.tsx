@@ -30,6 +30,7 @@ import {
   type DebateResult,
   type Report,
 } from '@/services/api';
+import { formatBeijingDateTime, formatBeijingTime } from '@/utils/dateTime';
 
 const { TextArea } = Input;
 const { Paragraph, Text } = Typography;
@@ -95,11 +96,10 @@ const IncidentPage: React.FC = () => {
   const appendEvent = (kind: string, text: string, data?: unknown) => {
     const dataRecord = asRecord(data);
     const eventTsRaw = String(dataRecord.timestamp || '').trim();
-    const eventTs = eventTsRaw ? new Date(eventTsRaw) : null;
     const displayTime =
-      eventTs && !Number.isNaN(eventTs.getTime())
-        ? eventTs.toLocaleString()
-        : new Date().toLocaleString();
+      eventTsRaw
+        ? formatBeijingDateTime(eventTsRaw)
+        : formatBeijingDateTime(new Date());
     const record: EventRecord = {
       id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
       timeText: displayTime,
@@ -375,7 +375,7 @@ const IncidentPage: React.FC = () => {
             const kind = typeof event.type === 'string' ? event.type : 'event';
             return {
               id: `persisted_${idx}_${ts || kind}`,
-              timeText: ts ? new Date(ts).toLocaleTimeString() : '--:--:--',
+              timeText: ts ? formatBeijingTime(ts) : '--:--:--',
               kind,
               text: formatEventText(kind, event),
               data: event,
@@ -1099,7 +1099,7 @@ const IncidentPage: React.FC = () => {
                   <Descriptions column={2} size="small">
                     <Descriptions.Item label="报告ID">{report.report_id}</Descriptions.Item>
                     <Descriptions.Item label="生成时间">
-                      {new Date(report.generated_at).toLocaleString()}
+                      {formatBeijingDateTime(report.generated_at)}
                     </Descriptions.Item>
                     <Descriptions.Item label="格式">{report.format}</Descriptions.Item>
                     <Descriptions.Item label="关联会话">{report.debate_session_id || '-'}</Descriptions.Item>
