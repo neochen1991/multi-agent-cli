@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     DEBATE_REVIEW_MAX_TOKENS: int = 420
     DEBATE_JUDGE_MAX_TOKENS: int = 900
     DEBATE_REPORT_MAX_TOKENS: int = 700
+    DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION: bool = True
 
     # 安全配置
     SECRET_KEY: str = Field(default="your-secret-key-change-in-production")

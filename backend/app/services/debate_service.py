@@ -280,12 +280,18 @@ class DebateService:
                         event_callback=_emit_and_record,
                         session_id=session_id,
                     )
+                    if settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION and not self._has_effective_llm_conclusion(
+                        debate_result
+                    ):
+                        raise RuntimeError("未获得有效大模型结论，已拒绝生成兜底结论")
                     session.llm_session_id = getattr(ai_debate_orchestrator, "session_id", None)
                     break
                 except Exception as exc:
                     attempt += 1
                     if attempt >= max_attempts:
                         error_text = str(exc).strip() or exc.__class__.__name__
+                        if settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION:
+                            raise RuntimeError(f"未获得有效大模型结论: {error_text}") from exc
                         debate_result = self._build_degraded_debate_result(
                             context=session.context,
                             assets=assets,
@@ -651,6 +657,48 @@ class DebateService:
         
         return result
 
+    def _has_effective_llm_conclusion(self, debate_result: Dict[str, Any]) -> bool:
+        if not isinstance(debate_result, dict):
+            return False
+        final_judgment = debate_result.get("final_judgment")
+        if not isinstance(final_judgment, dict):
+            return False
+        root_cause = final_judgment.get("root_cause")
+        root_cause = root_cause if isinstance(root_cause, dict) else {}
+        summary = str(root_cause.get("summary") or "").strip()
+        if not summary:
+            return False
+        lowered_summary = summary.lower()
+        if "需要进一步分析" in summary or "further analysis" in lowered_summary:
+            return False
+        if summary in {"待评估", "待确认", "unknown", "待分析"}:
+            return False
+
+        history = debate_result.get("debate_history")
+        if not isinstance(history, list) or not history:
+            return False
+
+        for row in history:
+            if not isinstance(row, dict):
+                continue
+            agent_name = str(row.get("agent_name") or "")
+            if agent_name == "JudgeAgent":
+                continue
+            output = row.get("output_content")
+            output = output if isinstance(output, dict) else {}
+            conclusion = str(output.get("conclusion") or "").strip()
+            if not conclusion:
+                continue
+            if "调用超时，已降级继续" in conclusion or "调用异常，已降级继续" in conclusion:
+                continue
+            try:
+                confidence = float(row.get("confidence") or output.get("confidence") or 0.0)
+            except Exception:
+                confidence = 0.0
+            if confidence >= 0.55:
+                return True
+        return False
+
     def _build_degraded_debate_result(
         self,
         context: Dict[str, Any],
@@ -696,7 +744,7 @@ class DebateService:
                 "evidence_chain": [
                     {
                         "type": "system",
-                        "description": f"LLM 调用失败，触发降级策略：{error_text[:220]}",
+                        "description": f"LLM 调用超时或异常，触发降级策略：{error_text[:220]}",
                         "source": "degrade_fallback",
                         "location": endpoint_text,
                         "strength": "medium",
@@ -832,7 +880,104 @@ class DebateService:
     
     async def get_result(self, session_id: str) -> Optional[DebateResult]:
         """获取辩论结果"""
-        return await self._repository.get_result(session_id)
+        result = await self._repository.get_result(session_id)
+        if not result:
+            return None
+        if not self._is_placeholder_root_cause(result.root_cause):
+            return result
+
+        session = await self._repository.get_session(session_id)
+        if not session or not session.rounds:
+            return result
+
+        best = self._pick_best_round_conclusion(session.rounds)
+        if not best:
+            return result
+
+        result.root_cause = str(best.get("conclusion") or result.root_cause)
+        result.root_cause_category = str(best.get("category") or result.root_cause_category or "multi_agent_inference")
+        try:
+            result.confidence = max(float(result.confidence or 0.0), float(best.get("confidence") or 0.0))
+        except Exception:
+            pass
+
+        if not result.evidence_chain:
+            evidence_items = []
+            for item in best.get("evidence_chain") or []:
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                evidence_items.append(
+                    EvidenceItem(
+                        type="analysis",
+                        description=text[:220],
+                        source=str(best.get("agent_name") or "ai_debate"),
+                        location=None,
+                        strength="medium",
+                    )
+                )
+            result.evidence_chain = evidence_items
+
+        if not result.fix_recommendation:
+            result.fix_recommendation = FixRecommendation(
+                summary=str(best.get("conclusion") or "")[:260],
+                steps=[{"summary": str(best.get("summary") or best.get("conclusion") or "")[:180]}],
+                code_changes_required=bool(best.get("agent_name") in {"CodeAgent", "RebuttalAgent"}),
+                rollback_recommended=False,
+                testing_requirements=["回归故障链路", "压力与超时测试"],
+            )
+
+        await self._repository.save_result(result)
+        return result
+
+    def _is_placeholder_root_cause(self, root_cause: Optional[str]) -> bool:
+        text = str(root_cause or "").strip()
+        if not text:
+            return True
+        if "需要进一步分析" in text:
+            return True
+        if text in {"待评估", "待确认", "unknown", "Unknown"}:
+            return True
+        return False
+
+    def _pick_best_round_conclusion(self, rounds: List[DebateRound]) -> Optional[Dict[str, Any]]:
+        best: Optional[Dict[str, Any]] = None
+        best_score = -1.0
+        category_map = {
+            "CodeAgent": "code_or_resource",
+            "LogAgent": "runtime_log",
+            "DomainAgent": "domain_mapping",
+            "CriticAgent": "peer_review",
+            "RebuttalAgent": "peer_review",
+        }
+        for round_ in rounds:
+            if round_.agent_name == "JudgeAgent":
+                continue
+            output = round_.output_content if isinstance(round_.output_content, dict) else {}
+            conclusion = str(output.get("conclusion") or "").strip()
+            if not conclusion:
+                continue
+            if "调用超时，已降级继续" in conclusion or "调用异常，已降级继续" in conclusion:
+                continue
+            if "需要进一步分析" in conclusion:
+                continue
+            try:
+                score = float(round_.confidence or output.get("confidence") or 0.0)
+            except Exception:
+                score = 0.0
+            if score < 0.55:
+                continue
+            if score > best_score:
+                best_score = score
+                best = {
+                    "agent_name": round_.agent_name,
+                    "summary": str(output.get("analysis") or "")[:200],
+                    "conclusion": conclusion[:300],
+                    "confidence": score,
+                    "evidence_chain": output.get("evidence_chain") if isinstance(output.get("evidence_chain"), list) else [],
+                    "category": category_map.get(round_.agent_name, "multi_agent_inference"),
+                }
+        return best
     
     async def list_sessions(
         self,

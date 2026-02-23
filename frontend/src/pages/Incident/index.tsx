@@ -85,7 +85,7 @@ const IncidentPage: React.FC = () => {
   const [eventFilterType, setEventFilterType] = useState<string>('all');
   const [eventSearchText, setEventSearchText] = useState<string>('');
   const [running, setRunning] = useState(false);
-  const [debateMaxRounds, setDebateMaxRounds] = useState<number>(2);
+  const [debateMaxRounds, setDebateMaxRounds] = useState<number>(1);
   const wsRef = useRef<WebSocket | null>(null);
   const pollingRef = useRef(false);
   const runningRef = useRef(false);
@@ -334,19 +334,32 @@ const IncidentPage: React.FC = () => {
         return `AutoGen请求开始 [${phase || stage || '-'}] ${agent || ''} ${model || ''}`.trim();
       case 'autogen_call_completed':
         return `AutoGen请求完成 [${phase || stage || '-'}] ${agent || ''} ${model || ''} ${latency}`.trim();
+      case 'autogen_call_timeout':
+        return `AutoGen请求超时，已自动降级继续 [${phase || stage || '-'}] ${agent || ''}`.trim();
       case 'autogen_call_failed':
-        return `AutoGen请求失败 [${phase || stage || '-'}] ${agent || ''} ${model || ''} ${error}`.trim();
+        if (error.toLowerCase().includes('timeout')) {
+          return `AutoGen请求超时，已自动降级继续 [${phase || stage || '-'}] ${agent || ''}`.trim();
+        }
+        return `AutoGen请求异常，已自动降级继续 [${phase || stage || '-'}] ${agent || ''} ${model || ''} ${error}`.trim();
       case 'llm_call_started':
         return `辩论LLM开始 [${phase || '-'}] ${agent || ''} ${model || ''}`.trim();
       case 'llm_call_completed':
         return `辩论LLM完成 [${phase || '-'}] ${agent || ''} ${model || ''} ${latency}`.trim();
+      case 'llm_call_timeout':
+        return `辩论LLM超时，已自动降级继续 [${phase || '-'}] ${agent || ''}`.trim();
       case 'llm_call_failed':
-        return `辩论LLM失败 [${phase || '-'}] ${agent || ''} ${error}`.trim();
+        if (error.toLowerCase().includes('timeout')) {
+          return `辩论LLM超时，已自动降级继续 [${phase || '-'}] ${agent || ''}`.trim();
+        }
+        return `辩论LLM异常，已自动降级继续 [${phase || '-'}] ${agent || ''} ${error}`.trim();
       case 'llm_http_request':
         return `LLM请求参数 [${phase || stage || '-'}] ${agent || ''} ${model || ''}`.trim();
       case 'llm_http_response':
         return `LLM响应参数 [${phase || stage || '-'}] ${agent || ''} ${model || ''}`.trim();
       case 'llm_http_error':
+        if (error.toLowerCase().includes('timeout')) {
+          return `LLM响应超时 [${phase || stage || '-'}] ${agent || ''}，系统将自动降级`.trim();
+        }
         return `LLM响应异常 [${phase || stage || '-'}] ${agent || ''} ${error || String(data?.status_code || '')}`.trim();
       case 'llm_stream_delta':
         return `LLM流式输出 [${phase || stage || '-'}] ${agent || ''} chunk=${String(data?.chunk_index || '-')}/${String(data?.chunk_total || '-')}`.trim();
@@ -363,6 +376,8 @@ const IncidentPage: React.FC = () => {
         return `LLM请求失败 [${phase || stage || '-'}] ${error}`.trim();
       case 'asset_interface_mapping_completed':
         return `责任田映射完成 domain=${String(data?.domain || '-')} aggregate=${String(data?.aggregate || '-')}`;
+      case 'agent_round_skipped':
+        return `Agent轮次已降级 [${phase || '-'}] ${agent || ''} ${String(data?.reason || '')}`.trim();
       case 'session_failed':
         return `会话失败 ${error}`.trim();
       case 'ws_ack':

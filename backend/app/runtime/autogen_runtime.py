@@ -57,7 +57,7 @@ class AutoGenRuntimeOrchestrator:
     STREAM_MAX_CHUNKS = 16
     JUDGE_FALLBACK_SUMMARY = "需要进一步分析"
 
-    def __init__(self, consensus_threshold: float = 0.85, max_rounds: int = 2):
+    def __init__(self, consensus_threshold: float = 0.85, max_rounds: int = 1):
         self.consensus_threshold = consensus_threshold
         self.max_rounds = max_rounds
         self.min_rounds = 1
@@ -393,12 +393,8 @@ class AutoGenRuntimeOrchestrator:
             output_schema = self._judge_output_schema()
             return (
                 f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{self.max_rounds} 轮，阶段={spec.phase}。\n"
-                "必须基于其他 Agent 结论进行综合裁决，禁止脱离同伴观点独立下结论。\n"
-                "要求：\n"
-                "1) decision_rationale.key_factors 至少引用 2 个不同 Agent 的观点；\n"
-                "2) final_judgment.evidence_chain 至少包含 2 条 peer 证据（source 中带 agent 名）；\n"
-                "3) 仅输出 JSON，字段尽量精炼，避免长段落；\n"
-                "4) action_items 最多 3 条，decision_rationale.reasoning 控制在 120 字内。\n\n"
+                "必须基于其他 Agent 结论进行综合裁决，禁止独立发挥。\n"
+                "仅输出 JSON，字段尽量精炼，action_items 最多 3 条。\n\n"
                 f"故障上下文：\n```json\n{self._to_compact_json(context)}\n```\n\n"
                 f"同伴结论：\n```json\n{self._to_compact_json(peer_items)}\n```\n\n"
                 f"输出格式：\n```json\n{self._to_compact_json(output_schema)}\n```"
@@ -469,8 +465,8 @@ class AutoGenRuntimeOrchestrator:
                 {
                     "agent": card.agent_name,
                     "phase": card.phase,
-                    "summary": card.summary[:90],
-                    "conclusion": card.conclusion[:120],
+                    "summary": card.summary[:72],
+                    "conclusion": card.conclusion[:100],
                     "confidence": round(float(card.confidence), 3),
                 }
             )
@@ -507,6 +503,7 @@ class AutoGenRuntimeOrchestrator:
         loop_round: int,
         error_text: str,
     ) -> DebateTurn:
+        friendly_reason = self._friendly_degrade_reason(error_text)
         await self._emit_event(
             {
                 "type": "agent_round_skipped",
@@ -515,16 +512,16 @@ class AutoGenRuntimeOrchestrator:
                 "agent_role": spec.role,
                 "loop_round": loop_round,
                 "round_number": round_number,
-                "reason": error_text,
+                "reason": friendly_reason,
                 "session_id": self.session_id,
             }
         )
         fallback_output = (
-            self._normalize_judge_output({}, f"{spec.name} 调用失败: {error_text}")
+            self._normalize_judge_output({}, f"{spec.name} {friendly_reason}")
             if spec.name == "JudgeAgent"
             else self._normalize_normal_output(
                 {},
-                f"{spec.name} 调用失败，保留已有证据继续: {error_text}",
+                f"{spec.name} {friendly_reason}",
             )
         )
         now = datetime.utcnow()
@@ -540,6 +537,20 @@ class AutoGenRuntimeOrchestrator:
             started_at=now,
             completed_at=now,
         )
+
+    @staticmethod
+    def _friendly_degrade_reason(error_text: str) -> str:
+        normalized = str(error_text or "").strip().lower()
+        if "timeout" in normalized:
+            return "调用超时，已降级继续"
+        if (
+            "429" in normalized
+            or "toomanyrequests" in normalized
+            or "serveroverloaded" in normalized
+            or "rate limit" in normalized
+        ):
+            return "调用被限流，已降级继续"
+        return "调用异常，已降级继续"
 
     async def _record_turn(
         self,
@@ -768,7 +779,7 @@ class AutoGenRuntimeOrchestrator:
                     compact_parsed[str(key)] = self._compact_value(value)
 
         return {
-            "log_excerpt": str(context.get("log_excerpt") or "")[:420],
+            "log_excerpt": str(context.get("log_excerpt") or "")[:240],
             "parsed_data": compact_parsed,
             "interface_mapping": {
                 "matched": bool(interface_mapping.get("matched")),
@@ -982,11 +993,11 @@ class AutoGenRuntimeOrchestrator:
             }
         )
 
-        default_timeout = float(max(10, min(settings.llm_total_timeout, 35)))
+        default_timeout = float(max(8, min(settings.llm_total_timeout, 24)))
         timeout_plan = [default_timeout]
         if spec.name == "JudgeAgent":
             timeout_plan = [
-                float(max(20, min(default_timeout, 28))),
+                float(max(14, min(default_timeout, 20))),
                 default_timeout,
             ]
 
@@ -1107,10 +1118,11 @@ class AutoGenRuntimeOrchestrator:
                 last_exc = exc
                 latency_ms = round((perf_counter() - started_clock) * 1000, 2)
                 error_text = str(exc).strip() or exc.__class__.__name__
+                is_timeout = isinstance(exc, asyncio.TimeoutError) or "timeout" in error_text.lower()
                 if settings.LLM_FAILFAST_ON_RATE_LIMIT and self._is_rate_limited_error(error_text):
                     error_text = f"LLM_RATE_LIMITED: {error_text}"
                 retryable = attempt_idx < len(timeout_plan) and (
-                    isinstance(exc, asyncio.TimeoutError) or "TimeoutError" in error_text
+                    is_timeout
                 )
                 if retryable:
                     await self._emit_event(
@@ -1142,7 +1154,7 @@ class AutoGenRuntimeOrchestrator:
                 )
                 await self._emit_event(
                     {
-                        "type": "autogen_call_failed",
+                        "type": "autogen_call_timeout" if is_timeout else "autogen_call_failed",
                         "phase": spec.phase,
                         "agent_name": spec.name,
                         "model": model_name,
@@ -1154,7 +1166,7 @@ class AutoGenRuntimeOrchestrator:
                 )
                 await self._emit_event(
                     {
-                        "type": "llm_call_failed",
+                        "type": "llm_call_timeout" if is_timeout else "llm_call_failed",
                         "phase": spec.phase,
                         "agent_name": spec.name,
                         "model": model_name,
@@ -1207,10 +1219,13 @@ class AutoGenRuntimeOrchestrator:
 
     def _agent_max_tokens(self, agent_name: str) -> int:
         if agent_name == "JudgeAgent":
-            return max(320, int(settings.DEBATE_JUDGE_MAX_TOKENS))
+            configured = int(settings.DEBATE_JUDGE_MAX_TOKENS)
+            return max(320, min(configured, 560))
         if agent_name in {"CriticAgent", "RebuttalAgent"}:
-            return max(220, int(settings.DEBATE_REVIEW_MAX_TOKENS))
-        return max(180, int(settings.DEBATE_ANALYSIS_MAX_TOKENS))
+            configured = int(settings.DEBATE_REVIEW_MAX_TOKENS)
+            return max(220, min(configured, 380))
+        configured = int(settings.DEBATE_ANALYSIS_MAX_TOKENS)
+        return max(180, min(configured, 320))
 
     def _run_agent_once(self, spec: AgentSpec, prompt: str, max_tokens: int) -> str:
         if not settings.LLM_API_KEY:
@@ -1231,7 +1246,6 @@ class AutoGenRuntimeOrchestrator:
             "temperature": 0.15,
             "timeout": max(10, min(settings.llm_timeout, 45)),
             "max_tokens": max(128, int(max_tokens or 256)),
-            "max_retries": max(0, int(settings.LLM_MAX_RETRIES)),
         }
 
         agent = autogen.AssistantAgent(
@@ -1575,6 +1589,120 @@ class AutoGenRuntimeOrchestrator:
             "raw_text": raw_content[:1400],
         }
 
+    def _is_placeholder_summary(self, summary: str) -> bool:
+        text = str(summary or "").strip()
+        if not text:
+            return True
+        lowered = text.lower()
+        placeholders = {
+            self.JUDGE_FALLBACK_SUMMARY,
+            "待评估",
+            "待确认",
+            "unknown",
+            "待分析",
+        }
+        if text in placeholders:
+            return True
+        if "需要进一步分析" in text:
+            return True
+        if "further analysis" in lowered:
+            return True
+        return False
+
+    def _synthesize_final_from_history(self, history_cards: List[AgentEvidence]) -> Optional[Dict[str, Any]]:
+        candidates: List[AgentEvidence] = []
+        for card in history_cards:
+            if card.agent_name == "JudgeAgent":
+                continue
+            if self._is_placeholder_summary(card.conclusion):
+                continue
+            if not str(card.conclusion or "").strip():
+                continue
+            candidates.append(card)
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: float(item.confidence or 0.0), reverse=True)
+        best = candidates[0]
+        second = candidates[1] if len(candidates) > 1 else None
+
+        category_map = {
+            "CodeAgent": "code_or_resource",
+            "LogAgent": "runtime_log",
+            "DomainAgent": "domain_mapping",
+            "CriticAgent": "peer_review",
+            "RebuttalAgent": "peer_review",
+        }
+        category = category_map.get(best.agent_name, "multi_agent_inference")
+        root_confidence = max(0.55, min(0.95, float(best.confidence or 0.6)))
+
+        evidence_chain: List[Dict[str, Any]] = []
+        raw_evidence = best.evidence_chain if isinstance(best.evidence_chain, list) else []
+        for item in raw_evidence[:3]:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            evidence_chain.append(
+                {
+                    "type": "analysis",
+                    "description": text[:220],
+                    "source": best.agent_name,
+                    "location": None,
+                    "strength": "strong" if root_confidence >= 0.8 else "medium",
+                }
+            )
+        if not evidence_chain:
+            evidence_chain.append(
+                {
+                    "type": "analysis",
+                    "description": str(best.summary or best.conclusion)[:220],
+                    "source": best.agent_name,
+                    "location": None,
+                    "strength": "medium",
+                }
+            )
+
+        key_factors = [f"{best.agent_name}: {str(best.summary or best.conclusion)[:140]}"]
+        if second:
+            key_factors.append(f"{second.agent_name}: {str(second.summary or second.conclusion)[:140]}")
+
+        return {
+            "confidence": root_confidence,
+            "final_judgment": {
+                "root_cause": {
+                    "summary": str(best.conclusion)[:260],
+                    "category": category,
+                    "confidence": root_confidence,
+                },
+                "evidence_chain": evidence_chain,
+                "fix_recommendation": {
+                    "summary": str(best.conclusion)[:260],
+                    "steps": [str(best.summary or best.conclusion)[:180]],
+                    "code_changes_required": best.agent_name in {"CodeAgent", "RebuttalAgent"},
+                    "rollback_recommended": False,
+                    "testing_requirements": ["回归故障链路", "压力与超时测试"],
+                },
+                "impact_analysis": {
+                    "affected_services": [],
+                    "business_impact": "以实际流量与接口失败率为准",
+                    "affected_users": "接口调用用户",
+                },
+                "risk_assessment": {
+                    "risk_level": "high" if root_confidence < 0.75 else "medium",
+                    "risk_factors": ["JudgeAgent 超时，采用高置信 Agent 结论合成最终结论"],
+                    "mitigation_suggestions": ["补充关键指标后可再次触发全量辩论"],
+                },
+            },
+            "decision_rationale": {
+                "key_factors": key_factors,
+                "reasoning": "JudgeAgent 未在时限内返回，系统已基于成功 Agent 的高置信结论自动收敛。",
+            },
+            "action_items": [
+                {"priority": 1, "action": str(best.conclusion)[:180], "owner": "待确认"},
+            ],
+            "responsible_team": {"team": "待确认", "owner": "待确认"},
+        }
+
     def _build_final_payload(
         self,
         history_cards: List[AgentEvidence],
@@ -1620,6 +1748,19 @@ class AutoGenRuntimeOrchestrator:
             decision_rationale = {"key_factors": [], "reasoning": "缺少 Judge 输出"}
             action_items = []
             responsible_team = {"team": "待确认", "owner": "待确认"}
+
+        root_cause = final_judgment.get("root_cause") if isinstance(final_judgment, dict) else {}
+        root_summary = ""
+        if isinstance(root_cause, dict):
+            root_summary = str(root_cause.get("summary") or "").strip()
+        if self._is_placeholder_summary(root_summary):
+            synthesized = self._synthesize_final_from_history(history_cards)
+            if synthesized:
+                confidence = float(synthesized.get("confidence") or confidence or 0.0)
+                final_judgment = synthesized.get("final_judgment") or final_judgment
+                decision_rationale = synthesized.get("decision_rationale") or decision_rationale
+                action_items = synthesized.get("action_items") or action_items
+                responsible_team = synthesized.get("responsible_team") or responsible_team
 
         dissenting_opinions = [
             {

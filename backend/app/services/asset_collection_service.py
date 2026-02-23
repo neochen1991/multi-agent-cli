@@ -266,11 +266,15 @@ class AssetCollectionService:
             
         except Exception as e:
             error_text = str(e).strip() or e.__class__.__name__
-            logger.error("ai_log_parse_failed", error=error_text)
+            is_timeout = isinstance(e, asyncio.TimeoutError) or "timeout" in error_text.lower()
+            (logger.warning if is_timeout else logger.error)(
+                "ai_log_parse_timeout" if is_timeout else "ai_log_parse_failed",
+                error=error_text,
+            )
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_failed",
+                    "type": "autogen_call_timeout" if is_timeout else "autogen_call_failed",
                     "phase": "asset_analysis",
                     "stage": "runtime_log_parse",
                     "session_id": session.id if "session" in locals() else None,
@@ -518,11 +522,15 @@ class AssetCollectionService:
             
         except Exception as e:
             error_text = str(e).strip() or e.__class__.__name__
-            logger.error("ai_code_parse_failed", error=error_text)
+            is_timeout = isinstance(e, asyncio.TimeoutError) or "timeout" in error_text.lower()
+            (logger.warning if is_timeout else logger.error)(
+                "ai_code_parse_timeout" if is_timeout else "ai_code_parse_failed",
+                error=error_text,
+            )
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_failed",
+                    "type": "autogen_call_timeout" if is_timeout else "autogen_call_failed",
                     "phase": "asset_analysis",
                     "stage": "dev_code_parse",
                     "session_id": session.id if "session" in locals() else None,
@@ -761,11 +769,15 @@ class AssetCollectionService:
             
         except Exception as e:
             error_text = str(e).strip() or e.__class__.__name__
-            logger.error("ai_ddd_parse_failed", error=error_text)
+            is_timeout = isinstance(e, asyncio.TimeoutError) or "timeout" in error_text.lower()
+            (logger.warning if is_timeout else logger.error)(
+                "ai_ddd_parse_timeout" if is_timeout else "ai_ddd_parse_failed",
+                error=error_text,
+            )
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_failed",
+                    "type": "autogen_call_timeout" if is_timeout else "autogen_call_failed",
                     "phase": "asset_analysis",
                     "stage": "design_ddd_parse",
                     "session_id": session.id if "session" in locals() else None,

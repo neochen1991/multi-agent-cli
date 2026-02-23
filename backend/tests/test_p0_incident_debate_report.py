@@ -270,6 +270,7 @@ def test_collect_assets_tolerates_none_metadata_and_parsed_data(monkeypatch):
 def test_execute_debate_degrades_when_llm_unavailable(monkeypatch):
     _reset_state()
     client = TestClient(app)
+    monkeypatch.setattr(settings, "DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION", False)
 
     monkeypatch.setattr(
         report_service_module.report_generation_service,

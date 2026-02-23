@@ -288,7 +288,6 @@ class AutoGenClient:
             ],
             "temperature": 0.2,
             "timeout": max(10, min(settings.llm_timeout, 45)),
-            "max_retries": max(0, int(settings.LLM_MAX_RETRIES)),
         }
         if isinstance(max_tokens, int) and max_tokens > 0:
             llm_config["max_tokens"] = max_tokens
@@ -620,6 +619,7 @@ class AutoGenClient:
             self._circuit_breaker.record_failure()
             latency_ms = round((perf_counter() - started_at) * 1000, 2)
             error_text = str(exc).strip() or exc.__class__.__name__
+            is_timeout = isinstance(exc, asyncio.TimeoutError) or "timeout" in error_text.lower()
             if settings.LLM_FAILFAST_ON_RATE_LIMIT and self._is_rate_limited_error(error_text):
                 error_text = f"LLM_RATE_LIMITED: {error_text}"
 
@@ -641,7 +641,7 @@ class AutoGenClient:
             await self._emit_trace_event(
                 trace_callback,
                 {
-                    "type": "autogen_call_failed",
+                    "type": "autogen_call_timeout" if is_timeout else "autogen_call_failed",
                     "phase": trace_context.get("phase"),
                     "stage": trace_context.get("stage"),
                     "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
@@ -655,7 +655,7 @@ class AutoGenClient:
             await self._emit_trace_event(
                 trace_callback,
                 {
-                    "type": "llm_call_failed",
+                    "type": "llm_call_timeout" if is_timeout else "llm_call_failed",
                     "phase": trace_context.get("phase"),
                     "stage": trace_context.get("stage"),
                     "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
@@ -666,9 +666,9 @@ class AutoGenClient:
                     "trace_id": trace_id,
                 },
             )
-
-            logger.error(
-                "llm_request_failed",
+            log_method = logger.warning if is_timeout else logger.error
+            log_method(
+                "llm_request_timeout" if is_timeout else "llm_request_failed",
                 backend="pyautogen",
                 model=model_name,
                 session_id=session_id,

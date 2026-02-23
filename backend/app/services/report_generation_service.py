@@ -54,37 +54,60 @@ class ReportGenerationService:
             incident_id=incident.get("id"),
             format=format
         )
-        
-        # 使用 AI 生成报告内容（失败时自动降级，避免整个会话失败）
-        try:
-            report_content = await self._generate_report_with_ai(
-                incident,
-                debate_result,
-                assets,
-                event_callback=event_callback,
-            )
-        except Exception as e:
-            error_text = str(e).strip() or e.__class__.__name__
-            logger.warning(
-                "report_generation_degraded_to_fallback",
+
+        skip_reason = self._report_ai_skip_reason(debate_result)
+        if skip_reason:
+            logger.info(
+                "report_generation_ai_skipped",
                 incident_id=incident.get("id"),
-                error=error_text,
+                reason=skip_reason,
             )
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "report_generation_degraded",
+                    "type": "report_generation_ai_skipped",
                     "phase": "report_generation",
-                    "error": error_text,
-                    "message": "报告 LLM 超时或失败，已自动降级为模板报告",
+                    "reason": skip_reason,
+                    "message": "当前结论已降级，直接生成模板报告",
                 },
             )
             report_content = self._build_fallback_report_content(
                 incident=incident,
                 debate_result=debate_result,
                 assets=assets,
-                error_text=error_text,
+                error_text=skip_reason,
             )
+        else:
+            # 使用 AI 生成报告内容（失败时自动降级，避免整个会话失败）
+            try:
+                report_content = await self._generate_report_with_ai(
+                    incident,
+                    debate_result,
+                    assets,
+                    event_callback=event_callback,
+                )
+            except Exception as e:
+                error_text = str(e).strip() or e.__class__.__name__
+                logger.warning(
+                    "report_generation_degraded_to_fallback",
+                    incident_id=incident.get("id"),
+                    error=error_text,
+                )
+                await self._emit_event(
+                    event_callback,
+                    {
+                        "type": "report_generation_degraded",
+                        "phase": "report_generation",
+                        "error": error_text,
+                        "message": "报告 LLM 超时或失败，已自动降级为模板报告",
+                    },
+                )
+                report_content = self._build_fallback_report_content(
+                    incident=incident,
+                    debate_result=debate_result,
+                    assets=assets,
+                    error_text=error_text,
+                )
         
         # 根据格式生成报告
         if format == "markdown":
@@ -138,8 +161,8 @@ class ReportGenerationService:
             last_error: Optional[Exception] = None
             # 两次尝试：第一次更短超时，第二次使用标准超时
             timeout_plan = [
-                max(12, min(settings.llm_timeout, 20)),
-                max(18, min(settings.llm_total_timeout, 35)),
+                max(10, min(settings.llm_timeout, 16)),
+                max(14, min(settings.llm_total_timeout, 24)),
             ]
             for attempt_idx, call_timeout in enumerate(timeout_plan, start=1):
                 try:
@@ -160,7 +183,7 @@ class ReportGenerationService:
                             session_id=session.id,
                             parts=[{"type": "text", "text": prompt}],
                             model=settings.default_model_config,
-                            max_tokens=max(320, min(int(settings.DEBATE_REPORT_MAX_TOKENS), 900)),
+                            max_tokens=max(280, min(int(settings.DEBATE_REPORT_MAX_TOKENS), 560)),
                             format={"type": "json_schema", "schema": self._report_json_schema()},
                             trace_callback=event_callback,
                             trace_context={
@@ -213,11 +236,15 @@ class ReportGenerationService:
             
         except Exception as e:
             error_text = str(e).strip() or e.__class__.__name__
-            logger.error("ai_report_generation_failed", error=error_text)
+            is_timeout = isinstance(e, asyncio.TimeoutError) or "timeout" in error_text.lower()
+            (logger.warning if is_timeout else logger.error)(
+                "ai_report_generation_timeout" if is_timeout else "ai_report_generation_failed",
+                error=error_text,
+            )
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_failed",
+                    "type": "autogen_call_timeout" if is_timeout else "autogen_call_failed",
                     "phase": "report_generation",
                     "stage": "report_ai_generation",
                     "session_id": session.id if "session" in locals() else None,
@@ -308,7 +335,7 @@ class ReportGenerationService:
             },
         }
 
-        return f"""作为技术报告撰写专家，请根据以下信息生成一份专业的故障分析报告：
+        return f"""作为技术报告撰写专家，请根据以下信息生成一份专业故障分析报告，内容简洁、中文输出、避免长段落：
 
 ## 故障事件
 ```json
@@ -324,42 +351,30 @@ class ReportGenerationService:
 ```json
 {json.dumps(assets_summary, ensure_ascii=False, separators=(",", ":"), default=str)}
 ```
+请只输出一个 JSON 对象，且包含以下顶层字段：
+executive_summary、incident_overview、root_cause_analysis、impact_assessment、recommendations、lessons_learned、appendix。"""
 
-请输出中文且精炼，避免冗长。列表项建议不超过 5 条。必须仅返回 JSON，结构如下：
-{{
-    "executive_summary": {{
-        "title": "",
-        "severity": "",
-        "root_cause_summary": "",
-        "resolution_status": ""
-    }},
-    "incident_overview": {{
-        "description": "",
-        "timeline": [],
-        "affected_services": []
-    }},
-    "root_cause_analysis": {{
-        "primary_cause": "",
-        "contributing_factors": [],
-        "evidence_chain": []
-    }},
-    "impact_assessment": {{
-        "business_impact": "",
-        "technical_impact": "",
-        "affected_users": "",
-        "duration": ""
-    }},
-    "recommendations": {{
-        "immediate_actions": [],
-        "long_term_fixes": [],
-        "prevention_measures": []
-    }},
-    "lessons_learned": [],
-    "appendix": {{
-        "related_assets": [],
-        "debate_summary": ""
-    }}
-}}"""
+    def _report_ai_skip_reason(self, debate_result: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(debate_result, dict):
+            return "辩论结果不可用"
+        final_judgment = debate_result.get("final_judgment")
+        if not isinstance(final_judgment, dict):
+            return "辩论结论为空"
+        root_cause = final_judgment.get("root_cause")
+        root_cause = root_cause if isinstance(root_cause, dict) else {}
+        summary = str(root_cause.get("summary") or "").strip()
+        category = str(root_cause.get("category") or "").strip().lower()
+        evidence_chain = final_judgment.get("evidence_chain")
+        evidence_len = len(evidence_chain) if isinstance(evidence_chain, list) else 0
+        try:
+            confidence = float(debate_result.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        if summary == "需要进一步分析" and category in {"unknown", ""} and evidence_len == 0:
+            return "辩论结论为兜底结果，跳过报告 LLM"
+        if confidence < 0.45 and evidence_len < 1:
+            return "辩论置信度较低，跳过报告 LLM"
+        return None
 
     def _build_fallback_report_content(
         self,
