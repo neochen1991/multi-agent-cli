@@ -79,7 +79,7 @@ class DebateService:
             DebateStatus.FAILED,
         },
         DebateStatus.WAITING: {DebateStatus.RUNNING, DebateStatus.ANALYZING, DebateStatus.DEBATING, DebateStatus.RETRYING, DebateStatus.CANCELLED, DebateStatus.FAILED},
-        DebateStatus.RETRYING: {DebateStatus.RUNNING, DebateStatus.ANALYZING, DebateStatus.DEBATING, DebateStatus.JUDGING, DebateStatus.CANCELLED, DebateStatus.FAILED},
+        DebateStatus.RETRYING: {DebateStatus.RUNNING, DebateStatus.ANALYZING, DebateStatus.DEBATING, DebateStatus.JUDGING, DebateStatus.WAITING, DebateStatus.CANCELLED, DebateStatus.FAILED},
         DebateStatus.FAILED: {DebateStatus.RETRYING, DebateStatus.CANCELLED},
         DebateStatus.CANCELLED: {DebateStatus.RETRYING},
         DebateStatus.COMPLETED: set(),
@@ -94,7 +94,11 @@ class DebateService:
             else InMemoryDebateRepository()
         )
     
-    async def create_session(self, incident: Incident) -> DebateSession:
+    async def create_session(
+        self,
+        incident: Incident,
+        max_rounds: Optional[int] = None,
+    ) -> DebateSession:
         """
         创建辩论会话
         
@@ -106,16 +110,24 @@ class DebateService:
         """
         session_id = f"deb_{uuid.uuid4().hex[:8]}"
         
+        debate_config: Dict[str, Any] = {}
+        if max_rounds is not None:
+            debate_config["max_rounds"] = max(1, min(8, int(max_rounds)))
+
+        session_context: Dict[str, Any] = {
+            "incident": incident.model_dump(),
+            "log_content": incident.log_content,
+            "exception_stack": incident.exception_stack,
+            "parsed_data": incident.parsed_data,
+        }
+        if debate_config:
+            session_context["debate_config"] = debate_config
+
         session = DebateSession(
             id=session_id,
             incident_id=incident.id,
             status=DebateStatus.PENDING,
-            context={
-                "incident": incident.model_dump(),
-                "log_content": incident.log_content,
-                "exception_stack": incident.exception_stack,
-                "parsed_data": incident.parsed_data,
-            }
+            context=session_context,
         )
         
         await self._repository.save_session(session)
@@ -123,7 +135,8 @@ class DebateService:
         logger.info(
             "debate_session_created",
             session_id=session_id,
-            incident_id=incident.id
+            incident_id=incident.id,
+            max_rounds=debate_config.get("max_rounds"),
         )
         
         return session
@@ -272,7 +285,28 @@ class DebateService:
                 except Exception as exc:
                     attempt += 1
                     if attempt >= max_attempts:
-                        raise
+                        error_text = str(exc).strip() or exc.__class__.__name__
+                        debate_result = self._build_degraded_debate_result(
+                            context=session.context,
+                            assets=assets,
+                            error_text=error_text,
+                        )
+                        await _emit_and_record(
+                            {
+                                "type": "ai_debate_degraded",
+                                "phase": "debating",
+                                "attempt": attempt,
+                                "max_attempts": max_attempts,
+                                "error": error_text,
+                                "reason": "llm_unavailable_or_timeout",
+                            }
+                        )
+                        logger.warning(
+                            "ai_debate_degraded",
+                            session_id=session_id,
+                            error=error_text,
+                        )
+                        break
                     await self._transition_status(
                         session,
                         DebateStatus.RETRYING,
@@ -568,14 +602,23 @@ class DebateService:
         debate_context = {
             "log_content": context.get("log_content", ""),
             "parsed_data": context.get("parsed_data", {}),
+            "runtime_assets": assets.get("runtime_assets", []),
             "dev_assets": assets.get("dev_assets", []),
             "design_assets": assets.get("design_assets", []),
             "interface_mapping": assets.get("interface_mapping", {}),
             "trace_id": context.get("trace_id"),
         }
         
+        debate_config = context.get("debate_config") if isinstance(context.get("debate_config"), dict) else {}
+        configured_rounds = debate_config.get("max_rounds")
+        try:
+            max_rounds = int(configured_rounds) if configured_rounds is not None else int(settings.DEBATE_MAX_ROUNDS)
+        except Exception:
+            max_rounds = int(settings.DEBATE_MAX_ROUNDS)
+        max_rounds = max(1, min(8, max_rounds))
+
         # 将配置下发到编排器
-        ai_debate_orchestrator.max_rounds = settings.DEBATE_MAX_ROUNDS
+        ai_debate_orchestrator.max_rounds = max_rounds
         ai_debate_orchestrator.consensus_threshold = settings.DEBATE_CONSENSUS_THRESHOLD
 
         async def _forward_event(event: Dict[str, Any]):
@@ -586,13 +629,119 @@ class DebateService:
                 )
             await self._emit_event(event_callback, event)
 
+        await self._emit_event(
+            event_callback,
+            {
+                "type": "debate_config_applied",
+                "phase": "debating",
+                "max_rounds": max_rounds,
+                "consensus_threshold": settings.DEBATE_CONSENSUS_THRESHOLD,
+            },
+        )
+
         # 执行辩论流程
-        result = await ai_debate_orchestrator.execute(
-            debate_context,
-            event_callback=_forward_event,
+        debate_timeout = max(30, min(int(settings.DEBATE_TIMEOUT), 300))
+        result = await asyncio.wait_for(
+            ai_debate_orchestrator.execute(
+                debate_context,
+                event_callback=_forward_event,
+            ),
+            timeout=debate_timeout,
         )
         
         return result
+
+    def _build_degraded_debate_result(
+        self,
+        context: Dict[str, Any],
+        assets: Dict[str, Any],
+        error_text: str,
+    ) -> Dict[str, Any]:
+        parsed_data = context.get("parsed_data") if isinstance(context.get("parsed_data"), dict) else {}
+        interface_mapping = assets.get("interface_mapping") if isinstance(assets.get("interface_mapping"), dict) else {}
+        endpoint = interface_mapping.get("matched_endpoint") if isinstance(interface_mapping.get("matched_endpoint"), dict) else {}
+        method = str(endpoint.get("method") or "").strip().upper()
+        path = str(endpoint.get("path") or "").strip()
+        endpoint_text = " ".join([p for p in [method, path] if p]).strip() or "未知接口"
+        exception_type = ""
+        exception_message = ""
+        exceptions = parsed_data.get("exceptions")
+        if isinstance(exceptions, list) and exceptions and isinstance(exceptions[0], dict):
+            exception_type = str(exceptions[0].get("type") or "")
+            exception_message = str(exceptions[0].get("message") or "")
+        if not exception_type:
+            exception_type = str(parsed_data.get("exception_type") or "")
+        if not exception_message:
+            exception_message = str(parsed_data.get("exception_message") or "")
+        summary_tail = "；".join([x for x in [exception_type, exception_message] if x]).strip("；")
+        root_summary = (
+            f"LLM 服务繁忙，已降级为规则分析：{endpoint_text} 存在故障，需结合连接池/事务/慢 SQL 指标进一步确认。"
+        )
+        if summary_tail:
+            root_summary = f"{root_summary} 关键异常：{summary_tail[:160]}"
+
+        owner_team = str(interface_mapping.get("owner_team") or "待确认")
+        owner = str(interface_mapping.get("owner") or "待确认")
+
+        return {
+            "confidence": 0.32,
+            "consensus_reached": False,
+            "executed_rounds": 0,
+            "final_judgment": {
+                "root_cause": {
+                    "summary": root_summary,
+                    "category": "degraded_rule_based",
+                    "confidence": 0.32,
+                },
+                "evidence_chain": [
+                    {
+                        "type": "system",
+                        "description": f"LLM 调用失败，触发降级策略：{error_text[:220]}",
+                        "source": "degrade_fallback",
+                        "location": endpoint_text,
+                        "strength": "medium",
+                    }
+                ],
+                "fix_recommendation": {
+                    "summary": "先进行止血：限流/熔断并补采连接池与慢 SQL 指标，再重跑 AI 分析。",
+                    "steps": [
+                        "启用接口限流与超时熔断，防止故障扩大",
+                        "采集连接池 active/idle/waiting 与慢 SQL 指标",
+                        "完成指标补采后重新触发一次自动分析",
+                    ],
+                    "code_changes_required": False,
+                    "rollback_recommended": False,
+                    "testing_requirements": ["故障链路回放", "连接池压力验证"],
+                },
+                "impact_analysis": {
+                    "affected_services": [str(endpoint.get("service") or "unknown-service")],
+                    "business_impact": "分析阶段出现外部模型限流，自动分析可靠性下降",
+                    "affected_users": "故障接口相关用户",
+                },
+                "risk_assessment": {
+                    "risk_level": "high",
+                    "risk_factors": ["LLM 服务限流", "当前结论为降级结果，证据不足"],
+                    "mitigation_suggestions": [
+                        "降低并发或错峰触发分析任务",
+                        "补采运行指标后重试分析",
+                    ],
+                },
+            },
+            "decision_rationale": {
+                "key_factors": [
+                    "外部 LLM 429/超时触发降级",
+                    "仍命中责任田映射，可输出最小可执行止血建议",
+                ],
+                "reasoning": "为避免会话长时间无响应，系统已自动返回降级结论。",
+            },
+            "action_items": [
+                {"priority": 1, "action": "执行止血策略并观察 15 分钟", "owner": owner_team},
+                {"priority": 2, "action": "补采关键指标后重新分析", "owner": owner},
+            ],
+            "responsible_team": {"team": owner_team, "owner": owner},
+            "dissenting_opinions": [],
+            "debate_history": [],
+        }
 
     async def _emit_event(self, event_callback, event: Dict[str, Any]) -> None:
         if not event_callback:

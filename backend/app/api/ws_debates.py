@@ -9,14 +9,17 @@ import asyncio
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+import structlog
 
 from app.config import settings
 from app.core.security import decode_token
 from app.models.incident import IncidentStatus, IncidentUpdate
+from app.runtime.task_registry import runtime_task_registry
 from app.services.debate_service import debate_service
 from app.services.incident_service import incident_service
 
 router = APIRouter()
+logger = structlog.get_logger()
 
 
 class DebateWebSocketManager:
@@ -79,6 +82,7 @@ ws_manager = DebateWebSocketManager()
 
 async def _run_debate_with_events(session_id: str):
     async def _forward_event(event: Dict[str, Any]):
+        await runtime_task_registry.mark_heartbeat(session_id)
         await ws_manager.broadcast(session_id, {"type": "event", "data": event})
 
     session = await debate_service.get_session(session_id)
@@ -90,6 +94,12 @@ async def _run_debate_with_events(session_id: str):
         return
 
     try:
+        trace_id = str((session.context or {}).get("trace_id") or "").strip()
+        await runtime_task_registry.mark_started(
+            session_id=session_id,
+            task_type="debate",
+            trace_id=trace_id,
+        )
         result = await debate_service.execute_debate(session_id, event_callback=_forward_event)
         await incident_service.update_incident(
             session.incident_id,
@@ -117,8 +127,10 @@ async def _run_debate_with_events(session_id: str):
                 },
             },
         )
+        await runtime_task_registry.mark_done(session_id, status="completed")
     except asyncio.CancelledError:
         await debate_service.cancel_session(session_id, reason="ws_cancel")
+        await runtime_task_registry.mark_done(session_id, status="cancelled")
         await ws_manager.broadcast(
             session_id,
             {
@@ -132,8 +144,11 @@ async def _run_debate_with_events(session_id: str):
             },
         )
     except Exception as e:
+        await runtime_task_registry.mark_done(session_id, status="failed", error=str(e))
+        logger.error("ws_debate_task_failed", session_id=session_id, error=str(e))
         latest = await debate_service.get_session(session_id)
         if latest:
+            task_state = await runtime_task_registry.get(session_id)
             await ws_manager.broadcast(
                 session_id,
                 {
@@ -144,6 +159,7 @@ async def _run_debate_with_events(session_id: str):
                         "status": latest.status.value,
                         "current_round": latest.current_round,
                         "rounds": [r.model_dump(mode="json") for r in latest.rounds],
+                        "task_state": task_state.to_dict() if task_state else None,
                     },
                 },
             )
@@ -174,6 +190,7 @@ async def debate_ws(websocket: WebSocket, session_id: str):
             await websocket.close(code=4404)
             return
 
+        task_state = await runtime_task_registry.get(session_id)
         await websocket.send_json(
             {
                 "type": "snapshot",
@@ -183,12 +200,15 @@ async def debate_ws(websocket: WebSocket, session_id: str):
                     "status": session.status.value,
                     "current_round": session.current_round,
                     "rounds": [r.model_dump(mode="json") for r in session.rounds],
+                    "task_state": task_state.to_dict() if task_state else None,
                 },
             }
         )
 
         auto_start = websocket.query_params.get("auto_start", "true").lower() == "true"
-        if auto_start and session.status.value in {"pending", "running", "analyzing", "debating", "waiting", "retrying"}:
+        running_like_status = {"pending", "running", "analyzing", "debating", "waiting", "retrying"}
+        should_resume = bool(task_state and task_state.status == "running")
+        if auto_start and (session.status.value in running_like_status or should_resume):
             running_task = ws_manager.ensure_running(
                 session_id,
                 lambda: _run_debate_with_events(session_id),
@@ -221,6 +241,7 @@ async def debate_ws(websocket: WebSocket, session_id: str):
             elif message == "snapshot":
                 latest = await debate_service.get_session(session_id)
                 if latest:
+                    task_state = await runtime_task_registry.get(session_id)
                     await websocket.send_json(
                         {
                             "type": "snapshot",
@@ -229,6 +250,7 @@ async def debate_ws(websocket: WebSocket, session_id: str):
                                 "status": latest.status.value,
                                 "current_round": latest.current_round,
                                 "rounds": [r.model_dump(mode="json") for r in latest.rounds],
+                                "task_state": task_state.to_dict() if task_state else None,
                             },
                         }
                     )

@@ -214,7 +214,7 @@ class AssetCollectionService:
             )
             started_at = time.perf_counter()
             # 调用 LLM
-            call_timeout = max(20, min(settings.llm_timeout, 90))
+            call_timeout = max(12, min(settings.llm_total_timeout, 35))
             result = await asyncio.wait_for(
                 autogen_client.send_prompt(
                     session_id=session.id,
@@ -779,45 +779,78 @@ class AssetCollectionService:
     async def _collect_api_specs(self, docs_path: str) -> List[DesignAsset]:
         """采集 API 规范"""
         assets = []
-        
-        # 查找 OpenAPI/Swagger 文件
-        for api_file in Path(docs_path).glob("**/*api*.{json,yaml,yml}"):
-            try:
-                with open(api_file, 'r') as f:
-                    content = f.read()
-                
-                asset = DesignAsset(
-                    id=f"des_api_{api_file.stem}",
-                    type=DesignAssetType.API_SPEC,
-                    name=api_file.name,
-                    content=content,
-                )
-                assets.append(asset)
-            except Exception as e:
-                logger.error("api_spec_collection_failed", error=str(e))
-        
+
+        patterns = [
+            "**/*api*.json",
+            "**/*api*.yaml",
+            "**/*api*.yml",
+            "**/*openapi*.json",
+            "**/*openapi*.yaml",
+            "**/*openapi*.yml",
+            "**/*swagger*.json",
+            "**/*swagger*.yaml",
+            "**/*swagger*.yml",
+        ]
+        seen = set()
+        for pattern in patterns:
+            for api_file in Path(docs_path).glob(pattern):
+                if not api_file.is_file():
+                    continue
+                key = str(api_file.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    with open(api_file, "r", encoding="utf-8") as f:
+                        content = f.read()
+
+                    asset = DesignAsset(
+                        id=f"des_api_{api_file.stem}",
+                        type=DesignAssetType.API_SPEC,
+                        name=api_file.name,
+                        content=content,
+                    )
+                    assets.append(asset)
+                except Exception as e:
+                    logger.error("api_spec_collection_failed", error=str(e), file=str(api_file))
+
         return assets
     
     async def _collect_db_schemas(self, docs_path: str) -> List[DesignAsset]:
         """采集数据库设计"""
         assets = []
-        
-        # 查找数据库设计文件
-        for db_file in Path(docs_path).glob("**/*{db,database,schema}*.{sql,md,json}"):
-            try:
-                with open(db_file, 'r') as f:
-                    content = f.read()
-                
-                asset = DesignAsset(
-                    id=f"des_db_{db_file.stem}",
-                    type=DesignAssetType.DB_SCHEMA,
-                    name=db_file.name,
-                    content=content,
-                )
-                assets.append(asset)
-            except Exception as e:
-                logger.error("db_schema_collection_failed", error=str(e))
-        
+
+        keywords = ("db", "database", "schema", "table", "ddl")
+        extensions = ("sql", "md", "json", "yaml", "yml")
+        seen = set()
+
+        for ext in extensions:
+            for db_file in Path(docs_path).glob(f"**/*.{ext}"):
+                if not db_file.is_file():
+                    continue
+                name_lower = db_file.name.lower()
+                if not any(keyword in name_lower for keyword in keywords):
+                    continue
+
+                key = str(db_file.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                try:
+                    with open(db_file, "r", encoding="utf-8") as f:
+                        content = f.read()
+
+                    asset = DesignAsset(
+                        id=f"des_db_{db_file.stem}",
+                        type=DesignAssetType.DB_SCHEMA,
+                        name=db_file.name,
+                        content=content,
+                    )
+                    assets.append(asset)
+                except Exception as e:
+                    logger.error("db_schema_collection_failed", error=str(e), file=str(db_file))
+
         return assets
     
     # ==================== 综合采集 ====================

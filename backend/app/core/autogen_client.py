@@ -1,8 +1,8 @@
 """
-AutoGen-based LLM client.
+AutoGen-backed LLM client.
 
-This module provides a session-compatible client API used by services/flows,
-while the actual model interaction is implemented via AutoGen agents.
+This client keeps the existing session/send_prompt interface used by services,
+while the underlying call path is implemented with pyautogen agents.
 """
 
 from __future__ import annotations
@@ -11,12 +11,11 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
-import random
-import time
+from time import perf_counter
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from uuid import uuid4
 
-import httpx
+import autogen
 import structlog
 
 from app.config import settings
@@ -52,6 +51,8 @@ class _SessionState:
 
 class AutoGenClient:
     _LOG_TEXT_LIMIT = 4000
+    _STREAM_CHUNK_SIZE = 120
+    _STREAM_MAX_CHUNKS = 24
 
     def __init__(self, config: Optional[AutoGenConfig] = None):
         self.config = config or AutoGenConfig()
@@ -59,27 +60,29 @@ class AutoGenClient:
             failure_threshold=settings.CIRCUIT_BREAKER_FAILURE_THRESHOLD,
             recovery_timeout=settings.CIRCUIT_BREAKER_RECOVERY_SECONDS,
         )
+        self._llm_semaphore = asyncio.Semaphore(max(1, int(settings.LLM_MAX_CONCURRENCY or 1)))
         self._sessions: Dict[str, _SessionState] = {}
         logger.info(
-            "llm_client_initialized",
-            backend="autogen",
+            "autogen_client_initialized",
+            backend="pyautogen",
             model=settings.llm_model,
             base_url=settings.LLM_BASE_URL,
         )
 
-    async def close(self):
+    async def close(self) -> None:
         return None
 
     async def health_check(self) -> Dict[str, Any]:
         return {
             "healthy": True,
-            "backend": "autogen",
+            "backend": "pyautogen",
             "model": settings.llm_model,
             "base_url": settings.LLM_BASE_URL,
+            "endpoint": self._chat_endpoint(),
         }
 
     async def list_agents(self) -> List[Dict[str, Any]]:
-        return [{"id": "autogen", "name": "AutoGen Agent Runtime"}]
+        return [{"id": "autogen_runtime", "name": "AutoGen Runtime"}]
 
     async def write_log(self, service: str, level: str, message: str) -> bool:
         logger.info("external_log", service=service, level=level, message=message)
@@ -105,7 +108,7 @@ class AutoGenClient:
             created_at=now,
             updated_at=now,
         )
-        logger.warning("llm_session_created", session_id=session_id, title=title)
+        logger.info("llm_session_created", session_id=session_id, title=title)
         return SessionInfo(id=session_id, title=title, created_at=now, updated_at=now)
 
     async def get_session(self, session_id: str) -> Dict[str, Any]:
@@ -183,7 +186,7 @@ class AutoGenClient:
         )
 
     @staticmethod
-    def _history_context(messages: List[Dict[str, Any]], max_items: int = 8) -> str:
+    def _history_context(messages: List[Dict[str, Any]], max_items: int = 6) -> str:
         if not messages:
             return ""
         selected = messages[-max_items:]
@@ -193,69 +196,22 @@ class AutoGenClient:
             content = str(item.get("content", "")).strip()
             if not content:
                 continue
-            lines.append(f"[{role}] {content[:1200]}")
+            lines.append(f"[{role}] {content[:900]}")
         if not lines:
             return ""
-        return "以下是最近会话上下文：\n" + "\n".join(lines)
+        return "以下是最近会话核心观点：\n" + "\n".join(lines)
 
     @staticmethod
-    def _build_endpoint_candidates() -> List[str]:
+    def _base_url_for_autogen() -> str:
         base = settings.LLM_BASE_URL.rstrip("/")
-        candidates = [
-            f"{base}/v3/chat/completions",
-            f"{base}/chat/completions",
-            f"{base}/v1/chat/completions",
-        ]
-        deduped: List[str] = []
-        for item in candidates:
-            if item not in deduped:
-                deduped.append(item)
-        return deduped
+        if base.endswith("/v1") or base.endswith("/v3"):
+            return base
+        return f"{base}/v3"
 
-    @staticmethod
-    def _extract_api_error(payload: Any) -> str:
-        if isinstance(payload, dict):
-            err = payload.get("error")
-            if isinstance(err, dict):
-                msg = err.get("message")
-                code = err.get("code")
-                if msg and code:
-                    return f"{code}: {msg}"
-                if msg:
-                    return str(msg)
-            message = payload.get("message")
-            if message:
-                return str(message)
-        return str(payload)[:1000]
-
-    @staticmethod
-    def _extract_response_text(payload: Any) -> str:
-        if not isinstance(payload, dict):
-            return ""
-
-        choices = payload.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0]
-            if isinstance(first, dict):
-                message = first.get("message")
-                if isinstance(message, dict):
-                    content = message.get("content")
-                    if isinstance(content, str) and content.strip():
-                        return content.strip()
-                content = first.get("text")
-                if isinstance(content, str) and content.strip():
-                    return content.strip()
-
-        output = payload.get("output")
-        if isinstance(output, dict):
-            text = output.get("text")
-            if isinstance(text, str) and text.strip():
-                return text.strip()
-
-        content = payload.get("content")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        return ""
+    @classmethod
+    def _chat_endpoint(cls) -> str:
+        base = cls._base_url_for_autogen()
+        return f"{base}/chat/completions"
 
     @classmethod
     def _truncate_text(cls, text: Any, limit: Optional[int] = None) -> str:
@@ -282,229 +238,15 @@ class AutoGenClient:
             )
         return sanitized
 
-    @classmethod
-    def _summarize_response_for_log(cls, payload: Any) -> Dict[str, Any]:
-        if not isinstance(payload, dict):
-            return {
-                "payload_type": type(payload).__name__,
-                "payload_preview": cls._truncate_text(payload),
-            }
-        return {
-            "keys": list(payload.keys())[:20],
-            "usage": payload.get("usage"),
-            "choices_count": len(payload.get("choices", [])) if isinstance(payload.get("choices"), list) else 0,
-            "content_preview": cls._truncate_text(cls._extract_response_text(payload)),
-        }
-
-    async def _call_remote_llm(
-        self,
-        prompt: str,
-        system_prompt: str,
-        model_name: str,
-        agent_name: str,
-        max_tokens: Optional[int] = None,
-        request_meta: Optional[Dict[str, Any]] = None,
-        trace_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
-        trace_context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        request_meta = request_meta or {}
-        trace_context = trace_context or {}
-        trace_id = str(trace_context.get("trace_id") or request_meta.get("trace_id") or new_trace_id("llm"))
-        headers = {
-            "Authorization": f"Bearer {settings.LLM_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        messages: List[Dict[str, str]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-
-        payload = {
-            "model": model_name,
-            "messages": messages,
-            "temperature": 0.2,
-            "stream": False,
-        }
-        if isinstance(max_tokens, int) and max_tokens > 0:
-            payload["max_tokens"] = max_tokens
-        request_payload_log = {
-            "model": payload["model"],
-            "temperature": payload["temperature"],
-            "stream": payload["stream"],
-            "max_tokens": payload.get("max_tokens"),
-            "message_count": len(messages),
-            "messages": self._sanitize_messages_for_log(messages),
-        }
-        last_error = "unknown_error"
-        connect_timeout = float(max(3, settings.llm_connect_timeout))
-        request_timeout_seconds = float(max(10, settings.llm_request_timeout))
-        request_timeout = httpx.Timeout(
-            timeout=request_timeout_seconds,
-            connect=connect_timeout,
+    @staticmethod
+    def _is_rate_limited_error(error_text: str) -> bool:
+        normalized = str(error_text or "").lower()
+        return (
+            "429" in normalized
+            or "toomanyrequests" in normalized
+            or "serveroverloaded" in normalized
+            or "rate limit" in normalized
         )
-        max_retries = max(0, int(settings.LLM_MAX_RETRIES))
-        async with httpx.AsyncClient(timeout=request_timeout) as client:
-            for endpoint in self._build_endpoint_candidates():
-                for attempt in range(max_retries + 1):
-                    await self._emit_trace_event(
-                        trace_callback,
-                        {
-                            "type": "llm_http_request",
-                            "phase": trace_context.get("phase"),
-                            "stage": trace_context.get("stage"),
-                            "agent_name": agent_name,
-                            "model": model_name,
-                            "session_id": request_meta.get("session_id"),
-                            "endpoint": endpoint,
-                            "request_payload": request_payload_log,
-                            "attempt": attempt + 1,
-                            "max_attempts": max_retries + 1,
-                            "trace_id": trace_id,
-                        },
-                    )
-                    logger.warning(
-                        "llm_http_request_payload",
-                        endpoint=endpoint,
-                        agent=agent_name,
-                        session_id=request_meta.get("session_id"),
-                        phase=request_meta.get("phase"),
-                        stage=request_meta.get("stage"),
-                        attempt=attempt + 1,
-                        max_attempts=max_retries + 1,
-                        trace_id=trace_id,
-                        payload=request_payload_log,
-                    )
-                    try:
-                        response = await client.post(endpoint, headers=headers, json=payload)
-                    except Exception as exc:
-                        last_error = f"{endpoint}: {str(exc)}"
-                        await self._emit_trace_event(
-                            trace_callback,
-                            {
-                                "type": "llm_http_error",
-                                "phase": trace_context.get("phase"),
-                                "stage": trace_context.get("stage"),
-                                "agent_name": agent_name,
-                                "model": model_name,
-                                "session_id": request_meta.get("session_id"),
-                                "endpoint": endpoint,
-                                "error": str(exc),
-                                "attempt": attempt + 1,
-                                "max_attempts": max_retries + 1,
-                                "trace_id": trace_id,
-                            },
-                        )
-                        logger.error(
-                            "llm_http_request_exception",
-                            endpoint=endpoint,
-                            agent=agent_name,
-                            error=str(exc),
-                            attempt=attempt + 1,
-                            max_attempts=max_retries + 1,
-                            trace_id=trace_id,
-                        )
-                        if attempt < max_retries:
-                            await asyncio.sleep(min(1.5 * (2 ** attempt), 4.0) + random.random() * 0.2)
-                            continue
-                        break
-
-                    if response.status_code == 404:
-                        last_error = f"{endpoint}: 404_not_found"
-                        break
-
-                    if response.status_code >= 400:
-                        try:
-                            error_payload = response.json()
-                        except Exception:
-                            error_payload = {"message": response.text[:1000]}
-                        await self._emit_trace_event(
-                            trace_callback,
-                            {
-                                "type": "llm_http_error",
-                                "phase": trace_context.get("phase"),
-                                "stage": trace_context.get("stage"),
-                                "agent_name": agent_name,
-                                "model": model_name,
-                                "session_id": request_meta.get("session_id"),
-                                "endpoint": endpoint,
-                                "status_code": response.status_code,
-                                "response_payload": self._truncate_text(error_payload),
-                                "attempt": attempt + 1,
-                                "max_attempts": max_retries + 1,
-                                "trace_id": trace_id,
-                            },
-                        )
-                        logger.error(
-                            "llm_http_response_error",
-                            endpoint=endpoint,
-                            status_code=response.status_code,
-                            agent=agent_name,
-                            session_id=request_meta.get("session_id"),
-                            phase=request_meta.get("phase"),
-                            stage=request_meta.get("stage"),
-                            attempt=attempt + 1,
-                            max_attempts=max_retries + 1,
-                            trace_id=trace_id,
-                            response=self._truncate_text(error_payload),
-                        )
-                        if response.status_code >= 500 and attempt < max_retries:
-                            await asyncio.sleep(min(1.5 * (2 ** attempt), 4.0) + random.random() * 0.2)
-                            continue
-                        error_text = self._extract_api_error(error_payload)
-                        raise RuntimeError(
-                            f"LLM API error [{response.status_code}] at {endpoint}: {error_text}"
-                        )
-
-                    try:
-                        response_payload = response.json()
-                    except Exception as exc:
-                        raise RuntimeError(f"LLM API non-JSON response at {endpoint}: {str(exc)}") from exc
-
-                    content = self._extract_response_text(response_payload)
-                    if not content:
-                        if attempt < max_retries:
-                            await asyncio.sleep(min(1.5 * (2 ** attempt), 4.0) + random.random() * 0.2)
-                            continue
-                        raise RuntimeError(f"LLM API empty content at {endpoint}")
-                    response_log = self._summarize_response_for_log(response_payload)
-                    await self._emit_trace_event(
-                        trace_callback,
-                        {
-                            "type": "llm_http_response",
-                            "phase": trace_context.get("phase"),
-                            "stage": trace_context.get("stage"),
-                            "agent_name": agent_name,
-                            "model": model_name,
-                            "session_id": request_meta.get("session_id"),
-                            "endpoint": endpoint,
-                            "status_code": response.status_code,
-                            "response_payload": response_log,
-                            "attempt": attempt + 1,
-                            "max_attempts": max_retries + 1,
-                            "trace_id": trace_id,
-                        },
-                    )
-                    logger.warning(
-                        "llm_http_response_payload",
-                        endpoint=endpoint,
-                        status_code=response.status_code,
-                        agent=agent_name,
-                        session_id=request_meta.get("session_id"),
-                        phase=request_meta.get("phase"),
-                        stage=request_meta.get("stage"),
-                        attempt=attempt + 1,
-                        max_attempts=max_retries + 1,
-                        trace_id=trace_id,
-                        response=response_log,
-                    )
-
-                    return {
-                        "content": content,
-                        "endpoint": endpoint,
-                        "usage": response_payload.get("usage"),
-                    }
-
-        raise RuntimeError(f"All LLM endpoints failed: {last_error}")
 
     async def _emit_trace_event(
         self,
@@ -514,16 +256,61 @@ class AutoGenClient:
         if not trace_callback:
             return
         try:
-            event = enrich_event(
+            payload = enrich_event(
                 event,
                 trace_id=str(event.get("trace_id") or new_trace_id("llm")),
                 default_phase=str(event.get("phase") or ""),
             )
-            maybe = trace_callback(event)
+            maybe = trace_callback(payload)
             if asyncio.iscoroutine(maybe):
                 await maybe
         except Exception as exc:
             logger.warning("autogen_trace_event_emit_failed", error=str(exc))
+
+    def _run_autogen_reply(
+        self,
+        prompt: str,
+        system_prompt: str,
+        model_name: str,
+        agent_name: str,
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        if not settings.LLM_API_KEY:
+            raise RuntimeError("LLM_API_KEY 未配置，无法调用模型")
+        llm_config = {
+            "config_list": [
+                {
+                    "model": model_name,
+                    "api_key": settings.LLM_API_KEY,
+                    "base_url": self._base_url_for_autogen(),
+                    "price": [0, 0],
+                }
+            ],
+            "temperature": 0.2,
+            "timeout": max(10, min(settings.llm_timeout, 45)),
+            "max_retries": max(0, int(settings.LLM_MAX_RETRIES)),
+        }
+        if isinstance(max_tokens, int) and max_tokens > 0:
+            llm_config["max_tokens"] = max_tokens
+
+        assistant = autogen.AssistantAgent(
+            name=agent_name or "AutoGenAgent",
+            system_message=system_prompt or "你是严谨的 SRE 分析助手。",
+            llm_config=llm_config,
+            human_input_mode="NEVER",
+        )
+
+        reply = assistant.generate_reply(
+            messages=[{"role": "user", "content": prompt}],
+        )
+        if isinstance(reply, dict):
+            content = reply.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+            return json.dumps(reply, ensure_ascii=False)
+        if isinstance(reply, str):
+            return reply.strip()
+        return json.dumps(reply, ensure_ascii=False)
 
     async def _repair_structured_output(
         self,
@@ -546,31 +333,27 @@ class AutoGenClient:
             {
                 "type": "llm_output_repair_started",
                 "phase": trace_context.get("phase"),
-                "stage": trace_context.get("stage"),
+                "stage": "json_repair",
                 "session_id": session_id,
                 "model": model_name,
                 "trace_id": trace_id,
             },
         )
+
         try:
-            repair_result = await asyncio.wait_for(
-                self._call_remote_llm(
-                    prompt=repair_prompt,
-                    system_prompt="你是严格的 JSON 修复器。",
-                    model_name=model_name,
-                    agent_name="JsonRepairAgent",
-                    max_tokens=700,
-                    request_meta={"session_id": session_id, "trace_id": trace_id},
-                    trace_callback=trace_callback,
-                    trace_context={
-                        **trace_context,
-                        "stage": "json_repair",
-                        "trace_id": trace_id,
-                    },
-                ),
-                timeout=max(20, min(settings.llm_total_timeout, 90)),
-            )
-            repaired = extract_json_dict(str(repair_result.get("content", ""))) or {}
+            async with self._llm_semaphore:
+                fixed = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._run_autogen_reply,
+                        repair_prompt,
+                        "你是严格的 JSON 修复器。",
+                        model_name,
+                        "JsonRepairAgent",
+                        480,
+                    ),
+                    timeout=float(max(12, min(settings.llm_total_timeout, 40))),
+                )
+            repaired = extract_json_dict(fixed) or {}
             await self._emit_trace_event(
                 trace_callback,
                 {
@@ -614,6 +397,8 @@ class AutoGenClient:
     ) -> Dict[str, Any]:
         if not self._circuit_breaker.allow_request():
             raise RuntimeError("LLM circuit breaker is open")
+        if not settings.LLM_API_KEY:
+            raise RuntimeError("LLM_API_KEY 未配置，无法调用模型")
 
         state = self._sessions.get(session_id)
         if not state:
@@ -624,6 +409,7 @@ class AutoGenClient:
         prompt_text = self._extract_text_parts(parts)
         if not prompt_text:
             raise ValueError("Prompt text is empty")
+
         schema = self._schema_payload(format)
         trace_context = trace_context or {}
         trace_id = str(trace_context.get("trace_id") or new_trace_id("llm"))
@@ -640,10 +426,38 @@ class AutoGenClient:
 
         history_text = self._history_context(state.messages) if use_session_history else ""
         system_prompt = "\n\n".join(state.system_prompts).strip()
-        effective_prompt_parts = [history_text, prompt_with_schema]
-        effective_prompt = "\n\n".join([p for p in effective_prompt_parts if p])
+        effective_prompt = "\n\n".join(
+            [item for item in [history_text, prompt_with_schema] if item]
+        )
 
-        started_at = time.perf_counter()
+        started_at = perf_counter()
+        request_payload_log = {
+            "model": model_name,
+            "max_tokens": max_tokens,
+            "message_count": 2,
+            "messages": self._sanitize_messages_for_log(
+                [
+                    {"role": "system", "content": system_prompt or "(empty)"},
+                    {"role": "user", "content": effective_prompt},
+                ]
+            ),
+            "base_url": self._base_url_for_autogen(),
+        }
+        endpoint = self._chat_endpoint()
+
+        await self._emit_trace_event(
+            trace_callback,
+            {
+                "type": "llm_call_started",
+                "phase": trace_context.get("phase"),
+                "stage": trace_context.get("stage"),
+                "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
+                "model": model_name,
+                "session_id": session_id,
+                "prompt_preview": effective_prompt[:1200],
+                "trace_id": trace_id,
+            },
+        )
         await self._emit_trace_event(
             trace_callback,
             {
@@ -657,40 +471,46 @@ class AutoGenClient:
                 "trace_id": trace_id,
             },
         )
-        logger.warning(
+        await self._emit_trace_event(
+            trace_callback,
+            {
+                "type": "llm_http_request",
+                "phase": trace_context.get("phase"),
+                "stage": trace_context.get("stage"),
+                "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
+                "model": model_name,
+                "session_id": session_id,
+                "endpoint": endpoint,
+                "request_payload": request_payload_log,
+                "trace_id": trace_id,
+            },
+        )
+
+        logger.info(
             "llm_request_started",
-            backend="autogen",
-            session_id=session_id,
+            backend="pyautogen",
             model=model_name,
-            agent=agent,
+            session_id=session_id,
+            trace_id=trace_id,
             phase=trace_context.get("phase"),
             stage=trace_context.get("stage"),
-            trace_id=trace_id,
             prompt_preview=self._truncate_text(effective_prompt, 1500),
         )
 
         try:
-            call_result = await asyncio.wait_for(
-                self._call_remote_llm(
-                    prompt=effective_prompt,
-                    system_prompt=system_prompt,
-                    model_name=model_name,
-                    agent_name=trace_context.get("agent_name") or agent or "AutoGenAgent",
-                    max_tokens=max_tokens,
-                    request_meta={
-                        "session_id": session_id,
-                        "phase": trace_context.get("phase"),
-                        "stage": trace_context.get("stage"),
-                        "trace_id": trace_id,
-                    },
-                    trace_callback=trace_callback,
-                    trace_context=trace_context,
-                ),
-                timeout=float(max(20, settings.llm_total_timeout)),
-            )
-            content = call_result["content"]
-            endpoint = call_result["endpoint"]
-            usage = call_result.get("usage")
+            async with self._llm_semaphore:
+                content = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._run_autogen_reply,
+                        effective_prompt,
+                        system_prompt,
+                        model_name,
+                        trace_context.get("agent_name") or agent or "AutoGenAgent",
+                        max_tokens,
+                    ),
+                    timeout=float(max(12, min(settings.llm_total_timeout, 45))),
+                )
+
             structured = extract_json_dict(content) or {}
             if schema and not structured:
                 structured = await self._repair_structured_output(
@@ -701,6 +521,7 @@ class AutoGenClient:
                     trace_callback=trace_callback,
                     trace_context=trace_context,
                 )
+
             state.updated_at = datetime.utcnow().isoformat()
             state.messages.append(
                 {"role": "user", "content": prompt_with_schema, "timestamp": state.updated_at}
@@ -710,20 +531,36 @@ class AutoGenClient:
             )
             if len(state.messages) > 40:
                 del state.messages[:-40]
+
+            latency_ms = round((perf_counter() - started_at) * 1000, 2)
             self._circuit_breaker.record_success()
-            latency_ms = round((time.perf_counter() - started_at) * 1000, 2)
-            logger.warning(
-                "llm_request_completed",
-                backend="autogen",
+            await self._emit_stream_deltas(
+                trace_callback=trace_callback,
+                trace_context=trace_context,
                 session_id=session_id,
-                model=model_name,
-                agent=agent,
-                latency_ms=latency_ms,
-                response_len=len(content),
-                endpoint=endpoint,
-                trace_id=trace_id,
-                response_preview=self._truncate_text(content, 1500),
-                usage=usage,
+                model_name=model_name,
+                content=content,
+            )
+
+            await self._emit_trace_event(
+                trace_callback,
+                {
+                    "type": "llm_http_response",
+                    "phase": trace_context.get("phase"),
+                    "stage": trace_context.get("stage"),
+                    "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
+                    "model": model_name,
+                    "session_id": session_id,
+                    "endpoint": endpoint,
+                    "status_code": 200,
+                    "response_payload": {
+                        "content_preview": content[:1500],
+                        "content_length": len(content),
+                        "structured": bool(structured),
+                    },
+                    "latency_ms": latency_ms,
+                    "trace_id": trace_id,
+                },
             )
             await self._emit_trace_event(
                 trace_callback,
@@ -735,13 +572,37 @@ class AutoGenClient:
                     "model": model_name,
                     "session_id": session_id,
                     "latency_ms": latency_ms,
-                    "endpoint": endpoint,
                     "response_preview": content[:1500],
                     "structured": bool(structured),
-                    "usage": usage,
                     "trace_id": trace_id,
                 },
             )
+            await self._emit_trace_event(
+                trace_callback,
+                {
+                    "type": "llm_call_completed",
+                    "phase": trace_context.get("phase"),
+                    "stage": trace_context.get("stage"),
+                    "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
+                    "model": model_name,
+                    "session_id": session_id,
+                    "latency_ms": latency_ms,
+                    "response_preview": content[:1500],
+                    "trace_id": trace_id,
+                },
+            )
+
+            logger.info(
+                "llm_request_completed",
+                backend="pyautogen",
+                model=model_name,
+                session_id=session_id,
+                trace_id=trace_id,
+                latency_ms=latency_ms,
+                response_preview=self._truncate_text(content, 1200),
+                structured=bool(structured),
+            )
+
             return {
                 "content": content,
                 "structured": structured,
@@ -750,7 +611,6 @@ class AutoGenClient:
                     "model": model_name,
                     "session_id": state.id,
                     "endpoint": endpoint,
-                    "usage": usage,
                     "structured": structured,
                     "structured_output": structured,
                     "trace_id": trace_id,
@@ -758,19 +618,25 @@ class AutoGenClient:
             }
         except Exception as exc:
             self._circuit_breaker.record_failure()
-            latency_ms = round((time.perf_counter() - started_at) * 1000, 2)
-            logger.error(
-                "llm_request_failed",
-                backend="autogen",
-                session_id=session_id,
-                model=model_name,
-                agent=agent,
-                phase=trace_context.get("phase"),
-                stage=trace_context.get("stage"),
-                prompt_preview=self._truncate_text(effective_prompt, 1500),
-                error=str(exc),
-                latency_ms=latency_ms,
-                trace_id=trace_id,
+            latency_ms = round((perf_counter() - started_at) * 1000, 2)
+            error_text = str(exc).strip() or exc.__class__.__name__
+            if settings.LLM_FAILFAST_ON_RATE_LIMIT and self._is_rate_limited_error(error_text):
+                error_text = f"LLM_RATE_LIMITED: {error_text}"
+
+            await self._emit_trace_event(
+                trace_callback,
+                {
+                    "type": "llm_http_error",
+                    "phase": trace_context.get("phase"),
+                    "stage": trace_context.get("stage"),
+                    "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
+                    "model": model_name,
+                    "session_id": session_id,
+                    "endpoint": endpoint,
+                    "error": error_text,
+                    "latency_ms": latency_ms,
+                    "trace_id": trace_id,
+                },
             )
             await self._emit_trace_event(
                 trace_callback,
@@ -781,12 +647,72 @@ class AutoGenClient:
                     "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
                     "model": model_name,
                     "session_id": session_id,
+                    "error": error_text,
                     "latency_ms": latency_ms,
-                    "error": str(exc),
                     "trace_id": trace_id,
                 },
             )
+            await self._emit_trace_event(
+                trace_callback,
+                {
+                    "type": "llm_call_failed",
+                    "phase": trace_context.get("phase"),
+                    "stage": trace_context.get("stage"),
+                    "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
+                    "model": model_name,
+                    "session_id": session_id,
+                    "error": error_text,
+                    "latency_ms": latency_ms,
+                    "trace_id": trace_id,
+                },
+            )
+
+            logger.error(
+                "llm_request_failed",
+                backend="pyautogen",
+                model=model_name,
+                session_id=session_id,
+                trace_id=trace_id,
+                latency_ms=latency_ms,
+                error=error_text,
+            )
             raise
+
+    async def _emit_stream_deltas(
+        self,
+        trace_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
+        trace_context: Dict[str, Any],
+        session_id: str,
+        model_name: str,
+        content: str,
+    ) -> None:
+        text = (content or "").strip()
+        if not text:
+            return
+        chunks = [text[i : i + self._STREAM_CHUNK_SIZE] for i in range(0, len(text), self._STREAM_CHUNK_SIZE)]
+        truncated = False
+        if len(chunks) > self._STREAM_MAX_CHUNKS:
+            chunks = chunks[: self._STREAM_MAX_CHUNKS]
+            truncated = True
+        stream_id = f"{session_id}:{trace_context.get('agent_name') or 'autogen_agent'}"
+        for index, chunk in enumerate(chunks, start=1):
+            await self._emit_trace_event(
+                trace_callback,
+                {
+                    "type": "llm_stream_delta",
+                    "phase": trace_context.get("phase"),
+                    "stage": trace_context.get("stage"),
+                    "agent_name": trace_context.get("agent_name") or "autogen_agent",
+                    "model": model_name,
+                    "session_id": session_id,
+                    "stream_id": stream_id,
+                    "chunk_index": index,
+                    "chunk_total": len(chunks),
+                    "delta": chunk,
+                    "truncated": truncated,
+                    "trace_id": trace_context.get("trace_id"),
+                },
+            )
 
     async def send_text_prompt(
         self,

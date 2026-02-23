@@ -85,10 +85,12 @@ const IncidentPage: React.FC = () => {
   const [eventFilterType, setEventFilterType] = useState<string>('all');
   const [eventSearchText, setEventSearchText] = useState<string>('');
   const [running, setRunning] = useState(false);
+  const [debateMaxRounds, setDebateMaxRounds] = useState<number>(2);
   const wsRef = useRef<WebSocket | null>(null);
   const pollingRef = useRef(false);
   const runningRef = useRef(false);
   const streamTimersRef = useRef<Record<string, number>>({});
+  const seenEventIdsRef = useRef<Set<string>>(new Set());
 
   const steps = useMemo(
     () => [
@@ -102,6 +104,13 @@ const IncidentPage: React.FC = () => {
 
   const appendEvent = (kind: string, text: string, data?: unknown) => {
     const dataRecord = asRecord(data);
+    const eventId = String(dataRecord.event_id || '').trim();
+    if (eventId) {
+      if (seenEventIdsRef.current.has(eventId)) {
+        return;
+      }
+      seenEventIdsRef.current.add(eventId);
+    }
     const eventTsRaw = String(dataRecord.timestamp || '').trim();
     const displayTime =
       eventTsRaw
@@ -114,7 +123,37 @@ const IncidentPage: React.FC = () => {
       text,
       data,
     };
-    setEventRecords((prev) => [record, ...prev].slice(0, 300));
+    setEventRecords((prev) => {
+      if (kind === 'llm_stream_delta') {
+        const streamId = String(dataRecord.stream_id || '').trim();
+        if (streamId) {
+          const idx = prev.findIndex((row) => {
+            if (row.kind !== 'llm_stream_delta') return false;
+            const rowData = asRecord(row.data);
+            return String(rowData.stream_id || '').trim() === streamId;
+          });
+          if (idx >= 0) {
+            const current = prev[idx];
+            const currentData = asRecord(current.data);
+            const mergedData = {
+              ...currentData,
+              ...dataRecord,
+              delta: `${String(currentData.delta || '')}${String(dataRecord.delta || '')}`,
+            };
+            const mergedRow: EventRecord = {
+              ...current,
+              timeText: displayTime,
+              text: formatEventText(kind, mergedData),
+              data: mergedData,
+            };
+            const next = [...prev];
+            next[idx] = mergedRow;
+            return next.slice(0, 300);
+          }
+        }
+      }
+      return [record, ...prev].slice(0, 300);
+    });
   };
 
   const asRecord = (value: unknown): Record<string, unknown> => {
@@ -194,28 +233,36 @@ const IncidentPage: React.FC = () => {
     const messageText = row.text || '';
 
     const isRequestKind =
-      kind === 'llm_http_request' ||
       kind === 'llm_prompt_started' ||
-      kind === 'llm_call_started' ||
       kind === 'autogen_call_started' ||
-      kind === 'opencode_call_started';
+      kind === 'llm_stream_delta';
     const isResponseKind =
-      kind === 'llm_http_response' ||
       kind === 'llm_prompt_completed' ||
-      kind === 'llm_call_completed' ||
       kind === 'llm_cli_command_completed' ||
       kind === 'autogen_call_completed' ||
-      kind === 'opencode_call_completed' ||
       kind === 'agent_round';
     const isErrorKind =
-      kind.includes('failed') || kind.includes('error') || kind === 'session_failed';
+      kind === 'autogen_call_failed' ||
+      kind === 'llm_prompt_failed' ||
+      kind === 'llm_cli_command_failed' ||
+      kind === 'session_failed';
 
     const side: 'agent' | 'system' = agentRaw ? 'agent' : 'system';
     let status: 'streaming' | 'done' | 'error' = 'done';
     let summary = normalizeInlineText(messageText || kind);
     let detail = '';
 
-    if (isRequestKind) {
+    if (kind === 'llm_stream_delta') {
+      status = 'streaming';
+      summary = `${agentName} 正在输出`;
+      detail = normalizeMarkdownText(firstTextValue(data, ['delta']) || '...');
+    } else if (
+      kind === 'autogen_call_completed' &&
+      ['analysis', 'critique', 'rebuttal', 'judgment'].includes(phase)
+    ) {
+      // 辩论阶段优先展示 agent_round，避免 completed 与 round 双重重复
+      return null;
+    } else if (isRequestKind) {
       status = 'streaming';
       summary = `${agentName} 开始分析`;
       detail = normalizeMarkdownText(prompt || messageText || '正在调用模型，请稍候...');
@@ -283,13 +330,10 @@ const IncidentPage: React.FC = () => {
     const agent = String(data?.agent_name || '');
     const error = String(data?.error || '');
     switch (kind) {
-      case 'opencode_call_started':
       case 'autogen_call_started':
         return `AutoGen请求开始 [${phase || stage || '-'}] ${agent || ''} ${model || ''}`.trim();
-      case 'opencode_call_completed':
       case 'autogen_call_completed':
         return `AutoGen请求完成 [${phase || stage || '-'}] ${agent || ''} ${model || ''} ${latency}`.trim();
-      case 'opencode_call_failed':
       case 'autogen_call_failed':
         return `AutoGen请求失败 [${phase || stage || '-'}] ${agent || ''} ${model || ''} ${error}`.trim();
       case 'llm_call_started':
@@ -304,6 +348,8 @@ const IncidentPage: React.FC = () => {
         return `LLM响应参数 [${phase || stage || '-'}] ${agent || ''} ${model || ''}`.trim();
       case 'llm_http_error':
         return `LLM响应异常 [${phase || stage || '-'}] ${agent || ''} ${error || String(data?.status_code || '')}`.trim();
+      case 'llm_stream_delta':
+        return `LLM流式输出 [${phase || stage || '-'}] ${agent || ''} chunk=${String(data?.chunk_index || '-')}/${String(data?.chunk_total || '-')}`.trim();
       case 'llm_prompt_started':
       case 'llm_cli_command_started':
         return `LLM请求开始 [${phase || stage || '-'}] ${agent || ''} ${model || ''}`.trim();
@@ -375,6 +421,12 @@ const IncidentPage: React.FC = () => {
     setDebateResult(result);
     setReport(rpt);
     setFusion(fusing);
+    const config = ((detail.context as Record<string, unknown> | undefined) || {})
+      .debate_config as Record<string, unknown> | undefined;
+    const maxRoundsRaw = config?.max_rounds;
+    if (typeof maxRoundsRaw === 'number' && Number.isFinite(maxRoundsRaw)) {
+      setDebateMaxRounds(Math.max(1, Math.min(8, Math.trunc(maxRoundsRaw))));
+    }
 
     const persisted = (detail.context as Record<string, unknown> | undefined)?.event_log;
     if (Array.isArray(persisted)) {
@@ -416,7 +468,11 @@ const IncidentPage: React.FC = () => {
         service_name: incidentForm.service_name,
         environment: incidentForm.environment,
       });
-      const session = await debateApi.createSession(incident.id);
+      const session = await debateApi.createSession(incident.id, { maxRounds: debateMaxRounds });
+      seenEventIdsRef.current.clear();
+      setEventRecords([]);
+      setStreamedMessageText({});
+      setExpandedDialogueIds({});
       setIncidentId(incident.id);
       setSessionId(session.id);
       advanceStep(1);
@@ -433,7 +489,11 @@ const IncidentPage: React.FC = () => {
     if (!incidentId) return;
     setLoading(true);
     try {
-      const session = await debateApi.createSession(incidentId);
+      const session = await debateApi.createSession(incidentId, { maxRounds: debateMaxRounds });
+      seenEventIdsRef.current.clear();
+      setEventRecords([]);
+      setStreamedMessageText({});
+      setExpandedDialogueIds({});
       setSessionId(session.id);
       appendEvent('session_created_local', `会话已创建 ${session.id}`, { session_id: session.id });
       advanceStep(1);
@@ -514,7 +574,7 @@ const IncidentPage: React.FC = () => {
             }
             const eventPhase = String(payload.data?.phase || '').toLowerCase();
             if (
-              (type === 'autogen_call_started' || type === 'opencode_call_started') &&
+              type === 'autogen_call_started' &&
               eventPhase.includes('asset')
             ) {
               advanceStep(1);
@@ -523,7 +583,7 @@ const IncidentPage: React.FC = () => {
               advanceStep(2);
             }
             if (
-              (type === 'autogen_call_started' || type === 'opencode_call_started') &&
+              type === 'autogen_call_started' &&
               eventPhase.includes('report')
             ) {
               advanceStep(3);
@@ -659,6 +719,10 @@ const IncidentPage: React.FC = () => {
     const iid = routeIncidentId || searchParams.get('incident_id');
     const preferredView = (searchParams.get('view') || '').toLowerCase();
     if (!iid) return;
+    seenEventIdsRef.current.clear();
+    setEventRecords([]);
+    setStreamedMessageText({});
+    setExpandedDialogueIds({});
     setIncidentId(iid);
     incidentApi
       .get(iid)
@@ -1101,6 +1165,19 @@ const IncidentPage: React.FC = () => {
                   value={incidentForm.service_name}
                   onChange={(e) => setIncidentForm((s) => ({ ...s, service_name: e.target.value }))}
                 />
+                <Select
+                  value={debateMaxRounds}
+                  style={{ width: 140 }}
+                  onChange={(value) => setDebateMaxRounds(value)}
+                  options={[
+                    { label: '辩论1轮', value: 1 },
+                    { label: '辩论2轮', value: 2 },
+                    { label: '辩论3轮', value: 3 },
+                    { label: '辩论4轮', value: 4 },
+                    { label: '辩论5轮', value: 5 },
+                    { label: '辩论6轮', value: 6 },
+                  ]}
+                />
               </Space>
               <TextArea
                 rows={10}
@@ -1132,6 +1209,7 @@ const IncidentPage: React.FC = () => {
                 <Descriptions.Item label="实时状态">
                   {running ? <Tag color="processing">运行中</Tag> : <Tag>待启动/已完成</Tag>}
                 </Descriptions.Item>
+                <Descriptions.Item label="辩论轮数">{debateMaxRounds}</Descriptions.Item>
               </Descriptions>
               <Button type="primary" icon={<PlayCircleOutlined />} loading={running} onClick={startRealtimeDebate}>
                 启动实时辩论

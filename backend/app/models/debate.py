@@ -94,9 +94,8 @@ class DebateSession(BaseModel):
     # 上下文
     context: Dict[str, Any] = Field(default_factory=dict, description="上下文数据")
     
-    # LLM 会话（兼容历史字段名）
+    # LLM 会话
     llm_session_id: Optional[str] = Field(None, description="LLM 会话ID")
-    opencode_session_id: Optional[str] = Field(None, description="历史兼容字段（已废弃）")
     
     # 时间戳
     created_at: datetime = Field(default_factory=datetime.utcnow, description="创建时间")

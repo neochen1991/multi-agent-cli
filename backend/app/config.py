@@ -53,31 +53,30 @@ class Settings(BaseSettings):
     LOCAL_STORE_DIR: str = Field(default="/tmp/sre_debate_store")
 
     # LLM / AutoGen 配置
-    # 新字段（推荐）
-    LLM_MODEL: Optional[str] = Field(default=None)
+    LLM_MODEL: str = Field(default="kimi-k2.5")
     LLM_MAX_TURNS: Optional[int] = None
     LLM_TIMEOUT: Optional[int] = None
     LLM_CONNECT_TIMEOUT: Optional[int] = None
     LLM_REQUEST_TIMEOUT: Optional[int] = None
     LLM_TOTAL_TIMEOUT: Optional[int] = None
-    LLM_MAX_RETRIES: int = 2
+    LLM_MAX_RETRIES: int = 0
+    LLM_MAX_CONCURRENCY: int = 2
+    LLM_FAILFAST_ON_RATE_LIMIT: bool = True
     LLM_PROVIDER_ID: Optional[str] = None
-    # 兼容历史字段
-    CLAUDE_MODEL: str = Field(default="kimi-k2.5")
-    CLAUDE_MAX_TURNS: int = 1
-    OPENCODE_TIMEOUT: int = 300  # 5 minutes, reused as LLM timeout
-
     # OpenAI-compatible endpoint (AutoGen config_list)
-    LLM_BASE_URL: str = Field(default="https://ark.cn-beijing.volces.com/api/coding")
+    LLM_BASE_URL: str = Field(default="https://ark.cn-beijing.volces.com/api/coding/v3")
     LLM_API_KEY: str = Field(default="b0f69e9a-7708-4bf8-af61-7b7822947ce4")
-    OPENCODE_PROVIDER_ID: str = "autogen"
-    OPENCODE_MODEL_NAME: str = "kimi-k2.5"
 
     # 辩论配置
     DEBATE_MAX_ROUNDS: int = 1
-    DEBATE_CONSENSUS_THRESHOLD: float = 0.85
+    DEBATE_CONSENSUS_THRESHOLD: float = 0.75
     DEBATE_TIMEOUT: int = 600  # 10 minutes
-    DEBATE_ENABLE_CRITIQUE: bool = False
+    DEBATE_ENABLE_CRITIQUE: bool = True
+    DEBATE_ENABLE_COLLABORATION: bool = False
+    DEBATE_ANALYSIS_MAX_TOKENS: int = 320
+    DEBATE_REVIEW_MAX_TOKENS: int = 420
+    DEBATE_JUDGE_MAX_TOKENS: int = 900
+    DEBATE_REPORT_MAX_TOKENS: int = 700
 
     # 安全配置
     SECRET_KEY: str = Field(default="your-secret-key-change-in-production")
@@ -122,19 +121,11 @@ class Settings(BaseSettings):
         return self.ENVIRONMENT == "production"
 
     @property
-    def opencode_options(self) -> Dict[str, str]:
-        return self.llm_options
-
-    @property
     def llm_options(self) -> Dict[str, str]:
         return {
             "baseURL": self.LLM_BASE_URL,
             "apiKey": self.LLM_API_KEY,
         }
-
-    @property
-    def opencode_models(self) -> Dict[str, Dict[str, str]]:
-        return self.llm_models
 
     @property
     def llm_models(self) -> Dict[str, Dict[str, str]]:
@@ -161,15 +152,15 @@ class Settings(BaseSettings):
 
     @property
     def llm_model(self) -> str:
-        return self.LLM_MODEL or self.CLAUDE_MODEL or self.OPENCODE_MODEL_NAME
+        return self.LLM_MODEL
 
     @property
     def llm_max_turns(self) -> int:
-        return self.LLM_MAX_TURNS or self.CLAUDE_MAX_TURNS
+        return self.LLM_MAX_TURNS or 1
 
     @property
     def llm_timeout(self) -> int:
-        return self.LLM_TIMEOUT or self.OPENCODE_TIMEOUT
+        return self.LLM_TIMEOUT or 120
 
     @property
     def llm_connect_timeout(self) -> int:
@@ -181,11 +172,11 @@ class Settings(BaseSettings):
 
     @property
     def llm_total_timeout(self) -> int:
-        return self.LLM_TOTAL_TIMEOUT or max(30, self.llm_timeout)
+        return self.LLM_TOTAL_TIMEOUT or max(25, min(self.llm_timeout, 60))
 
     @property
     def llm_provider_id(self) -> str:
-        return self.LLM_PROVIDER_ID or self.OPENCODE_PROVIDER_ID or "autogen"
+        return self.LLM_PROVIDER_ID or "autogen"
 
 
 @lru_cache

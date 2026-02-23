@@ -32,7 +32,14 @@ def _reset_state() -> None:
 
 
 def _create_fake_report_generator():
-    async def _fake_generate_report(incident, debate_result, assets, format="markdown"):
+    async def _fake_generate_report(
+        incident,
+        debate_result,
+        assets,
+        format="markdown",
+        event_callback=None,
+    ):
+        _ = event_callback
         return {
             "report_id": "rpt_test_001",
             "incident_id": incident["id"],
@@ -61,6 +68,24 @@ def test_create_debate_session_updates_incident_without_type_error():
     assert detail_resp.status_code == 200
     assert detail_resp.json()["status"] == "analyzing"
     assert detail_resp.json()["debate_session_id"] == session_resp.json()["id"]
+
+
+def test_create_debate_session_supports_configurable_max_rounds():
+    _reset_state()
+    client = TestClient(app)
+
+    created = client.post("/api/v1/incidents/", json={"title": "configurable rounds"})
+    assert created.status_code == 201
+    incident_id = created.json()["id"]
+
+    session_resp = client.post(f"/api/v1/debates/?incident_id={incident_id}&max_rounds=4")
+    assert session_resp.status_code == 201
+    session_id = session_resp.json()["id"]
+
+    detail_resp = client.get(f"/api/v1/debates/{session_id}")
+    assert detail_resp.status_code == 200
+    debate_config = (detail_resp.json().get("context") or {}).get("debate_config") or {}
+    assert debate_config.get("max_rounds") == 4
 
 
 def test_report_endpoints_work_with_in_memory_storage(monkeypatch):
@@ -240,6 +265,40 @@ def test_collect_assets_tolerates_none_metadata_and_parsed_data(monkeypatch):
     assert assets["runtime_assets"] == []
     assert assets["dev_assets"] == []
     assert assets["design_assets"] == []
+
+
+def test_execute_debate_degrades_when_llm_unavailable(monkeypatch):
+    _reset_state()
+    client = TestClient(app)
+
+    monkeypatch.setattr(
+        report_service_module.report_generation_service,
+        "generate_report",
+        _create_fake_report_generator(),
+    )
+
+    async def _always_fail_ai_debate(*args, **kwargs):
+        raise RuntimeError("LLM_RATE_LIMITED: mock 429")
+
+    monkeypatch.setattr(debate_service, "_execute_ai_debate", _always_fail_ai_debate)
+
+    created = client.post("/api/v1/incidents/", json={"title": "llm unavailable incident"})
+    assert created.status_code == 201
+    incident_id = created.json()["id"]
+
+    session_resp = client.post(f"/api/v1/debates/?incident_id={incident_id}")
+    assert session_resp.status_code == 201
+    session_id = session_resp.json()["id"]
+
+    execute_resp = client.post(f"/api/v1/debates/{session_id}/execute")
+    assert execute_resp.status_code == 200
+    payload = execute_resp.json()
+    assert payload["session_id"] == session_id
+    assert "LLM 服务繁忙" in payload["root_cause"]
+    assert payload["confidence"] > 0
+
+    latest = client.get(f"/api/v1/debates/{session_id}/result")
+    assert latest.status_code == 200
 
 
 def test_interface_locate_endpoint_maps_to_domain_aggregate():

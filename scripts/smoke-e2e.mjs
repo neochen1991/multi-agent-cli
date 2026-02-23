@@ -1,5 +1,6 @@
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+const WS_TIMEOUT_MS = Number(process.env.WS_TIMEOUT_MS || 900000);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -41,7 +42,7 @@ async function jsonRequest(url, init = {}, token = '') {
   return data;
 }
 
-async function runRealtimeDebate(sessionId, token = '', timeoutMs = 420000) {
+async function runRealtimeDebate(sessionId, token = '', timeoutMs = WS_TIMEOUT_MS) {
   const params = new URLSearchParams();
   params.set('auto_start', 'true');
   if (token) params.set('token', token);

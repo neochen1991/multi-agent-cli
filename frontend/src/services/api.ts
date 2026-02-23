@@ -171,8 +171,15 @@ export const incidentApi = {
 };
 
 export const debateApi = {
-  async createSession(incidentId: string): Promise<{ id: string; incident_id: string; status: string }> {
-    const { data } = await api.post('/debates/', null, { params: { incident_id: incidentId } });
+  async createSession(
+    incidentId: string,
+    options?: { maxRounds?: number },
+  ): Promise<{ id: string; incident_id: string; status: string }> {
+    const params: Record<string, string | number> = { incident_id: incidentId };
+    if (typeof options?.maxRounds === 'number' && Number.isFinite(options.maxRounds)) {
+      params.max_rounds = Math.max(1, Math.min(8, Math.trunc(options.maxRounds)));
+    }
+    const { data } = await api.post('/debates/', null, { params });
     return data;
   },
   async execute(sessionId: string): Promise<DebateResult> {

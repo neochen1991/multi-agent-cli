@@ -143,7 +143,13 @@ class CancelResponse(BaseModel):
 )
 async def create_debate_session(
     incident_id: str,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    max_rounds: Optional[int] = Query(
+        default=None,
+        ge=1,
+        le=8,
+        description="本次辩论最大轮数（可选，默认使用系统配置）",
+    ),
 ):
     """创建辩论会话"""
     # 获取故障事件
@@ -155,7 +161,10 @@ async def create_debate_session(
         )
     
     # 创建辩论会话
-    session = await debate_service.create_session(incident)
+    session = await debate_service.create_session(
+        incident,
+        max_rounds=max_rounds,
+    )
     
     # 更新故障状态
     await incident_service.update_incident(

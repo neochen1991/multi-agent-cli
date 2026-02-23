@@ -55,13 +55,36 @@ class ReportGenerationService:
             format=format
         )
         
-        # 使用 AI 生成报告内容
-        report_content = await self._generate_report_with_ai(
-            incident,
-            debate_result,
-            assets,
-            event_callback=event_callback,
-        )
+        # 使用 AI 生成报告内容（失败时自动降级，避免整个会话失败）
+        try:
+            report_content = await self._generate_report_with_ai(
+                incident,
+                debate_result,
+                assets,
+                event_callback=event_callback,
+            )
+        except Exception as e:
+            error_text = str(e).strip() or e.__class__.__name__
+            logger.warning(
+                "report_generation_degraded_to_fallback",
+                incident_id=incident.get("id"),
+                error=error_text,
+            )
+            await self._emit_event(
+                event_callback,
+                {
+                    "type": "report_generation_degraded",
+                    "phase": "report_generation",
+                    "error": error_text,
+                    "message": "报告 LLM 超时或失败，已自动降级为模板报告",
+                },
+            )
+            report_content = self._build_fallback_report_content(
+                incident=incident,
+                debate_result=debate_result,
+                assets=assets,
+                error_text=error_text,
+            )
         
         # 根据格式生成报告
         if format == "markdown":
@@ -96,7 +119,7 @@ class ReportGenerationService:
                 title="报告生成"
             )
             
-            # 构建报告生成提示
+            # 构建报告生成提示（压缩输入长度，降低超时概率）
             prompt = self._build_report_prompt(incident, debate_result, assets)
             
             await self._emit_event(
@@ -111,22 +134,50 @@ class ReportGenerationService:
                 },
             )
             started_at = time.perf_counter()
-            call_timeout = max(30, min(settings.llm_timeout, 150))
-            result = await asyncio.wait_for(
-                autogen_client.send_prompt(
-                    session_id=session.id,
-                    parts=[{"type": "text", "text": prompt}],
-                    model=settings.default_model_config,
-                    max_tokens=1400,
-                    format={"type": "json_schema", "schema": self._report_json_schema()},
-                    trace_callback=event_callback,
-                    trace_context={
-                        "phase": "report_generation",
-                        "stage": "report_ai_generation",
-                    },
-                ),
-                timeout=call_timeout,
-            )
+            result: Optional[Dict[str, Any]] = None
+            last_error: Optional[Exception] = None
+            # 两次尝试：第一次更短超时，第二次使用标准超时
+            timeout_plan = [
+                max(12, min(settings.llm_timeout, 20)),
+                max(18, min(settings.llm_total_timeout, 35)),
+            ]
+            for attempt_idx, call_timeout in enumerate(timeout_plan, start=1):
+                try:
+                    if attempt_idx > 1:
+                        await self._emit_event(
+                            event_callback,
+                            {
+                                "type": "autogen_call_retry",
+                                "phase": "report_generation",
+                                "stage": "report_ai_generation",
+                                "session_id": session.id,
+                                "attempt": attempt_idx,
+                                "timeout_seconds": call_timeout,
+                            },
+                        )
+                    result = await asyncio.wait_for(
+                        autogen_client.send_prompt(
+                            session_id=session.id,
+                            parts=[{"type": "text", "text": prompt}],
+                            model=settings.default_model_config,
+                            max_tokens=max(320, min(int(settings.DEBATE_REPORT_MAX_TOKENS), 900)),
+                            format={"type": "json_schema", "schema": self._report_json_schema()},
+                            trace_callback=event_callback,
+                            trace_context={
+                                "phase": "report_generation",
+                                "stage": "report_ai_generation",
+                            },
+                            use_session_history=False,
+                        ),
+                        timeout=call_timeout,
+                    )
+                    break
+                except Exception as inner_exc:
+                    last_error = inner_exc
+                    if attempt_idx >= len(timeout_plan):
+                        raise
+            if result is None and last_error is not None:
+                raise last_error
             
             if result and "content" in result:
                 await self._emit_event(
@@ -189,30 +240,59 @@ class ReportGenerationService:
         fix_recommendation = final_judgment.get("fix_recommendation", {}) if isinstance(final_judgment, dict) else {}
         impact = final_judgment.get("impact_analysis", {}) if isinstance(final_judgment, dict) else {}
         risk = final_judgment.get("risk_assessment", {}) if isinstance(final_judgment, dict) else {}
+        evidence_chain_raw = final_judgment.get("evidence_chain") or []
+        evidence_chain_compact: List[Dict[str, Any]] = []
+        if isinstance(evidence_chain_raw, list):
+            for item in evidence_chain_raw[:3]:
+                if isinstance(item, dict):
+                    evidence_chain_compact.append(
+                        {
+                            "type": item.get("type"),
+                            "source": item.get("source"),
+                            "location": item.get("location"),
+                            "description": str(item.get("description") or "")[:180],
+                        }
+                    )
+                else:
+                    evidence_chain_compact.append(
+                        {
+                            "type": "analysis",
+                            "source": "unknown",
+                            "location": "",
+                            "description": str(item)[:180],
+                        }
+                    )
+
         incident_summary = {
             "id": incident.get("id"),
             "title": incident.get("title"),
             "severity": incident.get("severity"),
             "service_name": incident.get("service_name"),
             "environment": incident.get("environment"),
-            "description": str(incident.get("description") or "")[:500],
-            "log_excerpt": str(incident.get("log_content") or "")[:1200],
+            "description": str(incident.get("description") or "")[:220],
+            "log_excerpt": str(incident.get("log_content") or "")[:420],
         }
         debate_summary = {
             "confidence": debate_result.get("confidence"),
             "root_cause": {
-                "summary": root_cause.get("summary"),
+                "summary": str(root_cause.get("summary") or "")[:220],
                 "category": root_cause.get("category"),
-                "description": str(root_cause.get("description") or "")[:800],
             },
-            "evidence_chain": (final_judgment.get("evidence_chain") or [])[:6],
+            "evidence_chain": evidence_chain_compact,
             "fix_recommendation": {
-                "summary": str(fix_recommendation.get("summary") or "")[:600],
-                "steps": (fix_recommendation.get("steps") or [])[:8],
+                "summary": str(fix_recommendation.get("summary") or "")[:300],
+                "steps": [str(step)[:140] for step in (fix_recommendation.get("steps") or [])[:3]],
             },
-            "impact_analysis": impact,
-            "risk_assessment": risk,
-            "action_items": (debate_result.get("action_items") or [])[:8],
+            "impact_analysis": {
+                "affected_services": (impact.get("affected_services") or [])[:4],
+                "business_impact": str(impact.get("business_impact") or "")[:180],
+                "affected_users": str(impact.get("affected_users") or "")[:120],
+            },
+            "risk_assessment": {
+                "risk_level": risk.get("risk_level"),
+                "risk_factors": [str(i)[:120] for i in (risk.get("risk_factors") or [])[:3]],
+            },
+            "action_items": [str(item)[:140] for item in (debate_result.get("action_items") or [])[:3]],
             "responsible_team": debate_result.get("responsible_team"),
         }
         assets_summary = {
@@ -232,30 +312,20 @@ class ReportGenerationService:
 
 ## 故障事件
 ```json
-{json.dumps(incident_summary, ensure_ascii=False, indent=2, default=str)}
+{json.dumps(incident_summary, ensure_ascii=False, separators=(",", ":"), default=str)}
 ```
 
 ## AI 辩论分析结果
 ```json
-{json.dumps(debate_summary, ensure_ascii=False, indent=2, default=str)}
+{json.dumps(debate_summary, ensure_ascii=False, separators=(",", ":"), default=str)}
 ```
 
 ## 三态资产摘要
 ```json
-{json.dumps(assets_summary, ensure_ascii=False, indent=2, default=str)}
+{json.dumps(assets_summary, ensure_ascii=False, separators=(",", ":"), default=str)}
 ```
 
-请生成包含以下内容的报告：
-
-1. **执行摘要** - 简要描述故障和结论
-2. **故障概述** - 详细的故障描述
-3. **根因分析** - 根本原因和证据链
-4. **影响评估** - 业务影响和技术影响
-5. **修复建议** - 具体的修复步骤
-6. **预防措施** - 防止再次发生的建议
-7. **附录** - 相关资产信息
-
-请以 JSON 格式返回报告结构：
+请输出中文且精炼，避免冗长。列表项建议不超过 5 条。必须仅返回 JSON，结构如下：
 {{
     "executive_summary": {{
         "title": "",
@@ -290,6 +360,73 @@ class ReportGenerationService:
         "debate_summary": ""
     }}
 }}"""
+
+    def _build_fallback_report_content(
+        self,
+        incident: Dict[str, Any],
+        debate_result: Dict[str, Any],
+        assets: Dict[str, Any],
+        error_text: str,
+    ) -> Dict[str, Any]:
+        final_judgment = self._safe_dict(debate_result.get("final_judgment", {}))
+        root_cause = self._safe_dict(final_judgment.get("root_cause", {}))
+        impact = self._safe_dict(final_judgment.get("impact_analysis", {}))
+        risk = self._safe_dict(final_judgment.get("risk_assessment", {}))
+        fix = self._safe_dict(final_judgment.get("fix_recommendation", {}))
+        evidence = self._safe_list(final_judgment.get("evidence_chain", []))
+        action_items = self._safe_list(debate_result.get("action_items", []))
+
+        return self._normalize_report_structure(
+            {
+                "executive_summary": {
+                    "title": f"故障分析报告 - {incident.get('title', '未知故障')}",
+                    "severity": risk.get("risk_level") or incident.get("severity") or "medium",
+                    "root_cause_summary": root_cause.get("summary") or "待进一步确认",
+                    "resolution_status": "已生成降级报告",
+                },
+                "incident_overview": {
+                    "description": str(incident.get("description") or incident.get("title") or "")[:500],
+                    "timeline": [
+                        {
+                            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                            "event": f"报告 LLM 超时降级: {error_text}",
+                        }
+                    ],
+                    "affected_services": impact.get("affected_services") or [incident.get("service_name") or "未知服务"],
+                },
+                "root_cause_analysis": {
+                    "primary_cause": root_cause.get("summary") or "待确认",
+                    "contributing_factors": risk.get("risk_factors") or [],
+                    "evidence_chain": evidence[:6],
+                },
+                "impact_assessment": {
+                    "business_impact": impact.get("business_impact") or "待评估",
+                    "technical_impact": "报告由降级模板生成，建议复核原始辩论记录",
+                    "affected_users": impact.get("affected_users") or "待评估",
+                    "duration": "待补充",
+                },
+                "recommendations": {
+                    "immediate_actions": action_items[:6],
+                    "long_term_fixes": self._safe_list(fix.get("steps"))[:6],
+                    "prevention_measures": self._safe_list(risk.get("mitigation_suggestions"))[:6],
+                },
+                "lessons_learned": [
+                    "报告阶段出现 LLM 超时，系统已自动降级为模板报告以保证流程可用",
+                    "建议缩短输入日志长度并重试以获得更完整的自然语言报告",
+                ],
+                "appendix": {
+                    "related_assets": [
+                        {"type": "runtime", "count": len(assets.get("runtime_assets", []))},
+                        {"type": "development", "count": len(assets.get("dev_assets", []))},
+                        {"type": "design", "count": len(assets.get("design_assets", []))},
+                    ],
+                    "debate_summary": "报告由降级模板生成，详见辩论阶段原始结论",
+                },
+            },
+            incident=incident,
+            debate_result=debate_result,
+            assets=assets,
+        )
     
     def _parse_ai_report(self, content: str) -> Dict[str, Any]:
         """解析 AI 生成的报告"""
