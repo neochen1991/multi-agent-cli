@@ -5,61 +5,64 @@ LangGraph Runtime orchestration for multi-agent, multi-round debate.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
 from datetime import datetime
 import json
-import re
-from time import perf_counter
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypedDict
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from uuid import uuid4
 
 import structlog
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.config import settings
 from app.core.event_schema import enrich_event
-from app.core.json_utils import extract_json_dict
-from app.core.llm_client import LLMClient
+from app.runtime.langgraph.prompts import (
+    build_agent_prompt as build_agent_prompt_template,
+    build_collaboration_prompt as build_collaboration_prompt_template,
+    build_peer_driven_prompt as build_peer_driven_prompt_template,
+    build_problem_analysis_commander_prompt as build_problem_analysis_commander_prompt_template,
+    build_problem_analysis_supervisor_prompt as build_problem_analysis_supervisor_prompt_template,
+    coordinator_command_schema as coordinator_command_schema_template,
+    judge_output_schema as judge_output_schema_template,
+)
+from app.runtime.langgraph.parsers import (
+    normalize_agent_output as normalize_agent_output_parser,
+    normalize_commander_output as normalize_commander_output_parser,
+    normalize_judge_output,
+    normalize_normal_output,
+)
+from app.runtime.langgraph.execution import call_agent as execute_runtime_agent_call
+from app.runtime.langgraph.routing import (
+    agent_from_step as agent_from_step_route,
+    fallback_supervisor_route as fallback_supervisor_route_helper,
+    judge_is_ready as judge_is_ready_route,
+    recent_agent_card as recent_agent_card_route,
+    route_from_commander_output as route_from_commander_output_helper,
+    round_agent_counts as round_agent_counts_route,
+    route_guardrail as route_guardrail_helper,
+    step_for_agent as step_for_agent_route,
+    supervisor_step_to_node as supervisor_step_to_node_route,
+)
+from app.runtime.langgraph.nodes import (
+    build_agent_node,
+    build_finalize_node,
+    build_init_session_node,
+    build_phase_handler_node,
+    build_round_evaluate_node,
+    build_round_start_node,
+    build_supervisor_node,
+    execute_single_phase_agent,
+)
+from app.runtime.langgraph.specs import (
+    agent_sequence as build_agent_sequence,
+    problem_analysis_agent_spec as build_problem_analysis_agent_spec,
+)
+from app.runtime.langgraph.state import AgentSpec, DebateExecState as _DebateExecState, DebateTurn
 from app.runtime.messages import AgentEvidence, FinalVerdict, RoundCheckpoint
 from app.runtime.session_store import runtime_session_store
 
 logger = structlog.get_logger()
-
-
-class _DebateExecState(TypedDict, total=False):
-    context: Dict[str, Any]
-    context_summary: Dict[str, Any]
-    history_cards: List[AgentEvidence]
-    consensus_reached: bool
-    executed_rounds: int
-    current_round: int
-    continue_next_round: bool
-    agent_commands: Dict[str, Dict[str, Any]]
-    final_payload: Dict[str, Any]
-
-
-@dataclass
-class DebateTurn:
-    round_number: int
-    phase: str
-    agent_name: str
-    agent_role: str
-    model: Dict[str, str]
-    input_message: str
-    output_content: Dict[str, Any]
-    confidence: float
-    started_at: datetime = field(default_factory=datetime.utcnow)
-    completed_at: Optional[datetime] = None
-
-
-@dataclass(frozen=True)
-class AgentSpec:
-    name: str
-    role: str
-    phase: str
-    system_prompt: str
 
 
 class LangGraphRuntimeOrchestrator:
@@ -71,6 +74,8 @@ class LangGraphRuntimeOrchestrator:
     STREAM_CHUNK_SIZE = 160
     STREAM_MAX_CHUNKS = 16
     JUDGE_FALLBACK_SUMMARY = "需要进一步分析"
+    MAX_DISCUSSION_STEPS_PER_ROUND = 12
+    DIALOGUE_PROMPT_CHAR_BUDGET = 900
 
     def __init__(self, consensus_threshold: float = 0.85, max_rounds: int = 1):
         self.consensus_threshold = consensus_threshold
@@ -82,6 +87,7 @@ class LangGraphRuntimeOrchestrator:
         self._active_round_commands: Dict[str, Dict[str, Any]] = {}
         self._event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
         self._llm_semaphore = asyncio.Semaphore(max(1, int(settings.LLM_MAX_CONCURRENCY or 1)))
+        self._graph_checkpointer = MemorySaver()
         logger.info(
             "langgraph_runtime_orchestrator_initialized",
             model=settings.llm_model,
@@ -120,37 +126,48 @@ class LangGraphRuntimeOrchestrator:
         }
 
         graph = StateGraph(_DebateExecState)
-        graph.add_node("init_session", self._graph_init_session)
-        graph.add_node("round_start", self._graph_round_start)
-        graph.add_node("analysis_parallel", self._graph_analysis_parallel)
-        graph.add_node("analysis_collaboration", self._graph_analysis_collaboration)
-        graph.add_node("critic", self._graph_critic)
-        graph.add_node("rebuttal", self._graph_rebuttal)
-        graph.add_node("judge", self._graph_judge)
-        graph.add_node("round_evaluate", self._graph_round_evaluate)
-        graph.add_node("finalize", self._graph_finalize)
+        graph.add_node("init_session", build_init_session_node(self))
+        graph.add_node("round_start", build_round_start_node(self))
+        graph.add_node("supervisor_decide", build_supervisor_node(self))
+        graph.add_node("analysis_parallel_node", build_phase_handler_node(self, "_graph_analysis_parallel"))
+        graph.add_node(
+            "analysis_collaboration_node",
+            build_phase_handler_node(self, "_graph_analysis_collaboration"),
+        )
+        graph.add_node("log_agent_node", build_agent_node(self, "LogAgent"))
+        graph.add_node("domain_agent_node", build_agent_node(self, "DomainAgent"))
+        graph.add_node("code_agent_node", build_agent_node(self, "CodeAgent"))
+        graph.add_node("critic_agent_node", build_agent_node(self, "CriticAgent"))
+        graph.add_node("rebuttal_agent_node", build_agent_node(self, "RebuttalAgent"))
+        graph.add_node("judge_agent_node", build_agent_node(self, "JudgeAgent"))
+        graph.add_node("round_evaluate", build_round_evaluate_node(self))
+        graph.add_node("finalize", build_finalize_node(self))
         graph.add_edge(START, "init_session")
         graph.add_edge("init_session", "round_start")
-        graph.add_edge("round_start", "analysis_parallel")
+        graph.add_edge("round_start", "supervisor_decide")
         graph.add_conditional_edges(
-            "analysis_parallel",
-            self._route_after_analysis_parallel,
+            "supervisor_decide",
+            self._route_after_supervisor_decide,
             {
-                "analysis_collaboration": "analysis_collaboration",
-                "critic": "critic",
+                "analysis_parallel_node": "analysis_parallel_node",
+                "analysis_collaboration_node": "analysis_collaboration_node",
+                "log_agent_node": "log_agent_node",
+                "domain_agent_node": "domain_agent_node",
+                "code_agent_node": "code_agent_node",
+                "critic_agent_node": "critic_agent_node",
+                "rebuttal_agent_node": "rebuttal_agent_node",
+                "judge_agent_node": "judge_agent_node",
+                "round_evaluate": "round_evaluate",
             },
         )
-        graph.add_edge("analysis_collaboration", "critic")
-        graph.add_conditional_edges(
-            "critic",
-            self._route_after_critic,
-            {
-                "rebuttal": "rebuttal",
-                "judge": "judge",
-            },
-        )
-        graph.add_edge("rebuttal", "judge")
-        graph.add_edge("judge", "round_evaluate")
+        graph.add_edge("analysis_parallel_node", "supervisor_decide")
+        graph.add_edge("analysis_collaboration_node", "supervisor_decide")
+        graph.add_edge("log_agent_node", "supervisor_decide")
+        graph.add_edge("domain_agent_node", "supervisor_decide")
+        graph.add_edge("code_agent_node", "supervisor_decide")
+        graph.add_edge("critic_agent_node", "supervisor_decide")
+        graph.add_edge("rebuttal_agent_node", "supervisor_decide")
+        graph.add_edge("judge_agent_node", "supervisor_decide")
         graph.add_conditional_edges(
             "round_evaluate",
             self._route_after_round_evaluate,
@@ -160,14 +177,15 @@ class LangGraphRuntimeOrchestrator:
             },
         )
         graph.add_edge("finalize", END)
-        app = graph.compile()
+        app = graph.compile(checkpointer=self._graph_checkpointer)
 
         try:
             result_state = await app.ainvoke(
                 {
                     "context": context,
                     "context_summary": context_summary,
-                }
+                },
+                config={"configurable": {"thread_id": str(self.session_id)}},
             )
             return dict(result_state.get("final_payload") or {})
         except Exception:
@@ -191,11 +209,22 @@ class LangGraphRuntimeOrchestrator:
         )
         return {
             "history_cards": [],
+            "messages": [],
+            "claims": [],
+            "open_questions": [],
+            "agent_outputs": {},
             "consensus_reached": False,
             "executed_rounds": 0,
             "current_round": 0,
             "continue_next_round": False,
             "agent_commands": {},
+            "next_step": "",
+            "round_start_turn_index": 0,
+            "discussion_step_count": 0,
+            "max_discussion_steps": self.MAX_DISCUSSION_STEPS_PER_ROUND,
+            "supervisor_stop_requested": False,
+            "supervisor_stop_reason": "",
+            "supervisor_notes": [],
         }
 
     def _route_after_analysis_parallel(self, state: _DebateExecState) -> str:
@@ -204,14 +233,384 @@ class LangGraphRuntimeOrchestrator:
     def _route_after_critic(self, state: _DebateExecState) -> str:
         return "rebuttal" if settings.DEBATE_ENABLE_CRITIQUE else "judge"
 
+    def _supervisor_step_to_node(self, next_step: str) -> str:
+        return supervisor_step_to_node_route(next_step)
+
+    def _route_after_supervisor_decide(self, state: _DebateExecState) -> str:
+        return self._supervisor_step_to_node(str(state.get("next_step") or ""))
+
     def _route_after_round_evaluate(self, state: _DebateExecState) -> str:
         return "round_start" if bool(state.get("continue_next_round")) else "finalize"
+
+    def _round_discussion_budget(self) -> int:
+        base = self.MAX_DISCUSSION_STEPS_PER_ROUND
+        if settings.DEBATE_ENABLE_COLLABORATION:
+            base += 2
+        if not settings.DEBATE_ENABLE_CRITIQUE:
+            base = max(6, base - 2)
+        return max(6, min(base, 24))
+
+    def _step_for_agent(self, agent_name: str) -> str:
+        return step_for_agent_route(agent_name)
+
+    def _agent_from_step(self, step: str) -> str:
+        return agent_from_step_route(step)
+
+    def _round_turns_from_state(self, state: _DebateExecState) -> List[DebateTurn]:
+        start_index = max(0, int(state.get("round_start_turn_index") or 0))
+        return list(self.turns[start_index:])
+
+    def _round_cards_from_state(self, state: _DebateExecState) -> List[AgentEvidence]:
+        history_cards = list(state.get("history_cards") or [])
+        start_index = max(0, int(state.get("round_start_turn_index") or 0))
+        if start_index <= 0:
+            return history_cards
+        # round_start_turn_index is indexed against self.turns; cards track the same append order.
+        return history_cards[start_index:]
+
+    def _recent_judge_turn(self, round_turns: List[DebateTurn]) -> Optional[DebateTurn]:
+        for turn in reversed(round_turns):
+            if turn.agent_name == "JudgeAgent":
+                return turn
+        return None
+
+    def _recent_judge_card(self, round_cards: List[AgentEvidence]) -> Optional[AgentEvidence]:
+        for card in reversed(round_cards):
+            if card.agent_name == "JudgeAgent":
+                return card
+        return None
+
+    def _recent_agent_card(
+        self,
+        round_cards: List[AgentEvidence],
+        agent_name: str,
+    ) -> Optional[AgentEvidence]:
+        return recent_agent_card_route(round_cards, agent_name)
+
+    def _round_agent_counts(self, round_cards: List[AgentEvidence]) -> Dict[str, int]:
+        return round_agent_counts_route(round_cards)
+
+    def _judge_is_ready(self, round_cards: List[AgentEvidence]) -> bool:
+        return judge_is_ready_route(
+            round_cards,
+            parallel_analysis_agents=self.PARALLEL_ANALYSIS_AGENTS,
+            debate_enable_critique=settings.DEBATE_ENABLE_CRITIQUE,
+        )
+
+    def _route_guardrail(
+        self,
+        *,
+        state: _DebateExecState,
+        round_cards: List[AgentEvidence],
+        route_decision: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return route_guardrail_helper(
+            state=state,
+            round_cards=round_cards,
+            route_decision=route_decision,
+            consensus_threshold=self.consensus_threshold,
+            max_discussion_steps_default=self.MAX_DISCUSSION_STEPS_PER_ROUND,
+            parallel_analysis_agents=self.PARALLEL_ANALYSIS_AGENTS,
+            debate_enable_critique=settings.DEBATE_ENABLE_CRITIQUE,
+        )
+
+    def _fallback_supervisor_route(
+        self,
+        state: _DebateExecState,
+        round_cards: List[AgentEvidence],
+    ) -> Dict[str, Any]:
+        return fallback_supervisor_route_helper(
+            state=state,
+            round_cards=round_cards,
+            debate_enable_critique=settings.DEBATE_ENABLE_CRITIQUE,
+            consensus_threshold=self.consensus_threshold,
+            max_discussion_steps_default=self.MAX_DISCUSSION_STEPS_PER_ROUND,
+            parallel_analysis_agents=self.PARALLEL_ANALYSIS_AGENTS,
+        )
+
+    def _route_from_commander_output(
+        self,
+        payload: Dict[str, Any],
+        state: _DebateExecState,
+        round_cards: List[AgentEvidence],
+    ) -> Dict[str, Any]:
+        return route_from_commander_output_helper(
+            payload=payload,
+            state=state,
+            round_cards=round_cards,
+            allowed_agents=[spec.name for spec in self._agent_sequence()],
+            is_placeholder_summary=self._is_placeholder_summary,
+            fallback_supervisor_route_fn=self._fallback_supervisor_route,
+            route_guardrail_fn=self._route_guardrail,
+        )
+
+    def _card_to_ai_message(self, card: AgentEvidence) -> Optional[AIMessage]:
+        output = card.raw_output if isinstance(getattr(card, "raw_output", None), dict) else {}
+        chat_message = str(output.get("chat_message") or "").strip()
+        if not chat_message:
+            return None
+        return AIMessage(
+            content=chat_message[:1200],
+            name=card.agent_name,
+            additional_kwargs={
+                "agent_name": card.agent_name,
+                "phase": card.phase,
+                "round_number": None,
+                "confidence": float(card.confidence or 0.0),
+                "conclusion": str(card.conclusion or "")[:220],
+            },
+        )
+
+    def _dialogue_items_from_messages(
+        self,
+        messages: List[Any],
+        *,
+        limit: int = 8,
+        char_budget: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        budget = max(240, int(char_budget or self.DIALOGUE_PROMPT_CHAR_BUDGET))
+        items: List[Dict[str, Any]] = []
+        seen_signatures: set[tuple[str, str]] = set()
+        used_chars = 0
+        for msg in reversed(list(messages or [])):
+            content = getattr(msg, "content", "")
+            if isinstance(content, list):
+                content_text = " ".join(
+                    str(part.get("text") or "")
+                    for part in content
+                    if isinstance(part, dict)
+                ).strip()
+            else:
+                content_text = str(content or "").strip()
+            if not content_text:
+                continue
+            additional = getattr(msg, "additional_kwargs", {}) or {}
+            speaker = (
+                str(getattr(msg, "name", "") or "")
+                or str(additional.get("agent_name") or "")
+                or str(getattr(msg, "type", "") or "assistant")
+            )
+            # Avoid flooding prompts with repeated statements from the same speaker.
+            sig = (speaker, content_text[:64])
+            if sig in seen_signatures:
+                continue
+            seen_signatures.add(sig)
+            msg_snippet = content_text[:140]
+            conclusion_snippet = str(additional.get("conclusion") or "")[:96]
+            estimated = len(msg_snippet) + len(conclusion_snippet) + len(speaker) + 24
+            if items and used_chars + estimated > budget:
+                continue
+            used_chars += estimated
+            items.append(
+                {
+                    "speaker": speaker,
+                    "phase": str(additional.get("phase") or ""),
+                    "conclusion": conclusion_snippet,
+                    "message": msg_snippet,
+                }
+            )
+            if len(items) >= max(1, limit):
+                break
+        items.reverse()
+        return items
+
+    def _message_deltas_from_cards(self, cards: List[AgentEvidence]) -> List[AIMessage]:
+        deltas: List[AIMessage] = []
+        for card in cards:
+            msg = self._card_to_ai_message(card)
+            if msg is not None:
+                deltas.append(msg)
+        return deltas
+
+    def _derive_conversation_state(self, history_cards: List[AgentEvidence]) -> Dict[str, Any]:
+        claims: List[Dict[str, Any]] = []
+        open_questions: List[str] = []
+        agent_outputs: Dict[str, Dict[str, Any]] = {}
+        for card in history_cards:
+            output = card.raw_output if isinstance(getattr(card, "raw_output", None), dict) else {}
+            agent_outputs[card.agent_name] = output
+            conclusion = str(card.conclusion or output.get("conclusion") or "").strip()
+            if conclusion:
+                claims.append(
+                    {
+                        "agent_name": card.agent_name,
+                        "phase": card.phase,
+                        "round_number": None,
+                        "conclusion": conclusion,
+                        "confidence": float(card.confidence or 0.0),
+                    }
+                )
+            for key in ("missing_info", "open_questions", "needs_validation"):
+                value = output.get(key)
+                if isinstance(value, list):
+                    for item in value:
+                        text = str(item or "").strip()
+                        if text:
+                            open_questions.append(text)
+                elif isinstance(value, str):
+                    text = value.strip()
+                    if text:
+                        open_questions.append(text)
+        # preserve order while deduping
+        deduped_questions = list(dict.fromkeys(open_questions))[:12]
+        return {
+            "claims": claims[-24:],
+            "open_questions": deduped_questions,
+            "agent_outputs": agent_outputs,
+        }
+
+    async def _graph_supervisor_decide(self, state: _DebateExecState) -> _DebateExecState:
+        history_cards = list(state.get("history_cards") or [])
+        prev_history_count = len(history_cards)
+        dialogue_items = self._dialogue_items_from_messages(
+            list(state.get("messages") or []),
+            limit=6,
+            char_budget=720,
+        )
+        loop_round = int(state.get("current_round") or 1)
+        discussion_step_count = int(state.get("discussion_step_count") or 0)
+        max_discussion_steps = int(state.get("max_discussion_steps") or self.MAX_DISCUSSION_STEPS_PER_ROUND)
+        round_cards = self._round_cards_from_state(state)
+        preseed_step = str(state.get("next_step") or "").strip()
+        supervisor_stop_requested = bool(state.get("supervisor_stop_requested") or False)
+        supervisor_stop_reason = str(state.get("supervisor_stop_reason") or "").strip()
+
+        route_decision: Dict[str, Any]
+        mode = "langgraph_supervisor_dynamic"
+        if preseed_step and discussion_step_count == 0:
+            route_decision = {
+                "next_step": preseed_step,
+                "should_stop": supervisor_stop_requested,
+                "stop_reason": supervisor_stop_reason,
+                "reason": "采用主Agent开场拆解后的预置调度",
+            }
+            mode = "langgraph_supervisor_seeded"
+        else:
+            recent_judge_card = self._recent_judge_card(round_cards)
+            recent_judge_conf = float(recent_judge_card.confidence or 0.0) if recent_judge_card else 0.0
+            if recent_judge_card and recent_judge_conf >= self.consensus_threshold:
+                route_decision = {
+                    "next_step": "",
+                    "should_stop": True,
+                    "stop_reason": "JudgeAgent 已给出高置信裁决",
+                    "reason": "达到裁决阈值，主Agent结束讨论",
+                }
+                mode = "langgraph_supervisor_consensus_shortcut"
+            elif discussion_step_count >= max_discussion_steps:
+                route_decision = self._fallback_supervisor_route(state=state, round_cards=round_cards)
+                route_decision["reason"] = f"达到讨论步数预算({max_discussion_steps})，使用回退调度"
+                mode = "langgraph_supervisor_budget_guard"
+            else:
+                context_summary = state.get("context_summary") or {}
+                compact_context = self._compact_round_context(context_summary)
+                round_cards = list(history_cards[-10:])
+                try:
+                    commander_output = await self._run_problem_analysis_supervisor_router(
+                        loop_round=loop_round,
+                        compact_context=compact_context,
+                        history_cards=history_cards,
+                        round_history_cards=round_cards,
+                        dialogue_items=dialogue_items,
+                        discussion_step_count=discussion_step_count,
+                        max_discussion_steps=max_discussion_steps,
+                    )
+                    route_decision = self._route_from_commander_output(
+                        payload=commander_output,
+                        state=state,
+                        round_cards=self._round_cards_from_state(state),
+                    )
+                    merged_commands = dict(state.get("agent_commands") or {})
+                    merged_commands.update(dict(commander_output.get("commands") or {}))
+                    route_decision["agent_commands"] = merged_commands
+                except Exception as exc:
+                    logger.warning(
+                        "supervisor_dynamic_routing_failed",
+                        session_id=self.session_id,
+                        loop_round=loop_round,
+                        error=str(exc).strip() or exc.__class__.__name__,
+                    )
+                    route_decision = self._fallback_supervisor_route(state=state, round_cards=round_cards)
+                    mode = "langgraph_supervisor_fallback"
+
+        route_decision = self._route_guardrail(
+            state=state,
+            round_cards=self._round_cards_from_state({"history_cards": history_cards, "round_start_turn_index": state.get("round_start_turn_index")}),
+            route_decision=route_decision,
+        )
+
+        convo_state = self._derive_conversation_state(history_cards)
+        message_deltas = self._message_deltas_from_cards(history_cards[prev_history_count:])
+        next_step = str(route_decision.get("next_step") or "").strip()
+        note = {
+            "loop_round": loop_round,
+            "discussion_step_count": discussion_step_count,
+            "max_discussion_steps": max_discussion_steps,
+            "next_step": next_step,
+            "open_questions_count": len(convo_state.get("open_questions") or []),
+            "claims_count": len(convo_state.get("claims") or []),
+            "reason": str(route_decision.get("reason") or ""),
+            "should_stop": bool(route_decision.get("should_stop") or False),
+            "stop_reason": str(route_decision.get("stop_reason") or ""),
+        }
+        await self._emit_event(
+            {
+                "type": "supervisor_decision",
+                "session_id": self.session_id,
+                "loop_round": loop_round,
+                "discussion_step_count": discussion_step_count,
+                "max_discussion_steps": max_discussion_steps,
+                "next_step": next_step or None,
+                "reason": str(route_decision.get("reason") or ""),
+                "mode": mode,
+                "should_stop": bool(route_decision.get("should_stop") or False),
+                "stop_reason": str(route_decision.get("stop_reason") or "")[:240],
+                "open_questions_count": note["open_questions_count"],
+                "claims_count": note["claims_count"],
+            }
+        )
+        notes = list(state.get("supervisor_notes") or [])
+        notes.append(note)
+        result: Dict[str, Any] = {
+            "history_cards": history_cards,
+            "next_step": next_step,
+            "supervisor_stop_requested": bool(route_decision.get("should_stop") or False),
+            "supervisor_stop_reason": str(route_decision.get("stop_reason") or ""),
+            "supervisor_notes": notes[-20:],
+            **convo_state,
+        }
+        if message_deltas:
+            result["messages"] = message_deltas
+        if "agent_commands" in route_decision:
+            result["agent_commands"] = dict(route_decision.get("agent_commands") or {})
+        return result
+
+    def _graph_apply_step_result(
+        self,
+        state: _DebateExecState,
+        result: Optional[Dict[str, Any]],
+    ) -> _DebateExecState:
+        prev_history_cards = list(state.get("history_cards") or [])
+        next_history_cards = list((result or {}).get("history_cards") or state.get("history_cards") or [])
+        message_deltas = self._message_deltas_from_cards(next_history_cards[len(prev_history_cards):])
+        return {
+            **(result or {}),
+            "next_step": "",
+            "discussion_step_count": int(state.get("discussion_step_count") or 0) + 1,
+            **({"messages": message_deltas} if message_deltas else {}),
+            **self._derive_conversation_state(next_history_cards),
+        }
 
     async def _graph_round_start(self, state: _DebateExecState) -> _DebateExecState:
         current_round = int(state.get("current_round") or 0) + 1
         if current_round > max(1, self.max_rounds):
             return {"continue_next_round": False}
         history_cards = list(state.get("history_cards") or [])
+        prev_history_count = len(history_cards)
+        dialogue_items = self._dialogue_items_from_messages(
+            list(state.get("messages") or []),
+            limit=4,
+            char_budget=520,
+        )
         context_summary = state.get("context_summary") or {}
         compact_context = self._compact_round_context(context_summary)
         await self._emit_event(
@@ -222,28 +621,54 @@ class LangGraphRuntimeOrchestrator:
                 "mode": "langgraph_runtime",
             }
         )
-        commands = await self._run_problem_analysis_commander(
+        commander_result = await self._run_problem_analysis_commander(
             loop_round=current_round,
             compact_context=compact_context,
             history_cards=history_cards,
+            dialogue_items=dialogue_items,
         )
+        commands = dict(commander_result.get("commands") or {})
         self._active_round_commands = commands
+        preseed_route = self._route_from_commander_output(
+            payload=commander_result,
+            state=state,
+            round_cards=self._round_cards_from_state({"history_cards": history_cards, "round_start_turn_index": len(self.turns) - 1}),
+        )
         return {
             "current_round": current_round,
             "continue_next_round": False,
+            "history_cards": history_cards,
             "agent_commands": commands,
+            "next_step": str(preseed_route.get("next_step") or ""),
+            "round_start_turn_index": len(self.turns),
+            "discussion_step_count": 0,
+            "max_discussion_steps": self._round_discussion_budget(),
+            "supervisor_stop_requested": bool(preseed_route.get("should_stop") or False),
+            "supervisor_stop_reason": str(preseed_route.get("stop_reason") or ""),
+            **(
+                {"messages": self._message_deltas_from_cards(history_cards[prev_history_count:])}
+                if len(history_cards) > prev_history_count
+                else {}
+            ),
+            **self._derive_conversation_state(history_cards),
         }
 
     async def _graph_analysis_parallel(self, state: _DebateExecState) -> _DebateExecState:
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
         history_cards = list(state.get("history_cards") or [])
+        dialogue_items = self._dialogue_items_from_messages(
+            list(state.get("messages") or []),
+            limit=4,
+            char_budget=520,
+        )
         compact_context = self._compact_round_context(context_summary)
         await self._run_parallel_analysis_phase(
             loop_round=loop_round,
             compact_context=compact_context,
             history_cards=history_cards,
             agent_commands=dict(state.get("agent_commands") or {}),
+            dialogue_items=dialogue_items,
         )
         return {"history_cards": history_cards}
 
@@ -253,11 +678,17 @@ class LangGraphRuntimeOrchestrator:
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
         history_cards = list(state.get("history_cards") or [])
+        dialogue_items = self._dialogue_items_from_messages(
+            list(state.get("messages") or []),
+            limit=5,
+            char_budget=620,
+        )
         compact_context = self._compact_round_context(context_summary)
         await self._run_collaboration_phase(
             loop_round=loop_round,
             compact_context=compact_context,
             history_cards=history_cards,
+            dialogue_items=dialogue_items,
         )
         return {"history_cards": history_cards}
 
@@ -267,13 +698,20 @@ class LangGraphRuntimeOrchestrator:
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
         history_cards = list(state.get("history_cards") or [])
+        dialogue_items = self._dialogue_items_from_messages(
+            list(state.get("messages") or []),
+            limit=5,
+            char_budget=620,
+        )
         compact_context = self._compact_round_context(context_summary)
-        await self._run_single_phase_agent(
+        await execute_single_phase_agent(
+            self,
             agent_name="CriticAgent",
             loop_round=loop_round,
             compact_context=compact_context,
             history_cards=history_cards,
             agent_commands=dict(state.get("agent_commands") or {}),
+            dialogue_items=dialogue_items,
         )
         return {"history_cards": history_cards}
 
@@ -283,13 +721,20 @@ class LangGraphRuntimeOrchestrator:
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
         history_cards = list(state.get("history_cards") or [])
+        dialogue_items = self._dialogue_items_from_messages(
+            list(state.get("messages") or []),
+            limit=5,
+            char_budget=620,
+        )
         compact_context = self._compact_round_context(context_summary)
-        await self._run_single_phase_agent(
+        await execute_single_phase_agent(
+            self,
             agent_name="RebuttalAgent",
             loop_round=loop_round,
             compact_context=compact_context,
             history_cards=history_cards,
             agent_commands=dict(state.get("agent_commands") or {}),
+            dialogue_items=dialogue_items,
         )
         return {"history_cards": history_cards}
 
@@ -297,13 +742,20 @@ class LangGraphRuntimeOrchestrator:
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
         history_cards = list(state.get("history_cards") or [])
+        dialogue_items = self._dialogue_items_from_messages(
+            list(state.get("messages") or []),
+            limit=6,
+            char_budget=760,
+        )
         compact_context = self._compact_round_context(context_summary)
-        await self._run_single_phase_agent(
+        await execute_single_phase_agent(
+            self,
             agent_name="JudgeAgent",
             loop_round=loop_round,
             compact_context=compact_context,
             history_cards=history_cards,
             agent_commands=dict(state.get("agent_commands") or {}),
+            dialogue_items=dialogue_items,
         )
         await self._emit_problem_analysis_final_summary(
             loop_round=loop_round,
@@ -314,9 +766,10 @@ class LangGraphRuntimeOrchestrator:
     async def _graph_round_evaluate(self, state: _DebateExecState) -> _DebateExecState:
         current_round = int(state.get("current_round") or 1)
         history_cards = list(state.get("history_cards") or [])
-        judge_turn = self.turns[-1] if self.turns else None
-        judge_confidence = float((judge_turn.confidence if judge_turn else 0.0) or 0.0)
-        consensus_reached = judge_confidence >= self.consensus_threshold
+        judge_card = self._recent_judge_card(self._round_cards_from_state(state))
+        judge_confidence = float((judge_card.confidence if judge_card else 0.0) or 0.0)
+        supervisor_stop_requested = bool(state.get("supervisor_stop_requested") or False)
+        consensus_reached = bool(judge_card) and judge_confidence >= self.consensus_threshold
         executed_rounds = max(int(state.get("executed_rounds") or 0), current_round)
         await self._emit_event(
             {
@@ -324,12 +777,15 @@ class LangGraphRuntimeOrchestrator:
                 "loop_round": current_round,
                 "consensus_reached": consensus_reached,
                 "judge_confidence": judge_confidence,
+                "supervisor_stop_requested": supervisor_stop_requested,
+                "supervisor_stop_reason": str(state.get("supervisor_stop_reason") or "")[:240],
                 "mode": "langgraph_runtime",
             }
         )
         continue_next_round = (
             (not consensus_reached or current_round < self.min_rounds)
             and current_round < max(1, self.max_rounds)
+            and not supervisor_stop_requested
         )
         return {
             "history_cards": history_cards,
@@ -345,66 +801,110 @@ class LangGraphRuntimeOrchestrator:
         return None
 
     def _problem_analysis_agent_spec(self) -> AgentSpec:
-        return AgentSpec(
-            name="ProblemAnalysisAgent",
-            role="问题分析主Agent/调度协调者",
-            phase="analysis",
-            system_prompt=(
-                "你是生产故障问题分析主Agent。你负责拆解问题、向各专家Agent下达命令，并收敛最终结论。"
-                "请输出紧凑 JSON。"
-            ),
-        )
+        return build_problem_analysis_agent_spec()
 
     def _coordinator_command_schema(self) -> Dict[str, Any]:
-        return {
-            "chat_message": "",
-            "analysis": "",
-            "conclusion": "",
-            "commands": [
-                {
-                    "target_agent": "LogAgent|DomainAgent|CodeAgent|CriticAgent|RebuttalAgent|JudgeAgent",
-                    "task": "",
-                    "focus": "",
-                    "expected_output": "",
-                }
-            ],
-            "evidence_chain": [""],
-            "confidence": 0.0,
-        }
+        return coordinator_command_schema_template()
 
     def _build_problem_analysis_commander_prompt(
         self,
         loop_round: int,
         context: Dict[str, Any],
         history_cards: List[AgentEvidence],
+        dialogue_items: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        peer_items = [
-            {
-                "agent": card.agent_name,
-                "phase": card.phase,
-                "summary": card.summary[:100],
-                "conclusion": card.conclusion[:120],
-                "confidence": round(float(card.confidence or 0.0), 3),
-            }
-            for card in history_cards[-6:]
-        ]
-        schema = self._coordinator_command_schema()
-        return (
-            f"你是问题分析主Agent。当前第 {loop_round}/{self.max_rounds} 轮。\n"
-            "请先给出一段简短会议发言(chat_message)，然后给出对各专家Agent的命令清单(commands)。\n"
-            "必须覆盖 LogAgent、DomainAgent、CodeAgent；若已存在历史结论，可补充 CriticAgent/RebuttalAgent/JudgeAgent 命令。\n"
-            "命令要具体到分析重点，不要泛泛而谈。\n\n"
-            f"故障上下文:\n```json\n{self._to_compact_json(context)}\n```\n\n"
-            f"已有观点卡片:\n```json\n{self._to_compact_json(peer_items)}\n```\n\n"
-            f"仅输出 JSON，格式:\n```json\n{self._to_compact_json(schema)}\n```"
+        return build_problem_analysis_commander_prompt_template(
+            loop_round=loop_round,
+            max_rounds=self.max_rounds,
+            context=context,
+            history_cards=history_cards,
+            dialogue_items=dialogue_items,
+            to_json=self._to_compact_json,
         )
+
+    def _build_problem_analysis_supervisor_prompt(
+        self,
+        loop_round: int,
+        context: Dict[str, Any],
+        history_cards: List[AgentEvidence],
+        round_history_cards: List[AgentEvidence],
+        discussion_step_count: int,
+        max_discussion_steps: int,
+        dialogue_items: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        open_questions = self._derive_conversation_state(history_cards).get("open_questions") or []
+        return build_problem_analysis_supervisor_prompt_template(
+            loop_round=loop_round,
+            max_rounds=self.max_rounds,
+            context=context,
+            round_history_cards=round_history_cards,
+            open_questions=open_questions,
+            dialogue_items=dialogue_items,
+            discussion_step_count=discussion_step_count,
+            max_discussion_steps=max_discussion_steps,
+            to_json=self._to_compact_json,
+        )
+
+    def _extract_agent_commands_from_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        fill_defaults: bool,
+        targets_hint: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        raw_commands = payload.get("commands")
+        commands: Dict[str, Dict[str, Any]] = {}
+        if isinstance(raw_commands, list):
+            for item in raw_commands:
+                if not isinstance(item, dict):
+                    continue
+                target = str(item.get("target_agent") or "").strip()
+                if not target:
+                    continue
+                commands[target] = {
+                    "target_agent": target,
+                    "task": str(item.get("task") or "").strip(),
+                    "focus": str(item.get("focus") or "").strip(),
+                    "expected_output": str(item.get("expected_output") or "").strip(),
+                }
+
+        defaults = {
+            "LogAgent": "分析错误日志、502 与 CPU 异常的直接证据链",
+            "DomainAgent": "根据接口 URL 映射领域/聚合根/责任田并确认负责团队",
+            "CodeAgent": "定位可能代码瓶颈、连接池/线程池/慢SQL风险点",
+            "CriticAgent": "质疑前述结论中的证据缺口和假设跳跃",
+            "RebuttalAgent": "针对质疑补充证据并收敛执行建议",
+            "JudgeAgent": "综合所有结论给出最终根因裁决与处置建议",
+        }
+        if fill_defaults:
+            for target, task in defaults.items():
+                commands.setdefault(
+                    target,
+                    {
+                        "target_agent": target,
+                        "task": task,
+                        "focus": "",
+                        "expected_output": "",
+                    },
+                )
+        elif targets_hint:
+            for target in targets_hint:
+                if target in defaults and target not in commands:
+                    commands[target] = {
+                        "target_agent": target,
+                        "task": defaults[target],
+                        "focus": "",
+                        "expected_output": "",
+                    }
+        return commands
 
     async def _run_problem_analysis_commander(
         self,
         loop_round: int,
         compact_context: Dict[str, Any],
         history_cards: List[AgentEvidence],
-    ) -> Dict[str, Dict[str, Any]]:
+        dialogue_items: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         spec = self._problem_analysis_agent_spec()
         round_number = len(self.turns) + 1
         await self._emit_event(
@@ -427,13 +927,16 @@ class LangGraphRuntimeOrchestrator:
             loop_round=loop_round,
             context=compact_context,
             history_cards=history_cards,
+            dialogue_items=dialogue_items,
         )
         try:
-            turn = await self._call_agent(
+            turn = await execute_runtime_agent_call(
+                self,
                 spec=spec,
                 prompt=prompt,
                 round_number=round_number,
                 loop_round=loop_round,
+                history_cards_context=history_cards,
             )
         except Exception as exc:
             error_text = str(exc).strip() or exc.__class__.__name__
@@ -446,41 +949,92 @@ class LangGraphRuntimeOrchestrator:
             )
         await self._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
 
-        raw_commands = turn.output_content.get("commands")
-        commands: Dict[str, Dict[str, Any]] = {}
-        if isinstance(raw_commands, list):
-            for item in raw_commands:
-                if not isinstance(item, dict):
-                    continue
-                target = str(item.get("target_agent") or "").strip()
-                if not target:
-                    continue
-                commands[target] = {
-                    "target_agent": target,
-                    "task": str(item.get("task") or "").strip(),
-                    "focus": str(item.get("focus") or "").strip(),
-                    "expected_output": str(item.get("expected_output") or "").strip(),
-                }
-        # 保底命令，避免主Agent未返回结构化命令时执行链路中断
-        defaults = {
-            "LogAgent": "分析错误日志、502 与 CPU 异常的直接证据链",
-            "DomainAgent": "根据接口 URL 映射领域/聚合根/责任田并确认负责团队",
-            "CodeAgent": "定位可能代码瓶颈、连接池/线程池/慢SQL风险点",
-            "CriticAgent": "质疑前述结论中的证据缺口和假设跳跃",
-            "RebuttalAgent": "针对质疑补充证据并收敛执行建议",
-            "JudgeAgent": "综合所有结论给出最终根因裁决与处置建议",
+        payload = turn.output_content if isinstance(turn.output_content, dict) else {}
+        commands = self._extract_agent_commands_from_payload(payload, fill_defaults=True)
+        return {
+            "commands": commands,
+            "next_mode": str(payload.get("next_mode") or "").strip().lower(),
+            "next_agent": str(payload.get("next_agent") or "").strip(),
+            "should_stop": bool(payload.get("should_stop") or False),
+            "stop_reason": str(payload.get("stop_reason") or "").strip(),
         }
-        for target, task in defaults.items():
-            commands.setdefault(
-                target,
-                {
-                    "target_agent": target,
-                    "task": task,
-                    "focus": "",
-                    "expected_output": "",
-                },
+
+    async def _run_problem_analysis_supervisor_router(
+        self,
+        loop_round: int,
+        compact_context: Dict[str, Any],
+        history_cards: List[AgentEvidence],
+        round_history_cards: List[AgentEvidence],
+        discussion_step_count: int,
+        max_discussion_steps: int,
+        dialogue_items: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        spec = self._problem_analysis_agent_spec()
+        round_number = len(self.turns) + 1
+        await self._emit_event(
+            {
+                "type": "agent_chat_message",
+                "phase": spec.phase,
+                "agent_name": spec.name,
+                "agent_role": spec.role,
+                "model": settings.llm_model,
+                "session_id": self.session_id,
+                "loop_round": loop_round,
+                "round_number": round_number,
+                "message": "我在检查当前证据和分歧，决定下一位发言者。",
+                "confidence": 0.0,
+                "conclusion": "",
+                "reply_to": "all",
+            }
+        )
+        prompt = self._build_problem_analysis_supervisor_prompt(
+            loop_round=loop_round,
+            context=compact_context,
+            history_cards=history_cards,
+            round_history_cards=round_history_cards,
+            dialogue_items=dialogue_items,
+            discussion_step_count=discussion_step_count,
+            max_discussion_steps=max_discussion_steps,
+        )
+        try:
+            turn = await execute_runtime_agent_call(
+                self,
+                spec=spec,
+                prompt=prompt,
+                round_number=round_number,
+                loop_round=loop_round,
+                history_cards_context=history_cards,
             )
-        return commands
+        except Exception as exc:
+            error_text = str(exc).strip() or exc.__class__.__name__
+            turn = await self._create_fallback_turn(
+                spec=spec,
+                prompt=prompt,
+                round_number=round_number,
+                loop_round=loop_round,
+                error_text=error_text,
+            )
+        await self._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
+        payload = turn.output_content if isinstance(turn.output_content, dict) else {}
+        next_agent = str(payload.get("next_agent") or "").strip()
+        targets_hint: List[str] = []
+        next_mode = str(payload.get("next_mode") or "").strip().lower()
+        if next_mode in ("parallel_analysis", "analysis_parallel"):
+            targets_hint = list(self.PARALLEL_ANALYSIS_AGENTS)
+        elif next_agent:
+            targets_hint = [next_agent]
+        commands = self._extract_agent_commands_from_payload(
+            payload,
+            fill_defaults=False,
+            targets_hint=targets_hint,
+        )
+        return {
+            "commands": commands,
+            "next_mode": next_mode,
+            "next_agent": next_agent,
+            "should_stop": bool(payload.get("should_stop") or False),
+            "stop_reason": str(payload.get("stop_reason") or "").strip(),
+        }
 
     async def _emit_agent_command_issued(
         self,
@@ -603,6 +1157,7 @@ class LangGraphRuntimeOrchestrator:
         compact_context: Dict[str, Any],
         history_cards: List[AgentEvidence],
         agent_commands: Optional[Dict[str, Dict[str, Any]]] = None,
+        dialogue_items: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         parallel_names = set(self.PARALLEL_ANALYSIS_AGENTS)
         parallel_specs = [
@@ -623,6 +1178,7 @@ class LangGraphRuntimeOrchestrator:
                 context=compact_context,
                 history_cards=parallel_history,
                 assigned_command=assigned_command,
+                dialogue_items=dialogue_items,
             )
             parallel_inputs.append((spec, round_number, prompt, assigned_command or {}))
 
@@ -646,11 +1202,13 @@ class LangGraphRuntimeOrchestrator:
                 )
         parallel_tasks = [
             asyncio.create_task(
-                self._call_agent(
+                execute_runtime_agent_call(
+                    self,
                     spec=spec,
                     prompt=prompt,
                     round_number=round_number,
                     loop_round=loop_round,
+                    history_cards_context=history_cards,
                 )
             )
             for spec, round_number, prompt, _ in parallel_inputs
@@ -692,6 +1250,7 @@ class LangGraphRuntimeOrchestrator:
         loop_round: int,
         compact_context: Dict[str, Any],
         history_cards: List[AgentEvidence],
+        dialogue_items: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         parallel_specs = [
             spec
@@ -715,6 +1274,7 @@ class LangGraphRuntimeOrchestrator:
                 loop_round=loop_round,
                 context=compact_context,
                 peer_cards=peer_cards,
+                dialogue_items=dialogue_items,
             )
             collab_inputs.append((spec, round_number, prompt))
 
@@ -729,11 +1289,13 @@ class LangGraphRuntimeOrchestrator:
         )
         collab_tasks = [
             asyncio.create_task(
-                self._call_agent(
+                execute_runtime_agent_call(
+                    self,
                     spec=spec,
                     prompt=prompt,
                     round_number=round_number,
                     loop_round=loop_round,
+                    history_cards_context=history_cards,
                 )
             )
             for spec, round_number, prompt in collab_inputs
@@ -762,112 +1324,6 @@ class LangGraphRuntimeOrchestrator:
             }
         )
 
-    async def _run_single_phase_agent(
-        self,
-        agent_name: str,
-        loop_round: int,
-        compact_context: Dict[str, Any],
-        history_cards: List[AgentEvidence],
-        agent_commands: Optional[Dict[str, Dict[str, Any]]] = None,
-    ) -> None:
-        spec = self._spec_by_name(agent_name)
-        if not spec:
-            return
-        round_number = len(self.turns) + 1
-        assigned_command = (agent_commands or {}).get(agent_name)
-        if assigned_command:
-            await self._emit_agent_command_issued(
-                commander="ProblemAnalysisAgent",
-                target=agent_name,
-                loop_round=loop_round,
-                round_number=round_number,
-                command=assigned_command,
-            )
-        prompt = self._build_peer_driven_prompt(
-            spec=spec,
-            loop_round=loop_round,
-            context=compact_context,
-            history_cards=history_cards,
-            assigned_command=assigned_command,
-        )
-        try:
-            turn = await self._call_agent(
-                spec=spec,
-                prompt=prompt,
-                round_number=round_number,
-                loop_round=loop_round,
-            )
-        except Exception as exc:
-            error_text = str(exc).strip() or exc.__class__.__name__
-            turn = await self._create_fallback_turn(
-                spec=spec,
-                prompt=prompt,
-                round_number=round_number,
-                loop_round=loop_round,
-                error_text=error_text,
-            )
-        await self._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
-        if assigned_command:
-            await self._emit_agent_command_feedback(
-                source=agent_name,
-                loop_round=loop_round,
-                round_number=round_number,
-                command=assigned_command,
-                turn=turn,
-            )
-
-    async def _graph_debate_loop(self, state: _DebateExecState) -> _DebateExecState:
-        context_summary = state.get("context_summary") or {}
-        history_cards = list(state.get("history_cards") or [])
-        consensus_reached = bool(state.get("consensus_reached") or False)
-        executed_rounds = int(state.get("executed_rounds") or 0)
-
-        for loop_round in range(1, max(1, self.max_rounds) + 1):
-            executed_rounds = loop_round
-            await self._emit_event(
-                {
-                    "type": "round_started",
-                    "loop_round": loop_round,
-                    "max_rounds": self.max_rounds,
-                    "mode": "langgraph_runtime",
-                }
-            )
-
-            round_turns = await self._execute_groupchat_round(
-                loop_round=loop_round,
-                context=context_summary,
-                history_cards=history_cards,
-            )
-            if not round_turns:
-                raise RuntimeError(f"第 {loop_round} 轮未产生有效 Agent 输出")
-
-            judge_turn = self.turns[-1] if self.turns else None
-            judge_confidence = float((judge_turn.confidence if judge_turn else 0.0) or 0.0)
-            consensus_reached = judge_confidence >= self.consensus_threshold
-            await self._emit_event(
-                {
-                    "type": "round_completed",
-                    "loop_round": loop_round,
-                    "consensus_reached": consensus_reached,
-                    "judge_confidence": judge_confidence,
-                    "mode": "langgraph_runtime",
-                }
-            )
-            if consensus_reached and loop_round >= self.min_rounds:
-                break
-
-        final_payload = self._build_final_payload(
-            history_cards=history_cards,
-            consensus_reached=consensus_reached,
-            executed_rounds=executed_rounds,
-        )
-        return {
-            "history_cards": history_cards,
-            "consensus_reached": consensus_reached,
-            "executed_rounds": executed_rounds,
-            "final_payload": final_payload,
-        }
-
     async def _graph_finalize(self, state: _DebateExecState) -> _DebateExecState:
         history_cards = list(state.get("history_cards") or [])
         consensus_reached = bool(state.get("consensus_reached") or False)
@@ -893,204 +1349,6 @@ class LangGraphRuntimeOrchestrator:
         )
         return {"final_payload": final_payload}
 
-    async def _execute_groupchat_round(
-        self,
-        loop_round: int,
-        context: Dict[str, Any],
-        history_cards: List[AgentEvidence],
-    ) -> List[DebateTurn]:
-        sequence = self._agent_sequence()
-        if not sequence:
-            return []
-
-        turns: List[DebateTurn] = []
-        compact_context = self._compact_round_context(context)
-        base_round_number = len(self.turns) + 1
-        parallel_names = set(self.PARALLEL_ANALYSIS_AGENTS)
-        parallel_specs = [
-            spec
-            for spec in sequence
-            if spec.phase == "analysis" and spec.name in parallel_names
-        ]
-        sequential_specs = [
-            spec
-            for spec in sequence
-            if spec not in parallel_specs
-        ]
-
-        round_cursor = base_round_number
-
-        if parallel_specs:
-            parallel_history = list(history_cards)
-            parallel_inputs: List[tuple[AgentSpec, int, str]] = []
-            for spec in parallel_specs:
-                round_number = round_cursor
-                round_cursor += 1
-                prompt = self._build_agent_prompt(
-                    spec=spec,
-                    loop_round=loop_round,
-                    context=compact_context,
-                    history_cards=parallel_history,
-                )
-                parallel_inputs.append((spec, round_number, prompt))
-
-            await self._emit_event(
-                {
-                    "type": "parallel_analysis_started",
-                    "phase": "analysis",
-                    "loop_round": loop_round,
-                    "session_id": self.session_id,
-                    "agents": [spec.name for spec, _, _ in parallel_inputs],
-                }
-            )
-
-            parallel_tasks = [
-                asyncio.create_task(
-                    self._call_agent(
-                        spec=spec,
-                        prompt=prompt,
-                        round_number=round_number,
-                        loop_round=loop_round,
-                    )
-                )
-                for spec, round_number, prompt in parallel_inputs
-            ]
-            parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
-
-            for (spec, round_number, prompt), result in zip(parallel_inputs, parallel_results):
-                if isinstance(result, Exception):
-                    error_text = str(result).strip() or result.__class__.__name__
-                    turn = await self._create_fallback_turn(
-                        spec=spec,
-                        prompt=prompt,
-                        round_number=round_number,
-                        loop_round=loop_round,
-                        error_text=error_text,
-                    )
-                else:
-                    turn = result
-                turns.append(turn)
-                await self._record_turn(
-                    turn=turn,
-                    loop_round=loop_round,
-                    history_cards=history_cards,
-                )
-
-            await self._emit_event(
-                {
-                    "type": "parallel_analysis_completed",
-                    "phase": "analysis",
-                    "loop_round": loop_round,
-                    "session_id": self.session_id,
-                    "agents": [spec.name for spec, _, _ in parallel_inputs],
-                }
-            )
-
-            # 协同复核会显著增加 1 轮三并发调用，默认关闭；可通过配置开启。
-            if settings.DEBATE_ENABLE_COLLABORATION:
-                peer_cards = self._latest_cards_for_agents(
-                    history_cards=history_cards,
-                    agent_names=[spec.name for spec in parallel_specs],
-                    limit=self.COLLABORATION_PEER_LIMIT,
-                )
-                collab_inputs: List[tuple[AgentSpec, int, str]] = []
-                for spec in parallel_specs:
-                    round_number = round_cursor
-                    round_cursor += 1
-                    prompt = self._build_collaboration_prompt(
-                        spec=spec,
-                        loop_round=loop_round,
-                        context=compact_context,
-                        peer_cards=peer_cards,
-                    )
-                    collab_inputs.append((spec, round_number, prompt))
-
-                await self._emit_event(
-                    {
-                        "type": "parallel_analysis_collaboration_started",
-                        "phase": "analysis",
-                        "loop_round": loop_round,
-                        "session_id": self.session_id,
-                        "agents": [spec.name for spec, _, _ in collab_inputs],
-                    }
-                )
-
-                collab_tasks = [
-                    asyncio.create_task(
-                        self._call_agent(
-                            spec=spec,
-                            prompt=prompt,
-                            round_number=round_number,
-                            loop_round=loop_round,
-                        )
-                    )
-                    for spec, round_number, prompt in collab_inputs
-                ]
-                collab_results = await asyncio.gather(*collab_tasks, return_exceptions=True)
-
-                for (spec, round_number, prompt), result in zip(collab_inputs, collab_results):
-                    if isinstance(result, Exception):
-                        error_text = str(result).strip() or result.__class__.__name__
-                        turn = await self._create_fallback_turn(
-                            spec=spec,
-                            prompt=prompt,
-                            round_number=round_number,
-                            loop_round=loop_round,
-                            error_text=error_text,
-                        )
-                    else:
-                        turn = result
-                    turns.append(turn)
-                    await self._record_turn(
-                        turn=turn,
-                        loop_round=loop_round,
-                        history_cards=history_cards,
-                    )
-
-                await self._emit_event(
-                    {
-                        "type": "parallel_analysis_collaboration_completed",
-                        "phase": "analysis",
-                        "loop_round": loop_round,
-                        "session_id": self.session_id,
-                        "agents": [spec.name for spec, _, _ in collab_inputs],
-                    }
-                )
-
-        for spec in sequential_specs:
-            round_number = round_cursor
-            round_cursor += 1
-            prompt = self._build_peer_driven_prompt(
-                spec=spec,
-                loop_round=loop_round,
-                context=compact_context,
-                history_cards=history_cards,
-            )
-            try:
-                turn = await self._call_agent(
-                    spec=spec,
-                    prompt=prompt,
-                    round_number=round_number,
-                    loop_round=loop_round,
-                )
-            except Exception as exc:
-                error_text = str(exc).strip() or exc.__class__.__name__
-                turn = await self._create_fallback_turn(
-                    spec=spec,
-                    prompt=prompt,
-                    round_number=round_number,
-                    loop_round=loop_round,
-                    error_text=error_text,
-                )
-            turns.append(turn)
-            await self._record_turn(
-                turn=turn,
-                loop_round=loop_round,
-                history_cards=history_cards,
-            )
-
-        return turns
-
     def _build_peer_driven_prompt(
         self,
         spec: AgentSpec,
@@ -1098,91 +1356,26 @@ class LangGraphRuntimeOrchestrator:
         context: Dict[str, Any],
         history_cards: List[AgentEvidence],
         assigned_command: Optional[Dict[str, Any]] = None,
+        dialogue_items: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         peer_items = self._collect_peer_items(
             history_cards=history_cards,
             exclude_agent=spec.name,
             limit=max(2, self.MAX_HISTORY_ITEMS + 1),
         )
-        if spec.name == "JudgeAgent":
-            output_schema = self._judge_output_schema()
-            command_block = ""
-            if assigned_command:
-                command_block = (
-                    f"\n主Agent命令：\n```json\n{self._to_compact_json(assigned_command)}\n```\n"
-                    "你必须响应主Agent命令要求并在 chat_message 中体现“已收到命令/正在综合裁决”。\n"
-                )
-            return (
-                f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{self.max_rounds} 轮，阶段={spec.phase}。\n"
-                "必须基于其他 Agent 结论进行综合裁决，禁止独立发挥。\n"
-                "请用真人开会讨论的口吻在 chat_message 中表达观点（简短、明确引用同伴结论），并输出 JSON。\n"
-                "字段尽量精炼，action_items 最多 3 条。\n\n"
-                f"{command_block}"
-                f"故障上下文：\n```json\n{self._to_compact_json(context)}\n```\n\n"
-                f"同伴结论：\n```json\n{self._to_compact_json(peer_items)}\n```\n\n"
-                f"输出格式：\n```json\n{self._to_compact_json(output_schema)}\n```"
-            )
-
-        output_schema = {
-            "chat_message": "",
-            "analysis": "",
-            "conclusion": "",
-            "evidence_chain": [""],
-            "confidence": 0.0,
-        }
-        command_block = ""
-        if assigned_command:
-            command_block = (
-                f"\n主Agent命令：\n```json\n{self._to_compact_json(assigned_command)}\n```\n"
-                "你必须先在 chat_message 中确认收到主Agent命令，再给出执行结果。\n"
-            )
-        return (
-            f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{self.max_rounds} 轮，阶段={spec.phase}。\n"
-            "必须基于其他 Agent 的结论进行分析，禁止独立分析。\n"
-            "请以真人讨论口吻在 chat_message 中先说结论（1-3句），再给结构化字段。\n"
-            "要求：\n"
-            "1) 至少明确采纳/反驳 1 条同伴结论；\n"
-            "2) evidence_chain 至少包含 1 条 peer:<agent_name>:<观点>；\n"
-            "3) 仅输出 JSON，内容尽量简短。\n\n"
-            f"{command_block}"
-            f"故障上下文：\n```json\n{self._to_compact_json(context)}\n```\n\n"
-            f"同伴结论：\n```json\n{self._to_compact_json(peer_items)}\n```\n\n"
-            f"输出格式：\n```json\n{self._to_compact_json(output_schema)}\n```"
+        return build_peer_driven_prompt_template(
+            spec=spec,
+            loop_round=loop_round,
+            max_rounds=self.max_rounds,
+            context=context,
+            peer_items=peer_items,
+            assigned_command=assigned_command,
+            dialogue_items=dialogue_items,
+            to_json=self._to_compact_json,
         )
 
     def _judge_output_schema(self) -> Dict[str, Any]:
-        return {
-            "chat_message": "",
-            "final_judgment": {
-                "root_cause": {"summary": "", "category": "", "confidence": 0.0},
-                "evidence_chain": [
-                    {
-                        "type": "log|code|domain|metrics",
-                        "description": "",
-                        "source": "",
-                        "location": "",
-                        "strength": "strong|medium|weak",
-                    }
-                ],
-                "fix_recommendation": {
-                    "summary": "",
-                    "steps": [],
-                    "code_changes_required": True,
-                },
-                "impact_analysis": {
-                    "affected_services": [],
-                    "business_impact": "",
-                },
-                "risk_assessment": {
-                    "risk_level": "critical|high|medium|low",
-                    "risk_factors": [],
-                },
-            },
-            "decision_rationale": {"key_factors": [], "reasoning": ""},
-            "action_items": [],
-            "responsible_team": {"team": "", "owner": ""},
-            "confidence": 0.0,
-        }
+        return judge_output_schema_template()
 
     def _collect_peer_items(
         self,
@@ -1250,9 +1443,13 @@ class LangGraphRuntimeOrchestrator:
             }
         )
         fallback_output = (
-            self._normalize_judge_output({}, f"{spec.name} {friendly_reason}")
+            normalize_judge_output(
+                {},
+                f"{spec.name} {friendly_reason}",
+                fallback_summary=self.JUDGE_FALLBACK_SUMMARY,
+            )
             if spec.name == "JudgeAgent"
-            else self._normalize_normal_output(
+            else normalize_normal_output(
                 {},
                 f"{spec.name} {friendly_reason}",
             )
@@ -1355,71 +1552,7 @@ class LangGraphRuntimeOrchestrator:
         )
 
     def _agent_sequence(self) -> List[AgentSpec]:
-        sequence = [
-            AgentSpec(
-                name="LogAgent",
-                role="日志分析专家",
-                phase="analysis",
-                system_prompt=(
-                    "你是生产故障日志分析专家。只输出紧凑 JSON。"
-                    "聚焦异常模式、调用链、资源指标与关键证据。"
-                ),
-            ),
-            AgentSpec(
-                name="DomainAgent",
-                role="领域映射专家",
-                phase="analysis",
-                system_prompt=(
-                    "你是 DDD 领域映射专家。只输出紧凑 JSON。"
-                    "必须将接口现象映射到 domain/aggregate/responsibility。"
-                ),
-            ),
-            AgentSpec(
-                name="CodeAgent",
-                role="代码分析专家",
-                phase="analysis",
-                system_prompt=(
-                    "你是代码根因分析专家。只输出紧凑 JSON。"
-                    "给出最可能代码位置、触发条件和修复建议。"
-                ),
-            ),
-        ]
-        if settings.DEBATE_ENABLE_CRITIQUE:
-            sequence.extend(
-                [
-                    AgentSpec(
-                        name="CriticAgent",
-                        role="架构质疑专家",
-                        phase="critique",
-                        system_prompt=(
-                            "你是技术评审质疑专家。只输出紧凑 JSON。"
-                            "找出前面结论中的漏洞和不充分证据。"
-                        ),
-                    ),
-                    AgentSpec(
-                        name="RebuttalAgent",
-                        role="技术反驳专家",
-                        phase="rebuttal",
-                        system_prompt=(
-                            "你是技术反驳专家。只输出紧凑 JSON。"
-                            "针对质疑补充证据，收敛到可执行结论。"
-                        ),
-                    ),
-                ]
-            )
-
-        sequence.append(
-            AgentSpec(
-                name="JudgeAgent",
-                role="技术委员会主席",
-                phase="judgment",
-                system_prompt=(
-                    "你是技术委员会主席。基于证据给出最终裁决。"
-                    "必须只输出 JSON，字段严格包含 final_judgment 与 confidence。"
-                ),
-            )
-        )
-        return sequence
+        return build_agent_sequence(enable_critique=bool(settings.DEBATE_ENABLE_CRITIQUE))
 
     def _build_agent_prompt(
         self,
@@ -1428,49 +1561,18 @@ class LangGraphRuntimeOrchestrator:
         context: Dict[str, Any],
         history_cards: List[AgentEvidence],
         assigned_command: Optional[Dict[str, Any]] = None,
+        dialogue_items: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        history_items = [
-            {
-                "agent": card.agent_name,
-                "phase": card.phase,
-                "summary": card.summary[:120],
-                "conclusion": card.conclusion[:140],
-                "evidence": card.evidence_chain[:2],
-                "confidence": round(float(card.confidence), 3),
-            }
-            for card in history_cards[-self.MAX_HISTORY_ITEMS :]
-        ]
-
-        if spec.name == "JudgeAgent":
-            output_schema = self._judge_output_schema()
-        else:
-            output_schema = {
-                "chat_message": "",
-                "analysis": "",
-                "conclusion": "",
-                "evidence_chain": [""],
-                "confidence": 0.0,
-            }
-
-        output_constraints = ""
-        if spec.name == "JudgeAgent":
-            output_constraints = "action_items 最多 3 条，decision_rationale.reasoning 控制在 120 字内。\n\n"
-
-        command_block = ""
-        if assigned_command:
-            command_block = (
-                f"主Agent命令：\n```json\n{self._to_compact_json(assigned_command)}\n```\n"
-                "必须在 chat_message 中先确认收到命令，并围绕命令重点输出。\n\n"
-            )
-        return (
-            f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{self.max_rounds} 轮，阶段={spec.phase}。\n"
-            "只需要基于核心观点与结论推理，不要复述全部历史，结论请简短。\n"
-            "请以真人讨论口吻在 chat_message 中表达你的发言（1-3句），然后输出 JSON。\n\n"
-            f"{output_constraints}"
-            f"{command_block}"
-            f"故障上下文：\n```json\n{self._to_compact_json(context)}\n```\n\n"
-            f"最近结论卡片：\n```json\n{self._to_compact_json(history_items)}\n```\n\n"
-            f"请仅输出 JSON，格式示例：\n```json\n{self._to_compact_json(output_schema)}\n```"
+        return build_agent_prompt_template(
+            spec=spec,
+            loop_round=loop_round,
+            max_rounds=self.max_rounds,
+            max_history_items=self.MAX_HISTORY_ITEMS,
+            context=context,
+            history_cards=history_cards,
+            assigned_command=assigned_command,
+            dialogue_items=dialogue_items,
+            to_json=self._to_compact_json,
         )
 
     def _build_collaboration_prompt(
@@ -1480,42 +1582,17 @@ class LangGraphRuntimeOrchestrator:
         context: Dict[str, Any],
         peer_cards: List[AgentEvidence],
         assigned_command: Optional[Dict[str, Any]] = None,
+        dialogue_items: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        peer_items = [
-            {
-                "agent": card.agent_name,
-                "summary": card.summary[:120],
-                "conclusion": card.conclusion[:160],
-                "confidence": round(float(card.confidence), 3),
-            }
-            for card in peer_cards
-            if card.agent_name != spec.name
-        ]
-        output_schema = {
-            "chat_message": "",
-            "analysis": "",
-            "conclusion": "",
-            "evidence_chain": [""],
-            "confidence": 0.0,
-        }
-        command_block = ""
-        if assigned_command:
-            command_block = (
-                f"\n主Agent命令：\n```json\n{self._to_compact_json(assigned_command)}\n```\n"
-                "你需要在 chat_message 中明确这是对主Agent命令的执行反馈。\n"
-            )
-        return (
-            f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{self.max_rounds} 轮，阶段=analysis。\n"
-            "现在进入协同复核阶段：你必须基于其他 Agent 的结论进行交叉校验并修正自己的判断。\n"
-            "请以真人讨论口吻在 chat_message 中明确你在回应谁、采纳或反驳什么。\n"
-            "要求：\n"
-            "1) 明确指出至少 1 条你采纳或反驳的同伴结论；\n"
-            "2) 在 evidence_chain 中包含同伴观点依据（可写成 peer:<agent_name>:<观点>）；\n"
-            "3) 仅输出 JSON，不要解释文本，保持精炼。\n\n"
-            f"{command_block}"
-            f"故障上下文：\n```json\n{self._to_compact_json(context)}\n```\n\n"
-            f"同伴结论：\n```json\n{self._to_compact_json(peer_items)}\n```\n\n"
-            f"输出格式：\n```json\n{self._to_compact_json(output_schema)}\n```"
+        return build_collaboration_prompt_template(
+            spec=spec,
+            loop_round=loop_round,
+            max_rounds=self.max_rounds,
+            context=context,
+            peer_cards=peer_cards,
+            assigned_command=assigned_command,
+            dialogue_items=dialogue_items,
+            to_json=self._to_compact_json,
         )
 
     def _compact_round_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -1613,401 +1690,6 @@ class LangGraphRuntimeOrchestrator:
         except Exception:
             return "{}"
 
-    def _build_groupchat_prompt(
-        self,
-        loop_round: int,
-        context: Dict[str, Any],
-        history_cards: List[AgentEvidence],
-        sequence: List[AgentSpec],
-    ) -> str:
-        history_items = [
-            {
-                "agent": card.agent_name,
-                "phase": card.phase,
-                "summary": card.summary[:180],
-                "conclusion": card.conclusion[:220],
-                "confidence": round(float(card.confidence), 3),
-            }
-            for card in history_cards[-self.MAX_HISTORY_ITEMS :]
-        ]
-        speaker_order = [spec.name for spec in sequence]
-        return (
-            f"当前为第 {loop_round}/{self.max_rounds} 轮多Agent技术评审。\n"
-            f"必须按顺序发言：{', '.join(speaker_order)}。\n"
-            "除了 JudgeAgent 外，其他 Agent 必须仅输出 JSON："
-            '{"analysis":"","conclusion":"","evidence_chain":[],"confidence":0.0}。\n'
-            "JudgeAgent 必须仅输出 JSON，字段必须包含："
-            '{"final_judgment":{},"decision_rationale":{},"action_items":[],"responsible_team":{},"confidence":0.0}。\n'
-            "不要输出 markdown，不要输出解释文字。\n\n"
-            f"故障上下文：\n```json\n{json.dumps(context, ensure_ascii=False, indent=2)}\n```\n\n"
-            f"最近核心观点：\n```json\n{json.dumps(history_items, ensure_ascii=False, indent=2)}\n```"
-        )
-
-    def _run_groupchat_round(
-        self,
-        sequence: List[AgentSpec],
-        kickoff_prompt: str,
-    ) -> List[Dict[str, Any]]:
-        # Legacy helper retained for compatibility but no longer used after LangGraph migration.
-        _ = sequence
-        _ = kickoff_prompt
-        raise NotImplementedError("Legacy LangGraph GroupChat path has been replaced by LangGraph runtime")
-
-    async def _call_agent(
-        self,
-        spec: AgentSpec,
-        prompt: str,
-        round_number: int,
-        loop_round: int,
-    ) -> DebateTurn:
-        started_at = datetime.utcnow()
-        model_name = settings.llm_model
-        endpoint = self._chat_endpoint()
-        agent_max_tokens = self._agent_max_tokens(spec.name)
-        attempt_prompt = prompt
-        attempt_max_tokens = agent_max_tokens
-
-        await self._emit_event(
-            {
-                "type": "llm_call_started",
-                "phase": spec.phase,
-                "agent_name": spec.name,
-                "model": model_name,
-                "session_id": self.session_id,
-                "loop_round": loop_round,
-                "round_number": round_number,
-                "prompt_preview": prompt[:1200],
-            }
-        )
-        await self._emit_event(
-            {
-                "type": "llm_http_request",
-                "phase": spec.phase,
-                "agent_name": spec.name,
-                "session_id": self.session_id,
-                "model": model_name,
-                "endpoint": endpoint,
-                "request_payload": {
-                    "model": model_name,
-                    "max_tokens": agent_max_tokens,
-                    "message_count": 2,
-                    "prompt_length": len(prompt),
-                    "prompt_preview": prompt[:1200],
-                },
-            }
-        )
-
-        timeout_plan = self._agent_timeout_plan(spec.name)
-        logger.info(
-            "runtime_agent_llm_scheduled",
-            session_id=self.session_id,
-            agent_name=spec.name,
-            phase=spec.phase,
-            loop_round=loop_round,
-            round_number=round_number,
-            timeout_plan=timeout_plan,
-            max_tokens=attempt_max_tokens,
-            prompt_length=len(attempt_prompt),
-        )
-
-        last_exc: Optional[Exception] = None
-        for attempt_idx, attempt_timeout in enumerate(timeout_plan, start=1):
-            started_clock = perf_counter()
-            try:
-                queue_started = perf_counter()
-                async with self._llm_semaphore:
-                    queue_wait_ms = round((perf_counter() - queue_started) * 1000, 2)
-                    logger.info(
-                        "runtime_agent_llm_started",
-                        session_id=self.session_id,
-                        agent_name=spec.name,
-                        phase=spec.phase,
-                        loop_round=loop_round,
-                        round_number=round_number,
-                        attempt=attempt_idx,
-                        max_attempts=len(timeout_plan),
-                        timeout_seconds=attempt_timeout,
-                        queue_wait_ms=queue_wait_ms,
-                    )
-                    raw_content = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self._run_agent_once,
-                            spec,
-                            attempt_prompt,
-                            attempt_max_tokens,
-                        ),
-                        timeout=attempt_timeout,
-                    )
-                latency_ms = round((perf_counter() - started_clock) * 1000, 2)
-                payload = self._normalize_agent_output(spec.name, raw_content)
-                if spec.name == "JudgeAgent":
-                    final_judgment = payload.get("final_judgment")
-                    root_cause = final_judgment.get("root_cause") if isinstance(final_judgment, dict) else {}
-                    root_summary = (
-                        str(root_cause.get("summary") or "").strip()
-                        if isinstance(root_cause, dict)
-                        else ""
-                    )
-                    if root_summary == self.JUDGE_FALLBACK_SUMMARY:
-                        await self._emit_event(
-                            {
-                                "type": "judge_output_fallback_applied",
-                                "phase": spec.phase,
-                                "agent_name": spec.name,
-                                "session_id": self.session_id,
-                                "model": model_name,
-                                "reason": "judge_output_parse_incomplete",
-                                "raw_preview": raw_content[:800],
-                            }
-                        )
-                await self._emit_stream_deltas(
-                    spec=spec,
-                    raw_content=raw_content,
-                    loop_round=loop_round,
-                    round_number=round_number,
-                )
-
-                completed_at = datetime.utcnow()
-                turn = DebateTurn(
-                    round_number=round_number,
-                    phase=spec.phase,
-                    agent_name=spec.name,
-                    agent_role=spec.role,
-                    model={"name": model_name},
-                    input_message=attempt_prompt,
-                    output_content=payload,
-                    confidence=float(payload.get("confidence", 0.0) or 0.0),
-                    started_at=started_at,
-                    completed_at=completed_at,
-                )
-
-                await self._emit_event(
-                    {
-                        "type": "llm_http_response",
-                        "phase": spec.phase,
-                        "agent_name": spec.name,
-                        "session_id": self.session_id,
-                        "model": model_name,
-                        "endpoint": endpoint,
-                        "status_code": 200,
-                        "response_payload": {
-                            "content_preview": raw_content[:1200],
-                            "content_length": len(raw_content),
-                        },
-                        "latency_ms": latency_ms,
-                    }
-                )
-                await self._emit_event(
-                    {
-                        "type": "agent_round",
-                        "phase": spec.phase,
-                        "agent_name": spec.name,
-                        "agent_role": spec.role,
-                        "loop_round": loop_round,
-                        "round_number": round_number,
-                        "confidence": turn.confidence,
-                        "latency_ms": latency_ms,
-                        "output_preview": str(payload)[:1200],
-                        "output_json": payload,
-                        "started_at": started_at.isoformat(),
-                        "completed_at": completed_at.isoformat(),
-                        "session_id": self.session_id,
-                    }
-                )
-                chat_message = str(payload.get("chat_message") or "").strip()
-                if chat_message:
-                    await self._emit_event(
-                        {
-                            "type": "agent_chat_message",
-                            "phase": spec.phase,
-                            "agent_name": spec.name,
-                            "agent_role": spec.role,
-                            "model": model_name,
-                            "session_id": self.session_id,
-                            "loop_round": loop_round,
-                            "round_number": round_number,
-                            "message": chat_message[:1200],
-                            "confidence": turn.confidence,
-                            "conclusion": str(payload.get("conclusion") or "")[:220],
-                            "reply_to": self._infer_reply_target(
-                                spec_name=spec.name,
-                                history_cards=[c for c in self._history_cards_snapshot() if c.agent_name != spec.name],
-                            ),
-                        }
-                    )
-                await self._emit_event(
-                    {
-                        "type": "llm_call_completed",
-                        "phase": spec.phase,
-                        "agent_name": spec.name,
-                        "model": model_name,
-                        "session_id": self.session_id,
-                        "response_preview": raw_content[:1200],
-                        "latency_ms": latency_ms,
-                    }
-                )
-                logger.info(
-                    "runtime_agent_llm_completed",
-                    session_id=self.session_id,
-                    agent_name=spec.name,
-                    phase=spec.phase,
-                    loop_round=loop_round,
-                    round_number=round_number,
-                    attempt=attempt_idx,
-                    latency_ms=latency_ms,
-                    response_length=len(raw_content or ""),
-                    confidence=float(payload.get("confidence", 0.0) or 0.0),
-                )
-                return turn
-            except Exception as exc:
-                last_exc = exc
-                latency_ms = round((perf_counter() - started_clock) * 1000, 2)
-                error_text = str(exc).strip() or exc.__class__.__name__
-                is_timeout = isinstance(exc, asyncio.TimeoutError) or "timeout" in error_text.lower()
-                if settings.LLM_FAILFAST_ON_RATE_LIMIT and self._is_rate_limited_error(error_text):
-                    error_text = f"LLM_RATE_LIMITED: {error_text}"
-                retryable = attempt_idx < len(timeout_plan) and (
-                    is_timeout
-                )
-                if retryable:
-                    logger.warning(
-                        "runtime_agent_llm_retry",
-                        session_id=self.session_id,
-                        agent_name=spec.name,
-                        phase=spec.phase,
-                        loop_round=loop_round,
-                        round_number=round_number,
-                        attempt=attempt_idx,
-                        max_attempts=len(timeout_plan),
-                        timeout_seconds=attempt_timeout,
-                        latency_ms=latency_ms,
-                        error=error_text,
-                        retry_compacted=(attempt_prompt != prompt),
-                    )
-                    next_prompt, next_max_tokens, compacted = self._prepare_timeout_retry_input(
-                        spec=spec,
-                        prompt=attempt_prompt,
-                        max_tokens=attempt_max_tokens,
-                    )
-                    await self._emit_event(
-                        {
-                            "type": "llm_call_retry",
-                            "phase": spec.phase,
-                            "agent_name": spec.name,
-                            "model": model_name,
-                            "session_id": self.session_id,
-                            "attempt": attempt_idx + 1,
-                            "max_attempts": len(timeout_plan),
-                            "reason": error_text,
-                            "latency_ms": latency_ms,
-                            "retry_compacted": compacted,
-                        }
-                    )
-                    attempt_prompt = next_prompt
-                    attempt_max_tokens = next_max_tokens
-                    if compacted:
-                        logger.info(
-                            "runtime_agent_llm_retry_compacted",
-                            session_id=self.session_id,
-                            agent_name=spec.name,
-                            phase=spec.phase,
-                            loop_round=loop_round,
-                            round_number=round_number,
-                            next_prompt_length=len(attempt_prompt),
-                            next_max_tokens=attempt_max_tokens,
-                        )
-                        await self._emit_event(
-                            {
-                                "type": "llm_call_retry_compacted",
-                                "phase": spec.phase,
-                                "agent_name": spec.name,
-                                "model": model_name,
-                                "session_id": self.session_id,
-                                "next_prompt_length": len(attempt_prompt),
-                                "next_max_tokens": attempt_max_tokens,
-                            }
-                        )
-                    continue
-
-                (logger.warning if is_timeout else logger.error)(
-                    "runtime_agent_llm_timeout" if is_timeout else "runtime_agent_llm_failed",
-                    session_id=self.session_id,
-                    agent_name=spec.name,
-                    phase=spec.phase,
-                    loop_round=loop_round,
-                    round_number=round_number,
-                    attempt=attempt_idx,
-                    max_attempts=len(timeout_plan),
-                    timeout_seconds=attempt_timeout,
-                    latency_ms=latency_ms,
-                    error=error_text,
-                )
-                await self._emit_event(
-                    {
-                        "type": "llm_http_error",
-                        "phase": spec.phase,
-                        "agent_name": spec.name,
-                        "session_id": self.session_id,
-                        "model": model_name,
-                        "endpoint": endpoint,
-                        "error": error_text,
-                        "latency_ms": latency_ms,
-                    }
-                )
-                await self._emit_event(
-                    {
-                        "type": "llm_call_timeout" if is_timeout else "llm_call_failed",
-                        "phase": spec.phase,
-                        "agent_name": spec.name,
-                        "model": model_name,
-                        "session_id": self.session_id,
-                        "error": error_text,
-                        "latency_ms": latency_ms,
-                        "prompt_preview": attempt_prompt[:1200],
-                    }
-                )
-                raise RuntimeError(f"{spec.name} 调用失败: {error_text}") from exc
-
-        error_text = str(last_exc).strip() if last_exc else "unknown"
-        raise RuntimeError(f"{spec.name} 调用失败: {error_text}")
-
-    async def _emit_stream_deltas(
-        self,
-        spec: AgentSpec,
-        raw_content: str,
-        loop_round: int,
-        round_number: int,
-    ) -> None:
-        content = (raw_content or "").strip()
-        if not content:
-            return
-        chunks = [
-            content[i : i + self.STREAM_CHUNK_SIZE]
-            for i in range(0, len(content), self.STREAM_CHUNK_SIZE)
-        ]
-        truncated = False
-        if len(chunks) > self.STREAM_MAX_CHUNKS:
-            chunks = chunks[: self.STREAM_MAX_CHUNKS]
-            truncated = True
-        stream_id = f"{self.session_id}:{spec.name}:{round_number}"
-        for index, chunk in enumerate(chunks, start=1):
-            await self._emit_event(
-                {
-                    "type": "llm_stream_delta",
-                    "phase": spec.phase,
-                    "agent_name": spec.name,
-                    "model": settings.llm_model,
-                    "session_id": self.session_id,
-                    "stream_id": stream_id,
-                    "loop_round": loop_round,
-                    "round_number": round_number,
-                    "chunk_index": index,
-                    "chunk_total": len(chunks),
-                    "delta": chunk,
-                    "truncated": truncated,
-                }
-            )
-
     def _agent_max_tokens(self, agent_name: str) -> int:
         if agent_name == "JudgeAgent":
             configured = int(settings.DEBATE_JUDGE_MAX_TOKENS)
@@ -2040,27 +1722,6 @@ class LangGraphRuntimeOrchestrator:
         if agent_name in {"CriticAgent", "RebuttalAgent"}:
             return max(15, min(int(settings.llm_review_timeout), 90))
         return max(15, min(int(settings.llm_analysis_timeout), 90))
-
-    def _run_agent_once(self, spec: AgentSpec, prompt: str, max_tokens: int) -> str:
-        if not settings.LLM_API_KEY:
-            raise RuntimeError("LLM_API_KEY 未配置，无法调用模型")
-        llm = ChatOpenAI(
-            model=settings.llm_model,
-            api_key=settings.LLM_API_KEY,
-            base_url=self._base_url_for_llm(),
-            temperature=0.15,
-            timeout=self._agent_http_timeout(spec.name),
-            max_retries=max(0, int(settings.LLM_MAX_RETRIES)),
-            max_tokens=max(128, int(max_tokens or 256)),
-            model_kwargs={"extra_body": {"thinking": {"type": "disabled"}}},
-        )
-        reply = llm.invoke(
-            [
-                SystemMessage(content=spec.system_prompt or "你是严谨的 SRE 分析助手。"),
-                HumanMessage(content=prompt),
-            ]
-        )
-        return LLMClient._extract_reply_text(reply, agent_name=spec.name)
 
     def _prepare_timeout_retry_input(
         self,
@@ -2096,401 +1757,27 @@ class LangGraphRuntimeOrchestrator:
             f"{text[-tail_len:]}"
         )
 
-    def _extract_balanced_object(
-        self,
-        text: str,
-        start_index: int,
-    ) -> Optional[str]:
-        if start_index < 0 or start_index >= len(text) or text[start_index] != "{":
-            return None
-        depth = 0
-        in_string = False
-        escape = False
-        for i in range(start_index, len(text)):
-            ch = text[i]
-            if in_string:
-                if escape:
-                    escape = False
-                elif ch == "\\":
-                    escape = True
-                elif ch == '"':
-                    in_string = False
-                continue
-            if ch == '"':
-                in_string = True
-                continue
-            if ch == "{":
-                depth += 1
-                continue
-            if ch == "}":
-                depth -= 1
-                if depth == 0:
-                    return text[start_index : i + 1]
-        return None
-
-    def _extract_object_by_named_key(
-        self,
-        text: str,
-        key_name: str,
-    ) -> Optional[Dict[str, Any]]:
-        marker = f'"{key_name}"'
-        search_start = 0
-        while True:
-            key_index = text.find(marker, search_start)
-            if key_index < 0:
-                return None
-            colon_index = text.find(":", key_index + len(marker))
-            if colon_index < 0:
-                return None
-            brace_index = text.find("{", colon_index + 1)
-            if brace_index < 0:
-                return None
-            candidate_text = self._extract_balanced_object(text, brace_index)
-            search_start = key_index + len(marker)
-            if not candidate_text:
-                continue
-            try:
-                parsed = json.loads(candidate_text)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                return parsed
-
-    def _extract_top_level_json_with_key(
-        self,
-        text: str,
-        required_key: str,
-    ) -> Optional[Dict[str, Any]]:
-        matched_payload: Optional[Dict[str, Any]] = None
-        matched_length = 0
-        marker = f'"{required_key}"'
-        for start, ch in enumerate(text):
-            if ch != "{":
-                continue
-            candidate_text = self._extract_balanced_object(text, start)
-            if not candidate_text or marker not in candidate_text:
-                continue
-            try:
-                parsed = json.loads(candidate_text)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict) and required_key in parsed and len(candidate_text) > matched_length:
-                matched_payload = parsed
-                matched_length = len(candidate_text)
-        return matched_payload
-
-    def _extract_confidence_hint(self, text: str, fallback: float = 0.5) -> float:
-        matches = re.findall(r'"confidence"\s*:\s*(-?\d+(?:\.\d+)?)', text)
-        if not matches:
-            return fallback
-        try:
-            value = float(matches[-1])
-        except (TypeError, ValueError):
-            return fallback
-        return max(0.0, min(1.0, value))
-
-    def _extract_largest_json_dict(self, text: str) -> Dict[str, Any]:
-        raw = str(text or "")
-        if not raw.strip():
-            return {}
-        best: Dict[str, Any] = {}
-        best_len = 0
-        for start, ch in enumerate(raw):
-            if ch != "{":
-                continue
-            candidate = self._extract_balanced_object(raw, start)
-            if not candidate:
-                continue
-            try:
-                parsed = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict) and len(candidate) > best_len:
-                best = parsed
-                best_len = len(candidate)
-        return best
-
-    def _extract_mixed_json_dict(self, raw_content: str) -> Dict[str, Any]:
-        raw_text = str(raw_content or "")
-        parsed = extract_json_dict(raw_text) or {}
-        if isinstance(parsed, dict) and parsed:
-            return parsed
-        for block in re.findall(r"```(?:json)?\s*([\s\S]*?)```", raw_text, flags=re.IGNORECASE):
-            parsed = extract_json_dict(block) or {}
-            if isinstance(parsed, dict) and parsed:
-                return parsed
-            parsed = self._extract_largest_json_dict(block)
-            if parsed:
-                return parsed
-        return self._extract_largest_json_dict(raw_text)
-
-    def _parse_judge_payload(self, raw_content: str) -> Dict[str, Any]:
-        raw_text = str(raw_content or "")
-        if not raw_text.strip():
-            return {}
-
-        # 优先提取包含 final_judgment 的完整对象，避免命中嵌套对象导致结构丢失。
-        top_level_payload = self._extract_top_level_json_with_key(raw_text, "final_judgment")
-        if isinstance(top_level_payload, dict):
-            return top_level_payload
-
-        final_judgment = self._extract_object_by_named_key(raw_text, "final_judgment")
-        if isinstance(final_judgment, dict) and final_judgment:
-            root_cause_hint = final_judgment.get("root_cause")
-            root_confidence = 0.5
-            if isinstance(root_cause_hint, dict):
-                try:
-                    root_confidence = float(root_cause_hint.get("confidence") or 0.5)
-                except (TypeError, ValueError):
-                    root_confidence = 0.5
-            return {
-                "final_judgment": final_judgment,
-                "confidence": self._extract_confidence_hint(
-                    raw_text,
-                    fallback=root_confidence,
-                ),
-            }
-
-        generic_payload = extract_json_dict(raw_text) or {}
-        if isinstance(generic_payload, dict) and "final_judgment" in generic_payload:
-            return generic_payload
-
-        # 如果解析到的是 final_judgment 内层对象，做一次包装，尽量保留有效结论。
-        if isinstance(generic_payload, dict) and any(
-            k in generic_payload for k in ("root_cause", "evidence_chain", "fix_recommendation")
-        ):
-            return {
-                "final_judgment": generic_payload,
-                "confidence": self._extract_confidence_hint(raw_text, fallback=0.5),
-            }
-
-        return generic_payload if isinstance(generic_payload, dict) else {}
-
+    # Compatibility wrappers: parsing/normalization implementation was moved to
+    # app.runtime.langgraph.parsers to keep runtime focused on graph orchestration.
     def _normalize_agent_output(self, agent_name: str, raw_content: str) -> Dict[str, Any]:
-        if agent_name == "JudgeAgent":
-            parsed = self._parse_judge_payload(raw_content)
-            normalized = self._normalize_judge_output(parsed, raw_content)
-        elif agent_name == "ProblemAnalysisAgent":
-            parsed = self._extract_mixed_json_dict(raw_content)
-            normalized = self._normalize_commander_output(parsed, raw_content)
-        else:
-            parsed = self._extract_mixed_json_dict(raw_content)
-            normalized = self._normalize_normal_output(parsed, raw_content)
-        return normalized
+        return normalize_agent_output_parser(
+            agent_name,
+            raw_content,
+            judge_fallback_summary=self.JUDGE_FALLBACK_SUMMARY,
+        )
 
     def _normalize_commander_output(self, parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
-        normalized = self._normalize_normal_output(parsed, raw_content)
-        commands_raw = parsed.get("commands")
-        commands: List[Dict[str, Any]] = []
-        if isinstance(commands_raw, list):
-            for item in commands_raw[:10]:
-                if not isinstance(item, dict):
-                    continue
-                target_agent = str(item.get("target_agent") or "").strip()
-                if not target_agent:
-                    continue
-                commands.append(
-                    {
-                        "target_agent": target_agent,
-                        "task": str(item.get("task") or "").strip(),
-                        "focus": str(item.get("focus") or "").strip(),
-                        "expected_output": str(item.get("expected_output") or "").strip(),
-                    }
-                )
-        if not str(normalized.get("chat_message") or "").strip():
-            normalized["chat_message"] = "我来拆解问题并给各专家Agent下达命令。"
-        normalized["commands"] = commands
-        return normalized
+        return normalize_commander_output_parser(parsed, raw_content)
 
     def _normalize_normal_output(self, parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
-        chat_message = str(parsed.get("chat_message") or "").strip()
-        analysis = str(parsed.get("analysis") or "").strip()
-        conclusion = str(parsed.get("conclusion") or analysis or "").strip()
-        evidence = parsed.get("evidence_chain")
-        if not isinstance(evidence, list):
-            evidence = []
-        evidence = [str(item).strip() for item in evidence if str(item).strip()][:3]
-
-        confidence = parsed.get("confidence")
-        try:
-            confidence_value = float(confidence)
-        except Exception:
-            confidence_value = 0.66 if analysis or conclusion else 0.45
-        confidence_value = max(0.0, min(1.0, confidence_value))
-
-        if not analysis and raw_content:
-            analysis = raw_content[:220]
-        if not conclusion:
-            conclusion = analysis
-        if not chat_message:
-            if conclusion and analysis and conclusion != analysis:
-                chat_message = f"我的判断是：{conclusion}。依据是：{analysis[:120]}"
-            elif conclusion:
-                chat_message = f"我的判断是：{conclusion}"
-            elif raw_content:
-                chat_message = raw_content[:180]
-
-        return {
-            "chat_message": chat_message[:260],
-            "analysis": analysis,
-            "conclusion": conclusion,
-            "evidence_chain": evidence,
-            "confidence": confidence_value,
-            "raw_text": raw_content[:1200],
-        }
+        return normalize_normal_output(parsed, raw_content)
 
     def _normalize_judge_output(self, parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
-        chat_message = str(parsed.get("chat_message") or "").strip()
-        final_judgment = parsed.get("final_judgment")
-        if not isinstance(final_judgment, dict) and any(
-            key in parsed for key in ("root_cause", "evidence_chain", "fix_recommendation")
-        ):
-            final_judgment = parsed
-        if not isinstance(final_judgment, dict):
-            final_judgment = {}
-
-        root_cause = final_judgment.get("root_cause")
-        if isinstance(root_cause, str):
-            root_cause = {
-                "summary": root_cause,
-                "category": "unknown",
-                "confidence": 0.6,
-            }
-        elif not isinstance(root_cause, dict):
-            recovered_root = self._extract_object_by_named_key(str(raw_content or ""), "root_cause")
-            if isinstance(recovered_root, dict) and recovered_root.get("summary"):
-                root_cause = recovered_root
-            else:
-                root_cause = {
-                    "summary": self.JUDGE_FALLBACK_SUMMARY,
-                    "category": "unknown",
-                    "confidence": 0.5,
-                }
-        if isinstance(root_cause, dict):
-            summary = str(root_cause.get("summary") or "").strip()
-            if not summary:
-                root_cause["summary"] = self.JUDGE_FALLBACK_SUMMARY
-            else:
-                root_cause["summary"] = summary
-            if not root_cause.get("category"):
-                root_cause["category"] = "unknown"
-            try:
-                root_cause["confidence"] = max(
-                    0.0,
-                    min(1.0, float(root_cause.get("confidence") or 0.5)),
-                )
-            except (TypeError, ValueError):
-                root_cause["confidence"] = 0.5
-        else:
-            root_cause = {
-                "summary": self.JUDGE_FALLBACK_SUMMARY,
-                "category": "unknown",
-                "confidence": 0.5,
-            }
-
-        evidence_chain = final_judgment.get("evidence_chain")
-        if not isinstance(evidence_chain, list):
-            evidence_chain = []
-        evidence_items: List[Dict[str, Any]] = []
-        for item in evidence_chain[:6]:
-            if isinstance(item, dict):
-                evidence_items.append(
-                    {
-                        "type": str(item.get("type") or "analysis"),
-                        "description": str(
-                            item.get("description")
-                            or item.get("evidence")
-                            or item.get("summary")
-                            or ""
-                        ),
-                        "source": str(item.get("source") or "langgraph"),
-                        "location": item.get("location"),
-                        "strength": str(item.get("strength") or "medium"),
-                    }
-                )
-            else:
-                evidence_items.append(
-                    {
-                        "type": "analysis",
-                        "description": str(item),
-                        "source": "langgraph",
-                        "location": None,
-                        "strength": "medium",
-                    }
-                )
-
-        fix_recommendation = final_judgment.get("fix_recommendation")
-        if not isinstance(fix_recommendation, dict):
-            fix_recommendation = {
-                "summary": "建议先进行止损并补充监控告警",
-                "steps": [],
-                "code_changes_required": True,
-                "rollback_recommended": False,
-                "testing_requirements": [],
-            }
-
-        impact_analysis = final_judgment.get("impact_analysis")
-        if not isinstance(impact_analysis, dict):
-            impact_analysis = {
-                "affected_services": [],
-                "business_impact": "待评估",
-                "affected_users": "待评估",
-            }
-
-        risk_assessment = final_judgment.get("risk_assessment")
-        if not isinstance(risk_assessment, dict):
-            risk_assessment = {
-                "risk_level": "medium",
-                "risk_factors": [],
-                "mitigation_suggestions": [],
-            }
-
-        decision_rationale = parsed.get("decision_rationale")
-        if not isinstance(decision_rationale, dict):
-            decision_rationale = {
-                "key_factors": [],
-                "reasoning": raw_content[:400],
-            }
-
-        action_items = parsed.get("action_items")
-        if not isinstance(action_items, list):
-            action_items = []
-
-        responsible_team = parsed.get("responsible_team")
-        if not isinstance(responsible_team, dict):
-            responsible_team = {
-                "team": "待确认",
-                "owner": "待确认",
-            }
-
-        confidence = parsed.get("confidence")
-        try:
-            confidence_value = float(confidence)
-        except Exception:
-            confidence_value = float(root_cause.get("confidence") or 0.6)
-        confidence_value = max(0.0, min(1.0, confidence_value))
-        if not chat_message:
-            root_summary = str(root_cause.get("summary") or "").strip()
-            if root_summary:
-                chat_message = f"综合各位观点，我倾向结论是：{root_summary}"
-            elif raw_content:
-                chat_message = raw_content[:220]
-
-        return {
-            "chat_message": chat_message[:300],
-            "final_judgment": {
-                "root_cause": root_cause,
-                "evidence_chain": evidence_items,
-                "fix_recommendation": fix_recommendation,
-                "impact_analysis": impact_analysis,
-                "risk_assessment": risk_assessment,
-            },
-            "decision_rationale": decision_rationale,
-            "action_items": action_items,
-            "responsible_team": responsible_team,
-            "confidence": confidence_value,
-            "raw_text": raw_content[:1400],
-        }
+        return normalize_judge_output(
+            parsed,
+            raw_content,
+            fallback_summary=self.JUDGE_FALLBACK_SUMMARY,
+        )
 
     def _is_placeholder_summary(self, summary: str) -> bool:
         text = str(summary or "").strip()

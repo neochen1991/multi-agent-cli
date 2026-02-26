@@ -204,17 +204,6 @@ class AssetCollectionService:
     "key_methods": [...]
 }}"""
 
-            await self._emit_event(
-                event_callback,
-                {
-                    "type": "llm_call_started",
-                    "phase": "asset_analysis",
-                    "stage": "runtime_log_parse",
-                    "session_id": session.id,
-                    "model": settings.default_model_config.get("name"),
-                    "prompt_preview": prompt[:800],
-                },
-            )
             started_at = time.perf_counter()
             # 调用 LLM
             # 资产阶段有本地解析兜底，LLM 只做增强，避免首个请求长时间阻塞整个会话。
@@ -237,35 +226,8 @@ class AssetCollectionService:
             # 解析结果
             if result and "content" in result:
                 parsed = extract_json_dict(result["content"])
-                await self._emit_event(
-                    event_callback,
-                    {
-                        "type": "llm_call_completed",
-                        "phase": "asset_analysis",
-                        "stage": "runtime_log_parse",
-                        "session_id": session.id,
-                        "model": settings.default_model_config.get("name"),
-                        "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
-                        "response_preview": result.get("content", "")[:1000],
-                        "parsed": bool(parsed),
-                    },
-                )
                 if parsed:
                     return self._merge_local_and_ai_log_parse(local_parsed, parsed)
-
-            await self._emit_event(
-                event_callback,
-                {
-                    "type": "llm_call_completed",
-                    "phase": "asset_analysis",
-                    "stage": "runtime_log_parse",
-                    "session_id": session.id,
-                    "model": settings.default_model_config.get("name"),
-                    "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
-                    "response_preview": (result or {}).get("content", "")[:1000] if isinstance(result, dict) else "",
-                    "parsed": False,
-                },
-            )
             return local_parsed
             
         except Exception as e:
@@ -274,18 +236,6 @@ class AssetCollectionService:
             (logger.warning if is_timeout else logger.error)(
                 "ai_log_parse_timeout" if is_timeout else "ai_log_parse_failed",
                 error=error_text,
-            )
-            await self._emit_event(
-                event_callback,
-                {
-                    "type": "llm_call_timeout" if is_timeout else "llm_call_failed",
-                    "phase": "asset_analysis",
-                    "stage": "runtime_log_parse",
-                    "session_id": session.id if "session" in locals() else None,
-                    "model": settings.default_model_config.get("name"),
-                    "prompt_preview": prompt[:800] if "prompt" in locals() else "",
-                    "error": error_text,
-                },
             )
             await self._emit_event(
                 event_callback,
@@ -534,18 +484,6 @@ class AssetCollectionService:
     "annotations": [...]
 }}"""
 
-            await self._emit_event(
-                event_callback,
-                {
-                    "type": "llm_call_started",
-                    "phase": "asset_analysis",
-                    "stage": "dev_code_parse",
-                    "session_id": session.id,
-                    "model": settings.default_model_config.get("name"),
-                    "target": class_name,
-                    "prompt_preview": prompt[:800],
-                },
-            )
             started_at = time.perf_counter()
             call_timeout = max(20, min(settings.llm_timeout, 90))
             result = await asyncio.wait_for(
@@ -566,37 +504,8 @@ class AssetCollectionService:
             
             if result and "content" in result:
                 parsed = extract_json_dict(result["content"])
-                await self._emit_event(
-                    event_callback,
-                    {
-                        "type": "llm_call_completed",
-                        "phase": "asset_analysis",
-                        "stage": "dev_code_parse",
-                        "session_id": session.id,
-                        "model": settings.default_model_config.get("name"),
-                        "target": class_name,
-                        "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
-                        "response_preview": result.get("content", "")[:1000],
-                        "parsed": bool(parsed),
-                    },
-                )
                 if parsed:
                     return parsed
-
-            await self._emit_event(
-                event_callback,
-                {
-                    "type": "llm_call_completed",
-                    "phase": "asset_analysis",
-                    "stage": "dev_code_parse",
-                    "session_id": session.id,
-                    "model": settings.default_model_config.get("name"),
-                    "target": class_name,
-                    "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
-                    "response_preview": (result or {}).get("content", "")[:1000] if isinstance(result, dict) else "",
-                    "parsed": False,
-                },
-            )
             return {}
             
         except Exception as e:
@@ -605,19 +514,6 @@ class AssetCollectionService:
             (logger.warning if is_timeout else logger.error)(
                 "ai_code_parse_timeout" if is_timeout else "ai_code_parse_failed",
                 error=error_text,
-            )
-            await self._emit_event(
-                event_callback,
-                {
-                    "type": "llm_call_timeout" if is_timeout else "llm_call_failed",
-                    "phase": "asset_analysis",
-                    "stage": "dev_code_parse",
-                    "session_id": session.id if "session" in locals() else None,
-                    "target": class_name,
-                    "model": settings.default_model_config.get("name"),
-                    "prompt_preview": prompt[:800] if "prompt" in locals() else "",
-                    "error": error_text,
-                },
             )
             raise RuntimeError(f"开发态代码 LLM 解析失败: {error_text}") from e
     
@@ -785,17 +681,6 @@ class AssetCollectionService:
     "owner_team": "..."
 }}"""
 
-            await self._emit_event(
-                event_callback,
-                {
-                    "type": "llm_call_started",
-                    "phase": "asset_analysis",
-                    "stage": "design_ddd_parse",
-                    "session_id": session.id,
-                    "model": settings.default_model_config.get("name"),
-                    "prompt_preview": prompt[:800],
-                },
-            )
             started_at = time.perf_counter()
             call_timeout = max(20, min(settings.llm_timeout, 90))
             result = await asyncio.wait_for(
@@ -815,35 +700,8 @@ class AssetCollectionService:
             
             if result and "content" in result:
                 parsed = extract_json_dict(result["content"])
-                await self._emit_event(
-                    event_callback,
-                    {
-                        "type": "llm_call_completed",
-                        "phase": "asset_analysis",
-                        "stage": "design_ddd_parse",
-                        "session_id": session.id,
-                        "model": settings.default_model_config.get("name"),
-                        "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
-                        "response_preview": result.get("content", "")[:1000],
-                        "parsed": bool(parsed),
-                    },
-                )
                 if parsed:
                     return parsed
-
-            await self._emit_event(
-                event_callback,
-                {
-                    "type": "llm_call_completed",
-                    "phase": "asset_analysis",
-                    "stage": "design_ddd_parse",
-                    "session_id": session.id,
-                    "model": settings.default_model_config.get("name"),
-                    "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
-                    "response_preview": (result or {}).get("content", "")[:1000] if isinstance(result, dict) else "",
-                    "parsed": False,
-                },
-            )
             return {}
             
         except Exception as e:
@@ -852,18 +710,6 @@ class AssetCollectionService:
             (logger.warning if is_timeout else logger.error)(
                 "ai_ddd_parse_timeout" if is_timeout else "ai_ddd_parse_failed",
                 error=error_text,
-            )
-            await self._emit_event(
-                event_callback,
-                {
-                    "type": "llm_call_timeout" if is_timeout else "llm_call_failed",
-                    "phase": "asset_analysis",
-                    "stage": "design_ddd_parse",
-                    "session_id": session.id if "session" in locals() else None,
-                    "model": settings.default_model_config.get("name"),
-                    "prompt_preview": prompt[:800] if "prompt" in locals() else "",
-                    "error": error_text,
-                },
             )
             raise RuntimeError(f"设计态 DDD 文档 LLM 解析失败: {error_text}") from e
     

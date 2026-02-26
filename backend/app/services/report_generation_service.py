@@ -145,17 +145,6 @@ class ReportGenerationService:
             # 构建报告生成提示（压缩输入长度，降低超时概率）
             prompt = self._build_report_prompt(incident, debate_result, assets)
             
-            await self._emit_event(
-                event_callback,
-                {
-                    "type": "llm_call_started",
-                    "phase": "report_generation",
-                    "stage": "report_ai_generation",
-                    "session_id": session.id,
-                    "model": settings.default_model_config.get("name"),
-                    "prompt_preview": prompt[:1000],
-                },
-            )
             started_at = time.perf_counter()
             result: Optional[Dict[str, Any]] = None
             last_error: Optional[Exception] = None
@@ -203,35 +192,10 @@ class ReportGenerationService:
                 raise last_error
             
             if result and "content" in result:
-                await self._emit_event(
-                    event_callback,
-                    {
-                        "type": "llm_call_completed",
-                        "phase": "report_generation",
-                        "stage": "report_ai_generation",
-                        "session_id": session.id,
-                        "model": settings.default_model_config.get("name"),
-                        "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
-                        "response_preview": result.get("content", "")[:1200],
-                    },
-                )
                 structured = result.get("structured") if isinstance(result, dict) else None
                 if not isinstance(structured, dict) or not structured:
                     structured = self._parse_ai_report(result["content"])
                 return self._normalize_report_structure(structured, incident, debate_result, assets)
-            
-            await self._emit_event(
-                event_callback,
-                {
-                    "type": "llm_call_completed",
-                    "phase": "report_generation",
-                    "stage": "report_ai_generation",
-                    "session_id": session.id,
-                    "model": settings.default_model_config.get("name"),
-                    "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
-                    "response_preview": "",
-                },
-            )
             raise RuntimeError("报告生成 LLM 返回空响应")
             
         except Exception as e:
@@ -240,18 +204,6 @@ class ReportGenerationService:
             (logger.warning if is_timeout else logger.error)(
                 "ai_report_generation_timeout" if is_timeout else "ai_report_generation_failed",
                 error=error_text,
-            )
-            await self._emit_event(
-                event_callback,
-                {
-                    "type": "llm_call_timeout" if is_timeout else "llm_call_failed",
-                    "phase": "report_generation",
-                    "stage": "report_ai_generation",
-                    "session_id": session.id if "session" in locals() else None,
-                    "model": settings.default_model_config.get("name"),
-                    "prompt_preview": prompt[:1000] if "prompt" in locals() else "",
-                    "error": error_text,
-                },
             )
             raise RuntimeError(f"报告生成 LLM 调用失败: {error_text}") from e
     
