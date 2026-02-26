@@ -15,7 +15,9 @@ FRONTEND_PORT=5173
 
 mkdir -p "$LOG_DIR"
 
-if [[ -x "$BACKEND_DIR/venv/bin/uvicorn" ]]; then
+if [[ -x "$BACKEND_DIR/.venv/bin/uvicorn" ]]; then
+  uvicorn_bin="$BACKEND_DIR/.venv/bin/uvicorn"
+elif [[ -x "$BACKEND_DIR/venv/bin/uvicorn" ]]; then
   uvicorn_bin="$BACKEND_DIR/venv/bin/uvicorn"
 elif command -v uvicorn >/dev/null 2>&1; then
   uvicorn_bin="uvicorn"

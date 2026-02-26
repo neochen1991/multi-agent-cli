@@ -2,18 +2,19 @@
 Debate flow entrypoint.
 
 This module keeps backward-compatible symbols while delegating execution
-to the AutoGen Runtime orchestrator implementation.
+to the LangGraph runtime orchestrator implementation.
 """
 
 from app.config import settings
-from app.runtime.autogen_runtime import (
-    AutoGenRuntimeOrchestrator,
+from app.runtime.langgraph_runtime import (
+    LangGraphRuntimeOrchestrator,
     DebateTurn,
 )
 
-# Backward-compatible alias
+# Backward-compatible aliases
 DebateRound = DebateTurn
-AIDebateOrchestrator = AutoGenRuntimeOrchestrator
+AIDebateOrchestrator = LangGraphRuntimeOrchestrator
+LangGraphDebateOrchestrator = LangGraphRuntimeOrchestrator
 
 
 ai_debate_orchestrator = AIDebateOrchestrator(

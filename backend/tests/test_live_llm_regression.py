@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from app.core.autogen_client import get_autogen_client
+from app.core.llm_client import get_llm_client
 
 
 pytestmark = pytest.mark.integration
@@ -15,7 +15,7 @@ async def test_live_llm_minimal_roundtrip():
     if not os.getenv("LLM_API_KEY"):
         pytest.skip("LLM_API_KEY is required for live LLM regression tests")
 
-    client = get_autogen_client()
+    client = get_llm_client()
     session = await client.create_session(title="live_regression")
     result = await client.send_prompt(
         session_id=session.id,

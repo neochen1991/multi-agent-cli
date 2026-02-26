@@ -6,8 +6,10 @@ uvicorn[standard]>=0.27.0
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
 
-# Multi-Agent Orchestration
-pyautogen>=0.9.0
+# Multi-Agent Orchestration (LangGraph)
+langgraph>=1.0.0
+langchain-core>=1.0.0
+langchain-openai>=1.0.0
 
 # HTTP 客户端
 httpx>=0.26.0

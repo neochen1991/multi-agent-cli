@@ -43,11 +43,11 @@ const SettingsPage: React.FC = () => {
           <Title level={4} style={{ marginTop: 0 }}>
             系统设置
           </Title>
-          <Text>当前模型：kimi-k2.5</Text>
+          <Text>当前模型：glm-5</Text>
           <br />
           <Text>LLM Runtime：AutoGen Multi-Agent</Text>
           <br />
-          <Text>LLM Base URL：https://ark.cn-beijing.volces.com/api/coding</Text>
+          <Text>LLM Base URL：https://coding.dashscope.aliyuncs.com/v1</Text>
         </Card>
 
         <Card title="登录（AUTH_ENABLED=true 时需要）">

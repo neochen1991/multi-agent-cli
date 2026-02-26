@@ -232,16 +232,32 @@ const IncidentPage: React.FC = () => {
     const outputJson = data.output_json;
     const messageText = row.text || '';
 
+    // 对话流只展示“人类可读对话”和关键状态，底层 LLM 事件放在事件明细中查看。
+    if (
+      kind === 'llm_stream_delta' ||
+      kind === 'llm_http_request' ||
+      kind === 'llm_http_response' ||
+      kind === 'llm_http_error' ||
+      kind === 'llm_call_started' ||
+      kind === 'llm_call_completed'
+    ) {
+      return null;
+    }
+
     const isRequestKind =
       kind === 'llm_prompt_started' ||
+      kind === 'llm_call_started' ||
       kind === 'autogen_call_started' ||
       kind === 'llm_stream_delta';
     const isResponseKind =
       kind === 'llm_prompt_completed' ||
       kind === 'llm_cli_command_completed' ||
+      kind === 'llm_call_completed' ||
       kind === 'autogen_call_completed' ||
       kind === 'agent_round';
     const isErrorKind =
+      kind === 'llm_call_failed' ||
+      kind === 'llm_call_timeout' ||
       kind === 'autogen_call_failed' ||
       kind === 'llm_prompt_failed' ||
       kind === 'llm_cli_command_failed' ||
@@ -252,15 +268,19 @@ const IncidentPage: React.FC = () => {
     let summary = normalizeInlineText(messageText || kind);
     let detail = '';
 
-    if (kind === 'llm_stream_delta') {
-      status = 'streaming';
-      summary = `${agentName} 正在输出`;
-      detail = normalizeMarkdownText(firstTextValue(data, ['delta']) || '...');
+    if (kind === 'agent_chat_message') {
+      status = 'done';
+      const replyTo = firstTextValue(data, ['reply_to']);
+      summary = replyTo && replyTo !== 'all' ? `${agentName} 回复 ${replyTo}` : `${agentName} 发言`;
+      detail = normalizeMarkdownText(firstTextValue(data, ['message']) || messageText || '（空发言）');
     } else if (
-      kind === 'autogen_call_completed' &&
+      (kind === 'autogen_call_completed' || kind === 'llm_call_completed') &&
       ['analysis', 'critique', 'rebuttal', 'judgment'].includes(phase)
     ) {
       // 辩论阶段优先展示 agent_round，避免 completed 与 round 双重重复
+      return null;
+    } else if (kind === 'agent_round' && typeof outputJson === 'object' && outputJson !== null && 'chat_message' in (outputJson as Record<string, unknown>)) {
+      // 聊天对话由 agent_chat_message 承载，agent_round 仅作为结构化记录保留在事件明细中
       return null;
     } else if (isRequestKind) {
       status = 'streaming';
@@ -303,6 +323,14 @@ const IncidentPage: React.FC = () => {
     } else if (kind === 'phase_changed' || kind === 'snapshot' || kind === 'session_started' || kind === 'ws_ack' || kind === 'ws_control') {
       summary = normalizeInlineText(messageText || '状态更新');
       detail = normalizeMarkdownText(messageText || '');
+    } else if (kind === 'agent_command_feedback') {
+      return null;
+    } else if (kind === 'agent_command_issued') {
+      status = 'done';
+      summary = normalizeInlineText(messageText || '主Agent指令');
+      detail = normalizeMarkdownText(
+        firstTextValue(data, ['message', 'command', 'feedback']) || messageText || '命令执行事件',
+      );
     } else {
       return null;
     }
@@ -356,6 +384,12 @@ const IncidentPage: React.FC = () => {
         return `LLM请求参数 [${phase || stage || '-'}] ${agent || ''} ${model || ''}`.trim();
       case 'llm_http_response':
         return `LLM响应参数 [${phase || stage || '-'}] ${agent || ''} ${model || ''}`.trim();
+      case 'agent_chat_message':
+        return `Agent发言 [${phase || '-'}] ${agent || ''}`.trim();
+      case 'agent_command_issued':
+        return `主Agent下达指令 [${phase || '-'}] ${agent || ''} -> ${String(data?.target_agent || '-')}`.trim();
+      case 'agent_command_feedback':
+        return `Agent反馈主Agent [${phase || '-'}] ${agent || ''}`.trim();
       case 'llm_http_error':
         if (error.toLowerCase().includes('timeout')) {
           return `LLM响应超时 [${phase || stage || '-'}] ${agent || ''}，系统将自动降级`.trim();
@@ -463,6 +497,12 @@ const IncidentPage: React.FC = () => {
             } as EventRecord;
           })
           .reverse();
+      });
+      persisted.forEach((item) => {
+        const row = (item || {}) as Record<string, unknown>;
+        const event = (row.event || {}) as Record<string, unknown>;
+        const eventId = typeof event.event_id === 'string' ? event.event_id : '';
+        if (eventId) seenEventIdsRef.current.add(eventId);
       });
     }
     return detail;
@@ -589,16 +629,16 @@ const IncidentPage: React.FC = () => {
             }
             const eventPhase = String(payload.data?.phase || '').toLowerCase();
             if (
-              type === 'autogen_call_started' &&
+              (type === 'autogen_call_started' || type === 'llm_call_started') &&
               eventPhase.includes('asset')
             ) {
               advanceStep(1);
             }
-            if (type === 'agent_round' || type === 'round_started' || type === 'llm_call_started') {
+            if (type === 'agent_round' || type === 'agent_chat_message' || type === 'round_started' || type === 'llm_call_started') {
               advanceStep(2);
             }
             if (
-              type === 'autogen_call_started' &&
+              (type === 'autogen_call_started' || type === 'llm_call_started') &&
               eventPhase.includes('report')
             ) {
               advanceStep(3);
@@ -1110,7 +1150,7 @@ const IncidentPage: React.FC = () => {
     label: `${round.round_number}. ${round.agent_name} (${round.phase}) - ${(round.confidence * 100).toFixed(1)}%`,
     children: (
       <Space direction="vertical" style={{ width: '100%' }}>
-        <Text type="secondary">模型：{String(round.model?.name || 'kimi-k2.5')}</Text>
+        <Text type="secondary">模型：{String(round.model?.name || 'glm-5')}</Text>
         <Text type="secondary">输入片段：</Text>
         <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{round.input_message || '无'}</pre>
         <Text type="secondary">输出内容：</Text>

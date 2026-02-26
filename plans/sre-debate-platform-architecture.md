@@ -14,7 +14,7 @@
 - **前端**: React + TypeScript + Ant Design
 - **数据库**: PostgreSQL + Neo4j (图数据库)
 - **消息队列**: Redis + Celery
-- **AI 模型**: kimi-k2.5
+- **AI 模型**: glm-5
 
 ---
 
@@ -43,12 +43,12 @@ graph TB
     end
 
     subgraph Agent层
-        LogAgent[LogAgent - kimi-k2.5]
-        DomainAgent[DomainAgent - kimi-k2.5]
-        CodeAgent[CodeAgent - kimi-k2.5]
-        CriticAgent[CriticAgent - kimi-k2.5]
-        RebuttalAgent[RebuttalAgent - kimi-k2.5]
-        JudgeAgent[JudgeAgent - kimi-k2.5]
+        LogAgent[LogAgent - glm-5]
+        DomainAgent[DomainAgent - glm-5]
+        CodeAgent[CodeAgent - glm-5]
+        CriticAgent[CriticAgent - glm-5]
+        RebuttalAgent[RebuttalAgent - glm-5]
+        JudgeAgent[JudgeAgent - glm-5]
     end
 
     subgraph 工具层
@@ -271,12 +271,12 @@ from .base import BaseAgent
 from typing import Dict, Any
 
 class LogAgent(BaseAgent):
-    """日志分析专家 - 使用 kimi-k2.5 模型"""
+    """日志分析专家 - 使用 glm-5 模型"""
     
     def __init__(self, tools: List[Tool]):
         super().__init__(
             name="LogAgent",
-            model="kimi-k2.5",
+            model="glm-5",
             tools=tools
         )
     
@@ -311,12 +311,12 @@ class LogAgent(BaseAgent):
 from .base import BaseAgent
 
 class DomainAgent(BaseAgent):
-    """领域映射专家 - 使用 kimi-k2.5 模型"""
+    """领域映射专家 - 使用 glm-5 模型"""
     
     def __init__(self, tools: List[Tool]):
         super().__init__(
             name="DomainAgent",
-            model="kimi-k2.5",
+            model="glm-5",
             tools=tools
         )
     
@@ -342,12 +342,12 @@ class DomainAgent(BaseAgent):
 from .base import BaseAgent
 
 class CodeAgent(BaseAgent):
-    """代码分析专家 - 使用 kimi-k2.5 模型"""
+    """代码分析专家 - 使用 glm-5 模型"""
     
     def __init__(self, tools: List[Tool]):
         super().__init__(
             name="CodeAgent",
-            model="kimi-k2.5",
+            model="glm-5",
             tools=tools
         )
     
@@ -990,7 +990,7 @@ def search_code(query: str) -> str:
 # 创建 Agent
 code_agent = client.agent(
     name="CodeExpert",
-    model="kimi-k2.5",
+    model="glm-5",
     tools=[search_code],
     system_prompt="你是一位代码分析专家..."
 )
@@ -1010,10 +1010,10 @@ result = await flow.run()
 ```yaml
 # config/models.yaml
 options:
-  baseURL: https://ark.cn-beijing.volces.com/api/coding/v3
-  apiKey: b0f69e9a-7708-4bf8-af61-7b7822947ce4
+  baseURL: https://coding.dashscope.aliyuncs.com/v1
+  apiKey: sk-sp-5abc4c1d85414988979e90771e112f2f
 
 models:
-  kimi-k2.5:
-    name: kimi-k2.5
+  glm-5:
+    name: glm-5
 ```

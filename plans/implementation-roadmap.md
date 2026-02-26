@@ -371,12 +371,12 @@ from autogen import tool
 from app.agents.base import BaseAgent, AgentResult
 
 class LogAgent(BaseAgent):
-    """日志分析专家 - 使用 kimi-k2.5 模型"""
+    """日志分析专家 - 使用 glm-5 模型"""
     
     def __init__(self, tools: List = None):
         super().__init__(
             name="LogAgent",
-            model="kimi-k2.5",
+            model="glm-5",
             tools=tools or []
         )
     
@@ -447,7 +447,7 @@ from app.tools.git_tool import GitTool
 from app.tools.code_search_tool import CodeSearchTool
 
 class CodeAgent(BaseAgent):
-    """代码分析专家 - 使用 kimi-k2.5 模型"""
+    """代码分析专家 - 使用 glm-5 模型"""
     
     def __init__(self):
         # 注册代码相关工具
@@ -457,7 +457,7 @@ class CodeAgent(BaseAgent):
         ]
         super().__init__(
             name="CodeAgent",
-            model="kimi-k2.5",
+            model="glm-5",
             tools=tools
         )
     

@@ -92,7 +92,7 @@ const HomePage: React.FC = () => {
         <Col span={8}>
           <Card title="🧠 多模型专家委员会" hoverable>
             <Paragraph>
-              统一使用 kimi-k2.5 模型，按不同专家角色进行协同分析与技术裁决。
+              统一使用 glm-5 模型，按不同专家角色进行协同分析与技术裁决。
             </Paragraph>
           </Card>
         </Col>
@@ -112,7 +112,7 @@ const HomePage: React.FC = () => {
             <Card size="small" style={{ background: '#f6ffed', borderColor: '#b7eb8f' }}>
               <Statistic
                 title="LogAgent"
-                value="kimi-k2.5"
+                value="glm-5"
                 valueStyle={{ fontSize: 16 }}
               />
               <Paragraph style={{ margin: 0 }}>日志结构化分析专家</Paragraph>
@@ -122,7 +122,7 @@ const HomePage: React.FC = () => {
             <Card size="small" style={{ background: '#e6f7ff', borderColor: '#91d5ff' }}>
               <Statistic
                 title="DomainAgent"
-                value="kimi-k2.5"
+                value="glm-5"
                 valueStyle={{ fontSize: 16 }}
               />
               <Paragraph style={{ margin: 0 }}>领域映射专家</Paragraph>
@@ -132,7 +132,7 @@ const HomePage: React.FC = () => {
             <Card size="small" style={{ background: '#f9f0ff', borderColor: '#d3adf7' }}>
               <Statistic
                 title="CodeAgent"
-                value="kimi-k2.5"
+                value="glm-5"
                 valueStyle={{ fontSize: 16 }}
               />
               <Paragraph style={{ margin: 0 }}>代码分析专家</Paragraph>
@@ -142,7 +142,7 @@ const HomePage: React.FC = () => {
             <Card size="small" style={{ background: '#fff2e8', borderColor: '#ffbb96' }}>
               <Statistic
                 title="CriticAgent"
-                value="kimi-k2.5"
+                value="glm-5"
                 valueStyle={{ fontSize: 16 }}
               />
               <Paragraph style={{ margin: 0 }}>架构质疑专家</Paragraph>
@@ -152,7 +152,7 @@ const HomePage: React.FC = () => {
             <Card size="small" style={{ background: '#f0f5ff', borderColor: '#adc6ff' }}>
               <Statistic
                 title="RebuttalAgent"
-                value="kimi-k2.5"
+                value="glm-5"
                 valueStyle={{ fontSize: 16 }}
               />
               <Paragraph style={{ margin: 0 }}>技术反驳专家</Paragraph>
@@ -162,7 +162,7 @@ const HomePage: React.FC = () => {
             <Card size="small" style={{ background: '#fff0f6', borderColor: '#ffadd2' }}>
               <Statistic
                 title="JudgeAgent"
-                value="kimi-k2.5"
+                value="glm-5"
                 valueStyle={{ fontSize: 16 }}
               />
               <Paragraph style={{ margin: 0 }}>技术委员会主席</Paragraph>

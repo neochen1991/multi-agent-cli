@@ -2,7 +2,7 @@
 反驳 Agent
 Rebuttal Agent
 
-使用 kimi-k2.5 模型进行技术反驳和修正。
+使用 glm-5 模型进行技术反驳和修正。
 """
 
 from typing import Any, Dict, List, Optional
@@ -21,7 +21,7 @@ class RebuttalAgent(BaseAgent):
     """
     技术反驳专家
     
-    使用 kimi-k2.5 模型进行：
+    使用 glm-5 模型进行：
     1. 回应质疑意见
     2. 修正推理过程
     3. 补充证据

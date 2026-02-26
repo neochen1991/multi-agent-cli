@@ -5,7 +5,7 @@
 ## 🚀 核心特性
 
 - **🔥 三态资产融合**：统一建模运行态、开发态、设计态资产
-- **🧠 专家委员会协作**：统一使用 kimi-k2.5 模型执行多角色协作分析
+- **🧠 专家委员会协作**：统一使用 glm-5 模型执行多角色协作分析
 - **⚖️ AI 内部辩论机制**：通过质疑、反驳、裁决四阶段辩论流程
 - **🔗 可扩展自动修复能力**：支持自动 PR 生成与灰度发布建议
 
@@ -93,12 +93,12 @@ multi-agent-cli_v2/
 
 | Agent | 模型 | 角色 |
 |-------|------|------|
-| LogAgent | kimi-k2.5 | 日志分析专家 |
-| DomainAgent | kimi-k2.5 | 领域映射专家 |
-| CodeAgent | kimi-k2.5 | 代码分析专家 |
-| CriticAgent | kimi-k2.5 | 架构质疑专家 |
-| RebuttalAgent | kimi-k2.5 | 技术反驳专家 |
-| JudgeAgent | kimi-k2.5 | 技术委员会主席 |
+| LogAgent | glm-5 | 日志分析专家 |
+| DomainAgent | glm-5 | 领域映射专家 |
+| CodeAgent | glm-5 | 代码分析专家 |
+| CriticAgent | glm-5 | 架构质疑专家 |
+| RebuttalAgent | glm-5 | 技术反驳专家 |
+| JudgeAgent | glm-5 | 技术委员会主席 |
 
 ## 🔄 辩论流程
 
@@ -120,9 +120,9 @@ multi-agent-cli_v2/
 2. **配置模型提供商**
 
 通过环境变量配置 OpenAI 兼容网关：
-- `LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/coding`
-- `LLM_API_KEY=b0f69e9a-7708-4bf8-af61-7b7822947ce4`
-- `LLM_MODEL=kimi-k2.5`
+- `LLM_BASE_URL=https://coding.dashscope.aliyuncs.com/v1`
+- `LLM_API_KEY=sk-sp-5abc4c1d85414988979e90771e112f2f`
+- `LLM_MODEL=glm-5`
 - `LOCAL_STORE_BACKEND=file`
 - `LOCAL_STORE_DIR=/tmp/sre_debate_store`
 
@@ -145,9 +145,9 @@ source venv/bin/activate  # Linux/macOS
 pip install -r requirements.txt
 
 # 配置环境变量
-export LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/coding
-export LLM_API_KEY=b0f69e9a-7708-4bf8-af61-7b7822947ce4
-export LLM_MODEL=kimi-k2.5
+export LLM_BASE_URL=https://coding.dashscope.aliyuncs.com/v1
+export LLM_API_KEY=sk-sp-5abc4c1d85414988979e90771e112f2f
+export LLM_MODEL=glm-5
 export LOCAL_STORE_BACKEND=file
 
 # 启动服务
@@ -159,12 +159,12 @@ uvicorn app.main:app --reload
 ```json
 {
   "options": {
-    "baseURL": "https://ark.cn-beijing.volces.com/api/coding",
-    "apiKey": "b0f69e9a-7708-4bf8-af61-7b7822947ce4"
+    "baseURL": "https://coding.dashscope.aliyuncs.com/v1",
+    "apiKey": "sk-sp-5abc4c1d85414988979e90771e112f2f"
   },
   "models": {
-    "kimi-k2.5": {
-      "name": "kimi-k2.5"
+    "glm-5": {
+      "name": "glm-5"
     }
   }
 }
@@ -272,7 +272,7 @@ session = await client.create_session(title="故障分析会话")
 result = await client.send_prompt(
     session_id=session.id,
     parts=[{"type": "text", "text": "分析这个日志..."}],
-    model={"name": "kimi-k2.5"}
+    model={"name": "glm-5"}
 )
 
 # 获取结构化输出

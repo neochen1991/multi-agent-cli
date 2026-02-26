@@ -1,11 +1,11 @@
 from datetime import datetime
 
-from app.runtime.autogen_runtime import AutoGenRuntimeOrchestrator, DebateTurn
+from app.runtime.langgraph_runtime import LangGraphRuntimeOrchestrator, DebateTurn
 from app.runtime.messages import AgentEvidence
 
 
-def _orchestrator() -> AutoGenRuntimeOrchestrator:
-    return AutoGenRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
+def _orchestrator() -> LangGraphRuntimeOrchestrator:
+    return LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
 
 
 def test_judge_payload_recovery_from_truncated_response_keeps_root_cause():
@@ -72,7 +72,7 @@ def test_build_final_payload_uses_best_agent_conclusion_when_judge_fallback():
             phase="analysis",
             agent_name="CodeAgent",
             agent_role="代码分析专家",
-            model={"name": "kimi-k2.5"},
+            model={"name": "glm-5"},
             input_message="",
             output_content=code_output,
             confidence=0.91,
@@ -84,7 +84,7 @@ def test_build_final_payload_uses_best_agent_conclusion_when_judge_fallback():
             phase="judgment",
             agent_name="JudgeAgent",
             agent_role="技术委员会主席",
-            model={"name": "kimi-k2.5"},
+            model={"name": "glm-5"},
             input_message="",
             output_content=judge_fallback,
             confidence=0.5,

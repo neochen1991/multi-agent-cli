@@ -52,19 +52,26 @@ class Settings(BaseSettings):
     LOCAL_STORE_BACKEND: str = Field(default="file")  # file | memory
     LOCAL_STORE_DIR: str = Field(default="/tmp/sre_debate_store")
 
-    # LLM / AutoGen 配置
+    # LLM / LangGraph 配置
     LLM_MODEL: str = Field(default="kimi-k2.5")
     LLM_MAX_TURNS: Optional[int] = None
     LLM_TIMEOUT: Optional[int] = None
     LLM_CONNECT_TIMEOUT: Optional[int] = None
     LLM_REQUEST_TIMEOUT: Optional[int] = None
     LLM_TOTAL_TIMEOUT: Optional[int] = None
+    LLM_ASSET_TIMEOUT: Optional[int] = None
+    LLM_ANALYSIS_TIMEOUT: Optional[int] = None
+    LLM_REVIEW_TIMEOUT: Optional[int] = None
+    LLM_JUDGE_TIMEOUT: Optional[int] = None
+    LLM_JUDGE_RETRY_TIMEOUT: Optional[int] = None
+    LLM_REPORT_TIMEOUT_FIRST: Optional[int] = None
+    LLM_REPORT_TIMEOUT_RETRY: Optional[int] = None
     LLM_MAX_RETRIES: int = 0
-    LLM_MAX_CONCURRENCY: int = 2
+    LLM_MAX_CONCURRENCY: int = 3
     LLM_FAILFAST_ON_RATE_LIMIT: bool = True
     LLM_PROVIDER_ID: Optional[str] = None
-    # OpenAI-compatible endpoint (AutoGen config_list)
-    LLM_BASE_URL: str = Field(default="https://ark.cn-beijing.volces.com/api/coding/v3")
+    # OpenAI-compatible endpoint (LangGraph config_list)
+    LLM_BASE_URL: str = Field(default="https://ark.cn-beijing.volces.com/api/coding")
     LLM_API_KEY: str = Field(default="b0f69e9a-7708-4bf8-af61-7b7822947ce4")
 
     # 辩论配置
@@ -176,8 +183,36 @@ class Settings(BaseSettings):
         return self.LLM_TOTAL_TIMEOUT or max(25, min(self.llm_timeout, 60))
 
     @property
+    def llm_asset_timeout(self) -> int:
+        return self.LLM_ASSET_TIMEOUT or max(20, min(self.llm_request_timeout, 60))
+
+    @property
+    def llm_analysis_timeout(self) -> int:
+        return self.LLM_ANALYSIS_TIMEOUT or max(20, min(self.llm_total_timeout, 35))
+
+    @property
+    def llm_review_timeout(self) -> int:
+        return self.LLM_REVIEW_TIMEOUT or max(24, min(self.llm_total_timeout, 40))
+
+    @property
+    def llm_judge_timeout(self) -> int:
+        return self.LLM_JUDGE_TIMEOUT or max(35, min(self.llm_total_timeout, 60))
+
+    @property
+    def llm_judge_retry_timeout(self) -> int:
+        return self.LLM_JUDGE_RETRY_TIMEOUT or max(self.llm_judge_timeout, 45)
+
+    @property
+    def llm_report_timeout_first(self) -> int:
+        return self.LLM_REPORT_TIMEOUT_FIRST or max(16, min(self.llm_total_timeout, 35))
+
+    @property
+    def llm_report_timeout_retry(self) -> int:
+        return self.LLM_REPORT_TIMEOUT_RETRY or max(self.llm_report_timeout_first, 50)
+
+    @property
     def llm_provider_id(self) -> str:
-        return self.LLM_PROVIDER_ID or "autogen"
+        return self.LLM_PROVIDER_ID or "langgraph"
 
 
 @lru_cache

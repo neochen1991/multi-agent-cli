@@ -2,7 +2,7 @@
 领域映射 Agent
 Domain Mapping Agent
 
-使用 kimi-k2.5 模型进行领域映射和 DDD 分析。
+使用 glm-5 模型进行领域映射和 DDD 分析。
 """
 
 from typing import Any, Dict, List, Optional
@@ -21,7 +21,7 @@ class DomainAgent(BaseAgent):
     """
     领域映射专家
     
-    使用 kimi-k2.5 模型进行：
+    使用 glm-5 模型进行：
     1. 将运行态异常映射到领域模型
     2. 识别涉及的聚合根和限界上下文
     3. 分析跨域影响

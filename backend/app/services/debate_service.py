@@ -288,8 +288,20 @@ class DebateService:
                     break
                 except Exception as exc:
                     attempt += 1
+                    error_text = str(exc).strip() or exc.__class__.__name__
+                    no_effective_conclusion = "未获得有效大模型结论" in error_text
+                    if no_effective_conclusion and settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION:
+                        await _emit_and_record(
+                            {
+                                "type": "debate_failed_no_effective_llm_conclusion",
+                                "phase": "debating",
+                                "attempt": attempt,
+                                "max_attempts": max_attempts,
+                                "error": error_text,
+                            }
+                        )
+                        raise RuntimeError(error_text) from exc
                     if attempt >= max_attempts:
-                        error_text = str(exc).strip() or exc.__class__.__name__
                         if settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION:
                             raise RuntimeError(f"未获得有效大模型结论: {error_text}") from exc
                         debate_result = self._build_degraded_debate_result(

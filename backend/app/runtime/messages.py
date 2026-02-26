@@ -1,5 +1,5 @@
 """
-AutoGen runtime message contracts.
+LangGraph runtime message contracts.
 """
 
 from __future__ import annotations

@@ -72,7 +72,7 @@ class DebateRound(BaseModel):
                 "phase": "analysis",
                 "agent_name": "CodeAgent",
                 "agent_role": "code_expert",
-                "model": {"name": "kimi-k2.5"},
+                "model": {"name": "glm-5"},
                 "input_message": "分析以下日志...",
                 "output_content": {"root_cause": "...", "evidence": [...]},
                 "confidence": 0.85

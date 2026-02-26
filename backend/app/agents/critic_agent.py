@@ -2,7 +2,7 @@
 质疑 Agent
 Critic Agent
 
-使用 kimi-k2.5 模型进行架构质疑和交叉验证。
+使用 glm-5 模型进行架构质疑和交叉验证。
 """
 
 from typing import Any, Dict, List, Optional
@@ -21,7 +21,7 @@ class CriticAgent(BaseAgent):
     """
     架构质疑专家
     
-    使用 kimi-k2.5 模型进行：
+    使用 glm-5 模型进行：
     1. 检查是否违反 DDD 原则
     2. 验证证据链的完整性
     3. 质疑分析中的漏洞

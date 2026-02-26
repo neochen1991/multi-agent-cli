@@ -26,9 +26,10 @@ from app.models.asset import (
     DomainModel,
     AggregateRoot,
 )
-from app.core.autogen_client import autogen_client
+from app.core.llm_client import llm_client
 from app.core.json_utils import extract_json_dict
 from app.config import settings
+from app.tools.log_parser import LogParserTool
 
 logger = structlog.get_logger()
 
@@ -39,6 +40,7 @@ class AssetCollectionService:
     def __init__(self):
         self.code_repos_path = os.getenv("CODE_REPOS_PATH", "/tmp/repos")
         self.design_docs_path = os.getenv("DESIGN_DOCS_PATH", "/tmp/design_docs")
+        self._log_parser = LogParserTool()
     
     # ==================== 运行态资产采集 ====================
     
@@ -97,7 +99,7 @@ class AssetCollectionService:
     ) -> Optional[RuntimeAsset]:
         """采集日志资产"""
         try:
-            # 使用 AutoGen 多 Agent 分析日志
+            # 使用 LangGraph 多 Agent 分析日志
             parsed_data = await self._parse_log_with_ai(
                 log_content,
                 event_callback=event_callback,
@@ -165,10 +167,11 @@ class AssetCollectionService:
         log_content: str,
         event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
-        """使用 AutoGen 多 Agent 解析日志"""
+        """使用 LangGraph 多 Agent 解析日志"""
+        local_parsed = await self._parse_log_locally(log_content)
         try:
             # 创建会话
-            session = await autogen_client.create_session(
+            session = await llm_client.create_session(
                 title="日志解析分析"
             )
             
@@ -204,7 +207,7 @@ class AssetCollectionService:
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_started",
+                    "type": "llm_call_started",
                     "phase": "asset_analysis",
                     "stage": "runtime_log_parse",
                     "session_id": session.id,
@@ -214,9 +217,10 @@ class AssetCollectionService:
             )
             started_at = time.perf_counter()
             # 调用 LLM
-            call_timeout = max(12, min(settings.llm_total_timeout, 35))
+            # 资产阶段有本地解析兜底，LLM 只做增强，避免首个请求长时间阻塞整个会话。
+            call_timeout = max(8, min(int(settings.llm_asset_timeout), 20))
             result = await asyncio.wait_for(
-                autogen_client.send_prompt(
+                llm_client.send_prompt(
                     session_id=session.id,
                     parts=[{"type": "text", "text": prompt}],
                     model=settings.default_model_config,
@@ -236,7 +240,7 @@ class AssetCollectionService:
                 await self._emit_event(
                     event_callback,
                     {
-                        "type": "autogen_call_completed",
+                        "type": "llm_call_completed",
                         "phase": "asset_analysis",
                         "stage": "runtime_log_parse",
                         "session_id": session.id,
@@ -247,12 +251,12 @@ class AssetCollectionService:
                     },
                 )
                 if parsed:
-                    return parsed
+                    return self._merge_local_and_ai_log_parse(local_parsed, parsed)
 
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_completed",
+                    "type": "llm_call_completed",
                     "phase": "asset_analysis",
                     "stage": "runtime_log_parse",
                     "session_id": session.id,
@@ -262,7 +266,7 @@ class AssetCollectionService:
                     "parsed": False,
                 },
             )
-            return {}
+            return local_parsed
             
         except Exception as e:
             error_text = str(e).strip() or e.__class__.__name__
@@ -274,7 +278,7 @@ class AssetCollectionService:
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_timeout" if is_timeout else "autogen_call_failed",
+                    "type": "llm_call_timeout" if is_timeout else "llm_call_failed",
                     "phase": "asset_analysis",
                     "stage": "runtime_log_parse",
                     "session_id": session.id if "session" in locals() else None,
@@ -283,7 +287,82 @@ class AssetCollectionService:
                     "error": error_text,
                 },
             )
-            raise RuntimeError(f"运行态日志 LLM 解析失败: {error_text}") from e
+            await self._emit_event(
+                event_callback,
+                {
+                    "type": "asset_log_parse_fallback_local",
+                    "phase": "asset_analysis",
+                    "stage": "runtime_log_parse",
+                    "session_id": session.id if "session" in locals() else None,
+                    "reason": error_text,
+                    "fallback_fields": list(local_parsed.keys()),
+                },
+            )
+            return local_parsed
+
+    async def _parse_log_locally(self, log_content: str) -> Dict[str, Any]:
+        """本地正则解析日志，作为 LLM 失败/超时时的稳定兜底。"""
+        try:
+            result = await self._log_parser.execute(log_content=log_content)
+            data = result.data if result.success else {}
+        except Exception as exc:
+            logger.warning("local_log_parse_failed", error=str(exc))
+            return {}
+
+        exceptions = data.get("exceptions") or []
+        log_lines = data.get("log_lines") or []
+        urls = data.get("urls") or []
+        class_names = data.get("class_names") or []
+        trace_ids = data.get("trace_ids") or []
+        sqls = data.get("sqls") or []
+
+        first_exc = exceptions[0] if exceptions else {}
+        first_line = log_lines[0] if log_lines else {}
+        stack_trace = first_exc.get("stack_trace") if isinstance(first_exc, dict) else []
+        key_methods = []
+        if isinstance(stack_trace, list):
+            for frame in stack_trace[:8]:
+                if isinstance(frame, dict):
+                    method = str(frame.get("method") or "").strip()
+                    if method:
+                        key_methods.append(method)
+
+        exception_type = str(first_exc.get("type") or "").strip() if isinstance(first_exc, dict) else ""
+        exception_message = (
+            str(first_exc.get("message") or "").strip() if isinstance(first_exc, dict) else ""
+        )
+
+        if not exception_type and "NullPointerException" in log_content:
+            exception_type = "java.lang.NullPointerException"
+
+        return {
+            "exception_type": exception_type,
+            "exception_message": exception_message,
+            "stack_trace": stack_trace if isinstance(stack_trace, list) else [],
+            "error_level": str(first_line.get("level") or "ERROR").strip() if isinstance(first_line, dict) else "ERROR",
+            "timestamp": str(first_line.get("timestamp") or "").strip() if isinstance(first_line, dict) else "",
+            "service_name": "",
+            "key_classes": class_names[:10] if isinstance(class_names, list) else [],
+            "key_methods": key_methods,
+            "urls": urls[:10] if isinstance(urls, list) else [],
+            "class_names": class_names[:20] if isinstance(class_names, list) else [],
+            "trace_ids": trace_ids[:10] if isinstance(trace_ids, list) else [],
+            "sqls": sqls[:10] if isinstance(sqls, list) else [],
+            "exceptions": exceptions[:3] if isinstance(exceptions, list) else [],
+            "log_lines": log_lines[:5] if isinstance(log_lines, list) else [],
+        }
+
+    def _merge_local_and_ai_log_parse(
+        self,
+        local_parsed: Dict[str, Any],
+        ai_parsed: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """合并本地解析与 LLM 增强结果，优先使用 LLM 的核心字段。"""
+        merged = dict(local_parsed or {})
+        if not isinstance(ai_parsed, dict):
+            return merged
+        merged.update({k: v for k, v in ai_parsed.items() if v not in (None, "", [], {})})
+        return merged
     
     # ==================== 开发态资产采集 ====================
     
@@ -419,9 +498,9 @@ class AssetCollectionService:
         class_name: str,
         event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
-        """使用 AutoGen 多 Agent 解析代码结构"""
+        """使用 LangGraph 多 Agent 解析代码结构"""
         try:
-            session = await autogen_client.create_session(
+            session = await llm_client.create_session(
                 title=f"代码结构分析 - {class_name}"
             )
             
@@ -458,7 +537,7 @@ class AssetCollectionService:
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_started",
+                    "type": "llm_call_started",
                     "phase": "asset_analysis",
                     "stage": "dev_code_parse",
                     "session_id": session.id,
@@ -470,7 +549,7 @@ class AssetCollectionService:
             started_at = time.perf_counter()
             call_timeout = max(20, min(settings.llm_timeout, 90))
             result = await asyncio.wait_for(
-                autogen_client.send_prompt(
+                llm_client.send_prompt(
                     session_id=session.id,
                     parts=[{"type": "text", "text": prompt}],
                     model=settings.default_model_config,
@@ -490,7 +569,7 @@ class AssetCollectionService:
                 await self._emit_event(
                     event_callback,
                     {
-                        "type": "autogen_call_completed",
+                        "type": "llm_call_completed",
                         "phase": "asset_analysis",
                         "stage": "dev_code_parse",
                         "session_id": session.id,
@@ -507,7 +586,7 @@ class AssetCollectionService:
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_completed",
+                    "type": "llm_call_completed",
                     "phase": "asset_analysis",
                     "stage": "dev_code_parse",
                     "session_id": session.id,
@@ -530,7 +609,7 @@ class AssetCollectionService:
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_timeout" if is_timeout else "autogen_call_failed",
+                    "type": "llm_call_timeout" if is_timeout else "llm_call_failed",
                     "phase": "asset_analysis",
                     "stage": "dev_code_parse",
                     "session_id": session.id if "session" in locals() else None,
@@ -672,9 +751,9 @@ class AssetCollectionService:
         doc_content: str,
         event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
-        """使用 AutoGen 多 Agent 解析 DDD 文档"""
+        """使用 LangGraph 多 Agent 解析 DDD 文档"""
         try:
-            session = await autogen_client.create_session(
+            session = await llm_client.create_session(
                 title="DDD 文档解析"
             )
             
@@ -709,7 +788,7 @@ class AssetCollectionService:
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_started",
+                    "type": "llm_call_started",
                     "phase": "asset_analysis",
                     "stage": "design_ddd_parse",
                     "session_id": session.id,
@@ -720,7 +799,7 @@ class AssetCollectionService:
             started_at = time.perf_counter()
             call_timeout = max(20, min(settings.llm_timeout, 90))
             result = await asyncio.wait_for(
-                autogen_client.send_prompt(
+                llm_client.send_prompt(
                     session_id=session.id,
                     parts=[{"type": "text", "text": prompt}],
                     model=settings.default_model_config,
@@ -739,7 +818,7 @@ class AssetCollectionService:
                 await self._emit_event(
                     event_callback,
                     {
-                        "type": "autogen_call_completed",
+                        "type": "llm_call_completed",
                         "phase": "asset_analysis",
                         "stage": "design_ddd_parse",
                         "session_id": session.id,
@@ -755,7 +834,7 @@ class AssetCollectionService:
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_completed",
+                    "type": "llm_call_completed",
                     "phase": "asset_analysis",
                     "stage": "design_ddd_parse",
                     "session_id": session.id,
@@ -777,7 +856,7 @@ class AssetCollectionService:
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_timeout" if is_timeout else "autogen_call_failed",
+                    "type": "llm_call_timeout" if is_timeout else "llm_call_failed",
                     "phase": "asset_analysis",
                     "stage": "design_ddd_parse",
                     "session_id": session.id if "session" in locals() else None,

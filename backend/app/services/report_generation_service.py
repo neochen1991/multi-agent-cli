@@ -15,7 +15,7 @@ import time
 
 import structlog
 
-from app.core.autogen_client import autogen_client
+from app.core.llm_client import llm_client
 from app.core.json_utils import extract_json_dict
 from app.config import settings
 
@@ -136,9 +136,9 @@ class ReportGenerationService:
         assets: Dict[str, Any],
         event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
-        """使用 AutoGen 多 Agent 生成报告内容"""
+        """使用 LangGraph 多 Agent 生成报告内容"""
         try:
-            session = await autogen_client.create_session(
+            session = await llm_client.create_session(
                 title="报告生成"
             )
             
@@ -148,7 +148,7 @@ class ReportGenerationService:
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_started",
+                    "type": "llm_call_started",
                     "phase": "report_generation",
                     "stage": "report_ai_generation",
                     "session_id": session.id,
@@ -161,8 +161,8 @@ class ReportGenerationService:
             last_error: Optional[Exception] = None
             # 两次尝试：第一次更短超时，第二次使用标准超时
             timeout_plan = [
-                max(10, min(settings.llm_timeout, 16)),
-                max(14, min(settings.llm_total_timeout, 24)),
+                max(12, int(settings.llm_report_timeout_first)),
+                max(int(settings.llm_report_timeout_first), int(settings.llm_report_timeout_retry)),
             ]
             for attempt_idx, call_timeout in enumerate(timeout_plan, start=1):
                 try:
@@ -170,7 +170,7 @@ class ReportGenerationService:
                         await self._emit_event(
                             event_callback,
                             {
-                                "type": "autogen_call_retry",
+                                "type": "llm_call_retry",
                                 "phase": "report_generation",
                                 "stage": "report_ai_generation",
                                 "session_id": session.id,
@@ -179,7 +179,7 @@ class ReportGenerationService:
                             },
                         )
                     result = await asyncio.wait_for(
-                        autogen_client.send_prompt(
+                        llm_client.send_prompt(
                             session_id=session.id,
                             parts=[{"type": "text", "text": prompt}],
                             model=settings.default_model_config,
@@ -206,7 +206,7 @@ class ReportGenerationService:
                 await self._emit_event(
                     event_callback,
                     {
-                        "type": "autogen_call_completed",
+                        "type": "llm_call_completed",
                         "phase": "report_generation",
                         "stage": "report_ai_generation",
                         "session_id": session.id,
@@ -223,7 +223,7 @@ class ReportGenerationService:
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_completed",
+                    "type": "llm_call_completed",
                     "phase": "report_generation",
                     "stage": "report_ai_generation",
                     "session_id": session.id,
@@ -244,7 +244,7 @@ class ReportGenerationService:
             await self._emit_event(
                 event_callback,
                 {
-                    "type": "autogen_call_timeout" if is_timeout else "autogen_call_failed",
+                    "type": "llm_call_timeout" if is_timeout else "llm_call_failed",
                     "phase": "report_generation",
                     "stage": "report_ai_generation",
                     "session_id": session.id if "session" in locals() else None,

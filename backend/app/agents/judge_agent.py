@@ -2,7 +2,7 @@
 裁决 Agent
 Judge Agent
 
-使用 kimi-k2.5 模型作为技术委员会主席进行最终裁决。
+使用 glm-5 模型作为技术委员会主席进行最终裁决。
 """
 
 from typing import Any, Dict, List, Optional
@@ -21,7 +21,7 @@ class JudgeAgent(BaseAgent):
     """
     技术委员会主席
     
-    使用 kimi-k2.5 模型进行：
+    使用 glm-5 模型进行：
     1. 综合双方观点
     2. 评估证据强度
     3. 给出最终结论

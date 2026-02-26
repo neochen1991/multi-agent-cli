@@ -2,7 +2,7 @@
 日志分析 Agent
 Log Analysis Agent
 
-使用 kimi-k2.5 模型进行日志分析和异常提取。
+使用 glm-5 模型进行日志分析和异常提取。
 """
 
 from typing import Any, Dict, List, Optional
@@ -21,7 +21,7 @@ class LogAgent(BaseAgent):
     """
     日志分析专家
     
-    使用 kimi-k2.5 模型进行：
+    使用 glm-5 模型进行：
     1. 解析和分析运行态日志
     2. 提取异常栈、URL、类路径等关键信息
     3. 识别异常模式和潜在问题

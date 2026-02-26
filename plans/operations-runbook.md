@@ -13,9 +13,9 @@ npm run dev
 ```
 
 ## 关键配置
-- `LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/coding`
-- `LLM_API_KEY=b0f69e9a-7708-4bf8-af61-7b7822947ce4`
-- `LLM_MODEL=kimi-k2.5`
+- `LLM_BASE_URL=https://coding.dashscope.aliyuncs.com/v1`
+- `LLM_API_KEY=sk-sp-5abc4c1d85414988979e90771e112f2f`
+- `LLM_MODEL=glm-5`
 - `LOCAL_STORE_BACKEND=file`（默认）
 - `LOCAL_STORE_DIR=/tmp/sre_debate_store`
 - `AUTH_ENABLED=false`（默认关闭；上线可设为 `true`）

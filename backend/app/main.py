@@ -66,7 +66,7 @@ def create_application() -> FastAPI:
         description="""
 ## 多模型辩论式 SRE 智能体平台
 
-基于 AutoGen 多 Agent 编排构建的多模型辩论式 SRE 智能体平台，实现三态资产融合与 AI 技术委员会决策系统。
+基于 LangGraph 多 Agent 编排构建的多模型辩论式 SRE 智能体平台，实现三态资产融合与 AI 技术委员会决策系统。
 
 ### 核心功能
 - 🔥 三态资产融合（运行态/开发态/设计态）
@@ -77,12 +77,12 @@ def create_application() -> FastAPI:
 ### 多模型专家
 | Agent | 模型 | 角色 |
 |-------|------|------|
-| LogAgent | kimi-k2.5 | 日志分析专家 |
-| DomainAgent | kimi-k2.5 | 领域映射专家 |
-| CodeAgent | kimi-k2.5 | 代码分析专家 |
-| CriticAgent | kimi-k2.5 | 架构质疑专家 |
-| RebuttalAgent | kimi-k2.5 | 技术反驳专家 |
-| JudgeAgent | kimi-k2.5 | 技术委员会主席 |
+| LogAgent | glm-5 | 日志分析专家 |
+| DomainAgent | glm-5 | 领域映射专家 |
+| CodeAgent | glm-5 | 代码分析专家 |
+| CriticAgent | glm-5 | 架构质疑专家 |
+| RebuttalAgent | glm-5 | 技术反驳专家 |
+| JudgeAgent | glm-5 | 技术委员会主席 |
         """,
         version=settings.APP_VERSION,
         docs_url="/docs",

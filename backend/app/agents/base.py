@@ -3,7 +3,7 @@ Agent 基类
 Base Agent Class
 
 所有专家 Agent 的基类，定义统一的接口和行为。
-使用 AutoGen 多 Agent 进行 AI 交互。
+使用 LangGraph 多 Agent 进行 AI 交互。
 """
 
 from abc import ABC, abstractmethod
@@ -13,7 +13,7 @@ import structlog
 
 from pydantic import BaseModel, Field
 
-from app.core.autogen_client import get_autogen_client
+from app.core.llm_client import get_llm_client
 
 logger = structlog.get_logger()
 
@@ -44,7 +44,7 @@ class BaseAgent(ABC):
     - _build_system_prompt(): 构建系统提示词
     - process(): 处理输入并返回结果
     
-    使用 AutoGen 多 Agent 进行 AI 交互。
+    使用 LangGraph 多 Agent 进行 AI 交互。
     工作流程：
     1. 创建会话 (session.create)
     2. 发送系统提示（可选，使用 noReply）
@@ -65,7 +65,7 @@ class BaseAgent(ABC):
         
         Args:
             name: Agent 名称
-            model: 模型配置，格式: {"name": "kimi-k2.5"}
+            model: 模型配置，格式: {"name": "glm-5"}
             role: Agent 角色描述
             tools: 可用工具列表
             temperature: 生成温度
@@ -123,7 +123,7 @@ class BaseAgent(ABC):
             会话 ID
         """
         if self._session_id is None:
-            client = get_autogen_client()
+            client = get_llm_client()
             session = await client.create_session(title=f"{self.name} Session")
             self._session_id = session.id
             
@@ -159,7 +159,7 @@ class BaseAgent(ABC):
             模型响应
         """
         session_id = await self._ensure_session()
-        client = get_autogen_client()
+        client = get_llm_client()
         
         response = await client.send_prompt(
             session_id=session_id,
@@ -186,7 +186,7 @@ class BaseAgent(ABC):
             结构化响应
         """
         session_id = await self._ensure_session()
-        client = get_autogen_client()
+        client = get_llm_client()
         
         response = await client.send_structured_prompt(
             session_id=session_id,

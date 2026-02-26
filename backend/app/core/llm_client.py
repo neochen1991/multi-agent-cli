@@ -1,8 +1,9 @@
 """
-AutoGen-backed LLM client.
+LangGraph/LangChain-backed LLM client (compat layer).
 
-This client keeps the existing session/send_prompt interface used by services,
-while the underlying call path is implemented with pyautogen agents.
+This module keeps the historical ``llm_client`` interface used by services,
+while the underlying call path is implemented with OpenAI-compatible chat calls
+via ``langchain-openai``.
 """
 
 from __future__ import annotations
@@ -15,8 +16,9 @@ from time import perf_counter
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from uuid import uuid4
 
-import autogen
 import structlog
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
 
 from app.config import settings
 from app.core.circuit_breaker import CircuitBreaker
@@ -27,7 +29,7 @@ logger = structlog.get_logger()
 
 
 @dataclass
-class AutoGenConfig:
+class LLMClientConfig:
     timeout: int = settings.llm_timeout
 
 
@@ -49,13 +51,13 @@ class _SessionState:
     messages: List[Dict[str, Any]] = field(default_factory=list)
 
 
-class AutoGenClient:
+class LLMClient:
     _LOG_TEXT_LIMIT = 4000
     _STREAM_CHUNK_SIZE = 120
     _STREAM_MAX_CHUNKS = 24
 
-    def __init__(self, config: Optional[AutoGenConfig] = None):
-        self.config = config or AutoGenConfig()
+    def __init__(self, config: Optional[LLMClientConfig] = None):
+        self.config = config or LLMClientConfig()
         self._circuit_breaker = CircuitBreaker(
             failure_threshold=settings.CIRCUIT_BREAKER_FAILURE_THRESHOLD,
             recovery_timeout=settings.CIRCUIT_BREAKER_RECOVERY_SECONDS,
@@ -63,8 +65,8 @@ class AutoGenClient:
         self._llm_semaphore = asyncio.Semaphore(max(1, int(settings.LLM_MAX_CONCURRENCY or 1)))
         self._sessions: Dict[str, _SessionState] = {}
         logger.info(
-            "autogen_client_initialized",
-            backend="pyautogen",
+            "llm_client_initialized",
+            backend="langgraph",
             model=settings.llm_model,
             base_url=settings.LLM_BASE_URL,
         )
@@ -75,14 +77,14 @@ class AutoGenClient:
     async def health_check(self) -> Dict[str, Any]:
         return {
             "healthy": True,
-            "backend": "pyautogen",
+            "backend": "langgraph",
             "model": settings.llm_model,
             "base_url": settings.LLM_BASE_URL,
             "endpoint": self._chat_endpoint(),
         }
 
     async def list_agents(self) -> List[Dict[str, Any]]:
-        return [{"id": "autogen_runtime", "name": "AutoGen Runtime"}]
+        return [{"id": "langgraph_runtime", "name": "LangGraph Runtime"}]
 
     async def write_log(self, service: str, level: str, message: str) -> bool:
         logger.info("external_log", service=service, level=level, message=message)
@@ -165,6 +167,115 @@ class AutoGenClient:
                 texts.append(text.strip())
         return "\n\n".join(texts).strip()
 
+    @classmethod
+    def _extract_text_from_any(cls, value: Any, *, depth: int = 0) -> str:
+        if depth > 6 or value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            parts: List[str] = []
+            for item in value:
+                text = cls._extract_text_from_any(item, depth=depth + 1)
+                if text:
+                    parts.append(text)
+            return "\n".join(part for part in parts if part).strip()
+        if isinstance(value, dict):
+            # Prefer common textual fields first, then recurse.
+            for key in (
+                "content",
+                "text",
+                "output_text",
+                "answer",
+                "final_answer",
+                "reasoning_content",
+                "value",
+            ):
+                if key in value:
+                    text = cls._extract_text_from_any(value.get(key), depth=depth + 1)
+                    if text:
+                        return text
+            return ""
+        return str(value).strip()
+
+    @classmethod
+    def _extract_reply_text(cls, reply: Any, *, agent_name: str = "") -> str:
+        content = getattr(reply, "content", "")
+        text = cls._extract_text_from_any(content)
+        if text:
+            return text
+
+        text_attr = getattr(reply, "text", None)
+        if isinstance(text_attr, str):
+            text = cls._extract_text_from_any(text_attr)
+            if text:
+                return text
+        elif callable(text_attr):
+            # ``message.text()`` is deprecated in newer LangChain and may produce provider-specific surprises.
+            pass
+
+        fallback_sources = (
+            ("additional_kwargs", ("content", "text", "output_text", "answer", "final_answer", "reasoning_content", "message", "choices")),
+            ("response_metadata", ("content", "text", "output_text", "answer", "final_answer", "reasoning_content", "message", "choices")),
+        )
+        for source_name, candidate_keys in fallback_sources:
+            source = getattr(reply, source_name, None)
+            text = ""
+            if isinstance(source, dict):
+                for key in candidate_keys:
+                    if key not in source:
+                        continue
+                    text = cls._extract_text_from_any(source.get(key))
+                    if text:
+                        break
+            elif source is not None and source_name == "additional_kwargs":
+                text = cls._extract_text_from_any(source)
+            if text:
+                logger.warning(
+                    "llm_reply_text_fallback_used",
+                    agent=agent_name,
+                    source=source_name,
+                    preview=cls._truncate_text(text, 500),
+                )
+                return text
+
+        for method_name in ("model_dump", "dict"):
+            method = getattr(reply, method_name, None)
+            if callable(method):
+                try:
+                    dumped = method()
+                    text = ""
+                    if isinstance(dumped, dict):
+                        for key in ("content", "text", "output_text", "answer", "final_answer", "reasoning_content", "message", "choices", "additional_kwargs"):
+                            if key not in dumped:
+                                continue
+                            text = cls._extract_text_from_any(dumped.get(key))
+                            if text:
+                                break
+                    if text:
+                        logger.warning(
+                            "llm_reply_text_fallback_used",
+                            agent=agent_name,
+                            source=method_name,
+                            preview=cls._truncate_text(text, 500),
+                        )
+                        return text
+                except Exception:
+                    continue
+
+        logger.warning(
+            "llm_reply_empty_after_parse",
+            agent=agent_name,
+            reply_type=type(reply).__name__,
+            additional_kwargs_keys=sorted(list(getattr(reply, "additional_kwargs", {}).keys()))
+            if isinstance(getattr(reply, "additional_kwargs", None), dict)
+            else [],
+            response_metadata_keys=sorted(list(getattr(reply, "response_metadata", {}).keys()))
+            if isinstance(getattr(reply, "response_metadata", None), dict)
+            else [],
+        )
+        return ""
+
     @staticmethod
     def _schema_payload(format_payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if not isinstance(format_payload, dict):
@@ -202,7 +313,7 @@ class AutoGenClient:
         return "以下是最近会话核心观点：\n" + "\n".join(lines)
 
     @staticmethod
-    def _base_url_for_autogen() -> str:
+    def _base_url_for_llm() -> str:
         base = settings.LLM_BASE_URL.rstrip("/")
         if base.endswith("/v1") or base.endswith("/v3"):
             return base
@@ -210,7 +321,7 @@ class AutoGenClient:
 
     @classmethod
     def _chat_endpoint(cls) -> str:
-        base = cls._base_url_for_autogen()
+        base = cls._base_url_for_llm()
         return f"{base}/chat/completions"
 
     @classmethod
@@ -265,51 +376,53 @@ class AutoGenClient:
             if asyncio.iscoroutine(maybe):
                 await maybe
         except Exception as exc:
-            logger.warning("autogen_trace_event_emit_failed", error=str(exc))
+            logger.warning("llm_trace_event_emit_failed", error=str(exc))
 
-    def _run_autogen_reply(
+    @staticmethod
+    def _phase_http_timeout(phase: Optional[str]) -> int:
+        phase_name = str(phase or "").strip().lower()
+        if phase_name == "report_generation":
+            return max(20, min(int(settings.llm_report_timeout_retry), 120))
+        if phase_name == "asset_analysis":
+            return max(20, min(int(settings.llm_asset_timeout), 90))
+        return max(15, min(int(settings.llm_request_timeout), 90))
+
+    @staticmethod
+    def _phase_call_timeout(phase: Optional[str]) -> float:
+        phase_name = str(phase or "").strip().lower()
+        if phase_name == "report_generation":
+            return float(max(12, int(settings.llm_report_timeout_retry)))
+        if phase_name == "asset_analysis":
+            return float(max(12, int(settings.llm_asset_timeout)))
+        return float(max(12, min(int(settings.llm_total_timeout), 60)))
+
+    def _run_llm_reply(
         self,
         prompt: str,
         system_prompt: str,
         model_name: str,
         agent_name: str,
         max_tokens: Optional[int] = None,
+        phase: Optional[str] = None,
     ) -> str:
         if not settings.LLM_API_KEY:
             raise RuntimeError("LLM_API_KEY 未配置，无法调用模型")
-        llm_config = {
-            "config_list": [
-                {
-                    "model": model_name,
-                    "api_key": settings.LLM_API_KEY,
-                    "base_url": self._base_url_for_autogen(),
-                    "price": [0, 0],
-                }
-            ],
-            "temperature": 0.2,
-            "timeout": max(10, min(settings.llm_timeout, 45)),
-        }
-        if isinstance(max_tokens, int) and max_tokens > 0:
-            llm_config["max_tokens"] = max_tokens
-
-        assistant = autogen.AssistantAgent(
-            name=agent_name or "AutoGenAgent",
-            system_message=system_prompt or "你是严谨的 SRE 分析助手。",
-            llm_config=llm_config,
-            human_input_mode="NEVER",
+        llm = ChatOpenAI(
+            model=model_name,
+            api_key=settings.LLM_API_KEY,
+            base_url=self._base_url_for_llm(),
+            temperature=0.2,
+            timeout=self._phase_http_timeout(phase),
+            max_retries=max(0, int(settings.LLM_MAX_RETRIES)),
+            max_tokens=(max_tokens if isinstance(max_tokens, int) and max_tokens > 0 else None),
+            model_kwargs={"extra_body": {"thinking": {"type": "disabled"}}},
         )
-
-        reply = assistant.generate_reply(
-            messages=[{"role": "user", "content": prompt}],
-        )
-        if isinstance(reply, dict):
-            content = reply.get("content")
-            if isinstance(content, str) and content.strip():
-                return content.strip()
-            return json.dumps(reply, ensure_ascii=False)
-        if isinstance(reply, str):
-            return reply.strip()
-        return json.dumps(reply, ensure_ascii=False)
+        messages = [
+            SystemMessage(content=system_prompt or "你是严谨的 SRE 分析助手。"),
+            HumanMessage(content=prompt),
+        ]
+        reply = llm.invoke(messages)
+        return self._extract_reply_text(reply, agent_name=agent_name)
 
     async def _repair_structured_output(
         self,
@@ -343,14 +456,15 @@ class AutoGenClient:
             async with self._llm_semaphore:
                 fixed = await asyncio.wait_for(
                     asyncio.to_thread(
-                        self._run_autogen_reply,
+                        self._run_llm_reply,
                         repair_prompt,
                         "你是严格的 JSON 修复器。",
                         model_name,
                         "JsonRepairAgent",
                         480,
+                        trace_context.get("phase"),
                     ),
-                    timeout=float(max(12, min(settings.llm_total_timeout, 40))),
+                    timeout=min(self._phase_call_timeout(trace_context.get("phase")), 60.0),
                 )
             repaired = extract_json_dict(fixed) or {}
             await self._emit_trace_event(
@@ -440,7 +554,7 @@ class AutoGenClient:
                     {"role": "user", "content": effective_prompt},
                 ]
             ),
-            "base_url": self._base_url_for_autogen(),
+            "base_url": self._base_url_for_llm(),
         }
         endpoint = self._chat_endpoint()
 
@@ -450,20 +564,7 @@ class AutoGenClient:
                 "type": "llm_call_started",
                 "phase": trace_context.get("phase"),
                 "stage": trace_context.get("stage"),
-                "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
-                "model": model_name,
-                "session_id": session_id,
-                "prompt_preview": effective_prompt[:1200],
-                "trace_id": trace_id,
-            },
-        )
-        await self._emit_trace_event(
-            trace_callback,
-            {
-                "type": "autogen_call_started",
-                "phase": trace_context.get("phase"),
-                "stage": trace_context.get("stage"),
-                "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
+                "agent_name": trace_context.get("agent_name") or agent or "llm_agent",
                 "model": model_name,
                 "session_id": session_id,
                 "prompt_preview": effective_prompt[:1200],
@@ -476,7 +577,7 @@ class AutoGenClient:
                 "type": "llm_http_request",
                 "phase": trace_context.get("phase"),
                 "stage": trace_context.get("stage"),
-                "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
+                "agent_name": trace_context.get("agent_name") or agent or "llm_agent",
                 "model": model_name,
                 "session_id": session_id,
                 "endpoint": endpoint,
@@ -487,7 +588,7 @@ class AutoGenClient:
 
         logger.info(
             "llm_request_started",
-            backend="pyautogen",
+            backend="langgraph",
             model=model_name,
             session_id=session_id,
             trace_id=trace_id,
@@ -500,14 +601,15 @@ class AutoGenClient:
             async with self._llm_semaphore:
                 content = await asyncio.wait_for(
                     asyncio.to_thread(
-                        self._run_autogen_reply,
+                        self._run_llm_reply,
                         effective_prompt,
                         system_prompt,
                         model_name,
-                        trace_context.get("agent_name") or agent or "AutoGenAgent",
+                        trace_context.get("agent_name") or agent or "LLMAgent",
                         max_tokens,
+                        trace_context.get("phase"),
                     ),
-                    timeout=float(max(12, min(settings.llm_total_timeout, 45))),
+                    timeout=self._phase_call_timeout(trace_context.get("phase")),
                 )
 
             structured = extract_json_dict(content) or {}
@@ -547,7 +649,7 @@ class AutoGenClient:
                     "type": "llm_http_response",
                     "phase": trace_context.get("phase"),
                     "stage": trace_context.get("stage"),
-                    "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
+                    "agent_name": trace_context.get("agent_name") or agent or "llm_agent",
                     "model": model_name,
                     "session_id": session_id,
                     "endpoint": endpoint,
@@ -564,10 +666,10 @@ class AutoGenClient:
             await self._emit_trace_event(
                 trace_callback,
                 {
-                    "type": "autogen_call_completed",
+                    "type": "llm_call_completed",
                     "phase": trace_context.get("phase"),
                     "stage": trace_context.get("stage"),
-                    "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
+                    "agent_name": trace_context.get("agent_name") or agent or "llm_agent",
                     "model": model_name,
                     "session_id": session_id,
                     "latency_ms": latency_ms,
@@ -576,24 +678,10 @@ class AutoGenClient:
                     "trace_id": trace_id,
                 },
             )
-            await self._emit_trace_event(
-                trace_callback,
-                {
-                    "type": "llm_call_completed",
-                    "phase": trace_context.get("phase"),
-                    "stage": trace_context.get("stage"),
-                    "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
-                    "model": model_name,
-                    "session_id": session_id,
-                    "latency_ms": latency_ms,
-                    "response_preview": content[:1500],
-                    "trace_id": trace_id,
-                },
-            )
 
             logger.info(
                 "llm_request_completed",
-                backend="pyautogen",
+                backend="langgraph",
                 model=model_name,
                 session_id=session_id,
                 trace_id=trace_id,
@@ -606,7 +694,7 @@ class AutoGenClient:
                 "content": content,
                 "structured": structured,
                 "info": {
-                    "provider": "autogen",
+                    "provider": "langgraph",
                     "model": model_name,
                     "session_id": state.id,
                     "endpoint": endpoint,
@@ -629,7 +717,7 @@ class AutoGenClient:
                     "type": "llm_http_error",
                     "phase": trace_context.get("phase"),
                     "stage": trace_context.get("stage"),
-                    "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
+                    "agent_name": trace_context.get("agent_name") or agent or "llm_agent",
                     "model": model_name,
                     "session_id": session_id,
                     "endpoint": endpoint,
@@ -641,24 +729,10 @@ class AutoGenClient:
             await self._emit_trace_event(
                 trace_callback,
                 {
-                    "type": "autogen_call_timeout" if is_timeout else "autogen_call_failed",
-                    "phase": trace_context.get("phase"),
-                    "stage": trace_context.get("stage"),
-                    "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
-                    "model": model_name,
-                    "session_id": session_id,
-                    "error": error_text,
-                    "latency_ms": latency_ms,
-                    "trace_id": trace_id,
-                },
-            )
-            await self._emit_trace_event(
-                trace_callback,
-                {
                     "type": "llm_call_timeout" if is_timeout else "llm_call_failed",
                     "phase": trace_context.get("phase"),
                     "stage": trace_context.get("stage"),
-                    "agent_name": trace_context.get("agent_name") or agent or "autogen_agent",
+                    "agent_name": trace_context.get("agent_name") or agent or "llm_agent",
                     "model": model_name,
                     "session_id": session_id,
                     "error": error_text,
@@ -669,7 +743,7 @@ class AutoGenClient:
             log_method = logger.warning if is_timeout else logger.error
             log_method(
                 "llm_request_timeout" if is_timeout else "llm_request_failed",
-                backend="pyautogen",
+                backend="langgraph",
                 model=model_name,
                 session_id=session_id,
                 trace_id=trace_id,
@@ -694,7 +768,7 @@ class AutoGenClient:
         if len(chunks) > self._STREAM_MAX_CHUNKS:
             chunks = chunks[: self._STREAM_MAX_CHUNKS]
             truncated = True
-        stream_id = f"{session_id}:{trace_context.get('agent_name') or 'autogen_agent'}"
+        stream_id = f"{session_id}:{trace_context.get('agent_name') or 'llm_agent'}"
         for index, chunk in enumerate(chunks, start=1):
             await self._emit_trace_event(
                 trace_callback,
@@ -702,7 +776,7 @@ class AutoGenClient:
                     "type": "llm_stream_delta",
                     "phase": trace_context.get("phase"),
                     "stage": trace_context.get("stage"),
-                    "agent_name": trace_context.get("agent_name") or "autogen_agent",
+                    "agent_name": trace_context.get("agent_name") or "llm_agent",
                     "model": model_name,
                     "session_id": session_id,
                     "stream_id": stream_id,
@@ -755,19 +829,19 @@ class AutoGenClient:
         raise NotImplementedError("run_shell is not supported")
 
 
-_client_instance: Optional[AutoGenClient] = None
+_client_instance: Optional[LLMClient] = None
 
 
-def get_autogen_client() -> AutoGenClient:
+def get_llm_client() -> LLMClient:
     global _client_instance
     if _client_instance is None:
-        _client_instance = AutoGenClient()
+        _client_instance = LLMClient()
     return _client_instance
 
 
-async def create_autogen_session(title: str) -> SessionInfo:
-    client = get_autogen_client()
+async def create_llm_session(title: str) -> SessionInfo:
+    client = get_llm_client()
     return await client.create_session(title=title)
 
 
-autogen_client = get_autogen_client()
+llm_client = get_llm_client()

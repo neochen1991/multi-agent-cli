@@ -2,7 +2,7 @@
 代码分析 Agent
 Code Analysis Agent
 
-使用 kimi-k2.5 模型进行代码分析和根因定位。
+使用 glm-5 模型进行代码分析和根因定位。
 """
 
 from typing import Any, Dict, List, Optional
@@ -21,7 +21,7 @@ class CodeAgent(BaseAgent):
     """
     代码分析专家
     
-    使用 kimi-k2.5 模型进行：
+    使用 glm-5 模型进行：
     1. 分析代码层面的根因
     2. 构建证据链
     3. 定位问题代码
