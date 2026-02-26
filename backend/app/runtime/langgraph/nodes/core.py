@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Dict
 
+from app.runtime.langgraph.nodes.supervisor import execute_supervisor_decide
+
 
 def build_init_session_node(orchestrator: Any) -> Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]:
     async def _node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -21,7 +23,7 @@ def build_round_start_node(orchestrator: Any) -> Callable[[Dict[str, Any]], Awai
 
 def build_supervisor_node(orchestrator: Any) -> Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]:
     async def _node(state: Dict[str, Any]) -> Dict[str, Any]:
-        return await orchestrator._graph_supervisor_decide(state)
+        return await execute_supervisor_decide(orchestrator, state)
 
     return _node
 

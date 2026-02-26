@@ -12,6 +12,7 @@ from app.runtime.langgraph.nodes.core import (
     build_round_start_node,
     build_supervisor_node,
 )
+from app.runtime.langgraph.nodes.supervisor import execute_supervisor_decide
 
 __all__ = [
     "build_agent_node",
@@ -22,4 +23,5 @@ __all__ = [
     "build_supervisor_node",
     "build_round_evaluate_node",
     "build_finalize_node",
+    "execute_supervisor_decide",
 ]
