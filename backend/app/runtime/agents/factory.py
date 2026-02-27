@@ -107,14 +107,11 @@ class AgentFactory:
         # 确定系统提示
         prompt = system_prompt or agent_config.system_prompt or self._build_default_prompt(agent_config)
 
-        # 创建 state_modifier
-        state_modifier = self._build_state_modifier(prompt, agent_config)
-
         # 创建 Agent
         agent = create_react_agent(
             model=model,
             tools=resolved_tools,
-            state_modifier=state_modifier,
+            prompt=prompt,
             **kwargs,
         )
 

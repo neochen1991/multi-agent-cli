@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     LLM_MAX_RETRIES: int = 0
     LLM_MAX_CONCURRENCY: int = 3
     LLM_FAILFAST_ON_RATE_LIMIT: bool = True
-    AGENT_USE_FACTORY: bool = True
+    AGENT_USE_FACTORY: bool = False
     LLM_PROVIDER_ID: Optional[str] = None
     # OpenAI-compatible endpoint (LangGraph config_list)
     LLM_BASE_URL: str = Field(default="https://ark.cn-beijing.volces.com/api/coding")
@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
     ALERT_ERROR_RATE_THRESHOLD: float = 0.2
+
+    # Checkpointer 配置
+    CHECKPOINT_BACKEND: str = Field(default="memory")  # memory | sqlite
+    CHECKPOINT_SQLITE_PATH: str = Field(default="/tmp/sre_debate_checkpoints/checkpoints.db")
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

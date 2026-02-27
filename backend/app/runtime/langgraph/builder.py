@@ -25,6 +25,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.config import settings
 from app.runtime.langgraph.state import AgentSpec, DebateExecState
+from app.runtime.langgraph.checkpointer import create_checkpointer
 from app.runtime.langgraph.nodes import (
     build_agent_node,
     build_finalize_node,
@@ -285,6 +286,35 @@ class GraphBuilder:
             route_table[node_name] = node_name
 
         return route_table
+
+    def compile_graph(
+        self,
+        agent_specs: List[AgentSpec],
+        checkpointer: Optional[Any] = None,
+    ):
+        """
+        构建并编译 LangGraph 图。
+
+        Args:
+            agent_specs: AgentSpec 列表
+            checkpointer: 可选的检查点保存器，如果未提供则使用配置创建
+
+        Returns:
+            编译后的 LangGraph 应用
+        """
+        if checkpointer is None:
+            checkpointer = create_checkpointer(settings)
+
+        graph = self.build(agent_specs)
+        compiled = graph.compile(checkpointer=checkpointer)
+
+        logger.info(
+            "graph_compiled",
+            session_id=self._orchestrator.session_id,
+            checkpointer_type=type(checkpointer).__name__,
+        )
+
+        return compiled
 
 
 __all__ = [

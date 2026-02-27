@@ -5,6 +5,7 @@ LangGraph Runtime orchestration for multi-agent, multi-round debate.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime
 import json
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -16,6 +17,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from app.config import settings
 from app.runtime.langgraph.builder import GraphBuilder
+from app.runtime.langgraph.checkpointer import create_checkpointer, close_checkpointer
 from app.runtime.langgraph.prompts import (
     coordinator_command_schema as coordinator_command_schema_template,
     judge_output_schema as judge_output_schema_template,
@@ -78,6 +80,7 @@ from app.runtime.langgraph.state import (
 )
 from app.runtime.messages import AgentEvidence, AgentMessage, FinalVerdict, RoundCheckpoint
 from app.runtime.session_store import runtime_session_store
+from app.services.agent_tool_context_service import agent_tool_context_service
 
 logger = structlog.get_logger()
 
@@ -103,6 +106,7 @@ class LangGraphRuntimeOrchestrator:
         self.turns: List[DebateTurn] = []
         self._active_round_commands: Dict[str, Dict[str, Any]] = {}
         self._event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
+        self._input_context: Dict[str, Any] = {}
         self._event_dispatcher = EventDispatcher()
         self._agent_runner = AgentRunner(self)
         self._routing_strategy = HybridRouter()
@@ -110,7 +114,7 @@ class LangGraphRuntimeOrchestrator:
         self._llm_semaphore_limit = max(1, int(settings.LLM_MAX_CONCURRENCY or 1))
         self._llm_semaphore: Optional[asyncio.Semaphore] = None
         self._llm_semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._graph_checkpointer = MemorySaver()
+        self._graph_checkpointer = create_checkpointer(settings)
         self._prompt_builder = PromptBuilder(
             max_rounds=self.max_rounds,
             max_history_items=self.MAX_HISTORY_ITEMS,
@@ -163,6 +167,7 @@ class LangGraphRuntimeOrchestrator:
         self.turns = []
         self._active_round_commands = {}
         self._event_callback = event_callback
+        self._input_context = dict(context or {})
         self.session_id = f"ags_{uuid4().hex[:20]}"
         self.trace_id = str(context.get("trace_id") or "")
         self._event_dispatcher.bind(
@@ -898,6 +903,7 @@ class LangGraphRuntimeOrchestrator:
                     "task": str(item.get("task") or "").strip(),
                     "focus": str(item.get("focus") or "").strip(),
                     "expected_output": str(item.get("expected_output") or "").strip(),
+                    "use_tool": item.get("use_tool"),
                 }
 
         defaults = {
@@ -917,6 +923,7 @@ class LangGraphRuntimeOrchestrator:
                         "task": task,
                         "focus": "",
                         "expected_output": "",
+                        "use_tool": None,
                     },
                 )
         elif targets_hint:
@@ -927,6 +934,7 @@ class LangGraphRuntimeOrchestrator:
                         "task": defaults[target],
                         "focus": "",
                         "expected_output": "",
+                        "use_tool": None,
                     }
         return commands
 
@@ -1064,11 +1072,14 @@ class LangGraphRuntimeOrchestrator:
         command_text = str(command.get("task") or "").strip() or f"请完成 {target} 维度分析"
         focus = str(command.get("focus") or "").strip()
         expected = str(command.get("expected_output") or "").strip()
+        use_tool = command.get("use_tool")
         message_parts = [f"{commander} 指令 {target}: {command_text}"]
         if focus:
             message_parts.append(f"重点: {focus}")
         if expected:
             message_parts.append(f"输出: {expected}")
+        if isinstance(use_tool, bool):
+            message_parts.append(f"工具调用: {'允许' if use_tool else '禁止'}")
         agent_message = AgentMessage(
             sender=commander,
             receiver=target,
@@ -1077,6 +1088,7 @@ class LangGraphRuntimeOrchestrator:
                 "task": command_text,
                 "focus": focus,
                 "expected_output": expected,
+                "use_tool": use_tool,
             },
         )
         await self._emit_event(
@@ -1088,6 +1100,7 @@ class LangGraphRuntimeOrchestrator:
                 "loop_round": loop_round,
                 "round_number": round_number,
                 "command": command_text,
+                "use_tool": use_tool,
                 "message": "\n".join(message_parts),
                 "agent_message": agent_message.model_dump(mode="json"),
                 "session_id": self.session_id,
@@ -1599,6 +1612,137 @@ class LangGraphRuntimeOrchestrator:
             },
         }
 
+    async def _build_agent_context_with_tools(
+        self,
+        *,
+        agent_name: str,
+        compact_context: Dict[str, Any],
+        loop_round: int,
+        round_number: int,
+        assigned_command: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        try:
+            tool_context = await agent_tool_context_service.build_context(
+                agent_name=agent_name,
+                compact_context=compact_context,
+                incident_context=self._input_context,
+                assigned_command=assigned_command,
+            )
+        except Exception as exc:
+            error_text = str(exc).strip() or exc.__class__.__name__
+            await self._emit_event(
+                {
+                    "type": "agent_tool_context_failed",
+                    "phase": "analysis",
+                    "agent_name": agent_name,
+                    "loop_round": loop_round,
+                    "round_number": round_number,
+                    "error": error_text,
+                }
+            )
+            return compact_context
+
+        tool_name = str(tool_context.get("name") or "").strip().lower()
+        if tool_name in {"", "none"}:
+            # 未配置工具的 Agent 不展示工具调用记录，直接走默认上下文
+            return compact_context
+
+        compact_tool_data = self._compact_value(tool_context.get("data") or {})
+        detailed_tool_data = self._tool_event_value(tool_context.get("data") or {})
+        command_gate = self._tool_event_value(tool_context.get("command_gate") or {})
+        audit_log = self._tool_event_value(tool_context.get("audit_log") or [])
+        await self._emit_event(
+            {
+                "type": "agent_tool_context_prepared",
+                "phase": "analysis",
+                "agent_name": agent_name,
+                "loop_round": loop_round,
+                "round_number": round_number,
+                "tool_name": str(tool_context.get("name") or ""),
+                "enabled": bool(tool_context.get("enabled")),
+                "used": bool(tool_context.get("used")),
+                "status": str(tool_context.get("status") or ""),
+                "summary": str(tool_context.get("summary") or "")[:260],
+                "data_preview": compact_tool_data,
+                "data_detail": detailed_tool_data,
+                "command_gate": command_gate,
+                "audit_log": audit_log,
+            }
+        )
+        logger.info(
+            "agent_tool_context_prepared",
+            session_id=self.session_id,
+            agent_name=agent_name,
+            loop_round=loop_round,
+            round_number=round_number,
+            tool_name=str(tool_context.get("name") or ""),
+            enabled=bool(tool_context.get("enabled")),
+            used=bool(tool_context.get("used")),
+            status=str(tool_context.get("status") or ""),
+            summary=str(tool_context.get("summary") or "")[:260],
+            data_preview=compact_tool_data,
+            command_gate=command_gate,
+            audit_log=audit_log,
+        )
+        if isinstance(audit_log, list):
+            for idx, record in enumerate(audit_log, start=1):
+                if not isinstance(record, dict):
+                    continue
+                logger.info(
+                    "agent_tool_audit",
+                    session_id=self.session_id,
+                    agent_name=agent_name,
+                    loop_round=loop_round,
+                    round_number=round_number,
+                    audit_index=idx,
+                    audit_record=record,
+                )
+                await self._emit_event(
+                    {
+                        "type": "agent_tool_io",
+                        "phase": "analysis",
+                        "agent_name": agent_name,
+                        "loop_round": loop_round,
+                        "round_number": round_number,
+                        "tool_name": str(tool_context.get("name") or ""),
+                        "io_action": str(record.get("action") or ""),
+                        "io_status": str(record.get("status") or ""),
+                        "io_detail": self._tool_event_value(record.get("detail") or {}),
+                    }
+                )
+
+        return {
+            **compact_context,
+            "tool_context": {
+                "name": tool_context.get("name"),
+                "enabled": bool(tool_context.get("enabled")),
+                "used": bool(tool_context.get("used")),
+                "status": str(tool_context.get("status") or ""),
+                "summary": str(tool_context.get("summary") or "")[:320],
+                "data": compact_tool_data,
+                "command_gate": command_gate,
+                "audit_log": audit_log,
+            },
+        }
+
+    def _apply_tool_switch_to_spec(
+        self,
+        *,
+        spec: AgentSpec,
+        context_with_tools: Dict[str, Any],
+    ) -> AgentSpec:
+        tool_ctx = context_with_tools.get("tool_context")
+        if not isinstance(tool_ctx, dict):
+            return spec
+        status = str(tool_ctx.get("status") or "").strip().lower()
+        enabled = bool(tool_ctx.get("enabled"))
+        used = bool(tool_ctx.get("used"))
+        if enabled and used and status == "ok":
+            return spec
+        if spec.name in {"LogAgent", "DomainAgent", "CodeAgent"} and tuple(spec.tools or ()):
+            return replace(spec, tools=())
+        return spec
+
     def _compact_value(self, value: Any) -> Any:
         if isinstance(value, str):
             return value[:140]
@@ -1613,6 +1757,22 @@ class LangGraphRuntimeOrchestrator:
                 compact_dict[str(key)] = self._compact_value(item)
             return compact_dict
         return str(value)[:140]
+
+    def _tool_event_value(self, value: Any, depth: int = 0) -> Any:
+        if depth >= 4:
+            return "..."
+        if isinstance(value, str):
+            return value[:1600]
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        if isinstance(value, list):
+            return [self._tool_event_value(item, depth + 1) for item in value[:20]]
+        if isinstance(value, dict):
+            return {
+                str(key): self._tool_event_value(item, depth + 1)
+                for key, item in list(value.items())[:30]
+            }
+        return str(value)[:600]
 
     def _to_compact_json(self, value: Any) -> str:
         try:

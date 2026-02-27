@@ -190,6 +190,9 @@ class LLMClient:
                 "final_answer",
                 "reasoning_content",
                 "value",
+                "message",
+                "messages",
+                "choices",
             ):
                 if key in value:
                     text = cls._extract_text_from_any(value.get(key), depth=depth + 1)

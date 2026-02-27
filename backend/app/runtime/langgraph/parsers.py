@@ -236,6 +236,7 @@ def normalize_commander_output(parsed: Dict[str, Any], raw_content: str) -> Dict
                     "task": str(item.get("task") or "").strip(),
                     "focus": str(item.get("focus") or "").strip(),
                     "expected_output": str(item.get("expected_output") or "").strip(),
+                    "use_tool": item.get("use_tool"),
                 }
             )
     if not str(normalized.get("chat_message") or "").strip():

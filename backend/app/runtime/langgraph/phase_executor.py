@@ -42,23 +42,14 @@ class PhaseExecutor:
             return
         mailbox = agent_mailbox if agent_mailbox is not None else {}
         round_cursor = len(orchestrator.turns) + 1
-        parallel_inputs: List[tuple[AgentSpec, int, str, Dict[str, Any], List[Dict[str, Any]]]] = []
         parallel_history = list(history_cards)
+        round_plans: List[tuple[AgentSpec, int, Dict[str, Any], List[Dict[str, Any]]]] = []
         for spec in parallel_specs:
             round_number = round_cursor
             round_cursor += 1
             inbox_messages, mailbox = dequeue_messages(mailbox, receiver=spec.name)
             assigned_command = (agent_commands or {}).get(spec.name)
-            prompt = orchestrator._build_agent_prompt(
-                spec=spec,
-                loop_round=loop_round,
-                context=compact_context,
-                history_cards=parallel_history,
-                assigned_command=assigned_command,
-                dialogue_items=dialogue_items,
-                inbox_messages=inbox_messages,
-            )
-            parallel_inputs.append((spec, round_number, prompt, assigned_command or {}, inbox_messages))
+            round_plans.append((spec, round_number, assigned_command or {}, inbox_messages))
 
         await orchestrator._emit_event(
             {
@@ -66,10 +57,10 @@ class PhaseExecutor:
                 "phase": "analysis",
                 "loop_round": loop_round,
                 "session_id": orchestrator.session_id,
-                "agents": [spec.name for spec, _, _, _, _ in parallel_inputs],
+                "agents": [spec.name for spec, _, _, _ in round_plans],
             }
         )
-        for spec, round_number, _, assigned_command, _ in parallel_inputs:
+        for spec, round_number, assigned_command, _ in round_plans:
             if assigned_command:
                 await orchestrator._emit_agent_command_issued(
                     commander="ProblemAnalysisAgent",
@@ -78,6 +69,30 @@ class PhaseExecutor:
                     round_number=round_number,
                     command=assigned_command,
                 )
+
+        parallel_inputs: List[tuple[AgentSpec, int, str, Dict[str, Any], List[Dict[str, Any]]]] = []
+        for spec, round_number, assigned_command, inbox_messages in round_plans:
+            context_with_tools = await orchestrator._build_agent_context_with_tools(
+                agent_name=spec.name,
+                compact_context=compact_context,
+                loop_round=loop_round,
+                round_number=round_number,
+                assigned_command=assigned_command,
+            )
+            effective_spec = orchestrator._apply_tool_switch_to_spec(
+                spec=spec,
+                context_with_tools=context_with_tools,
+            )
+            prompt = orchestrator._build_agent_prompt(
+                spec=effective_spec,
+                loop_round=loop_round,
+                context=context_with_tools,
+                history_cards=parallel_history,
+                assigned_command=assigned_command,
+                dialogue_items=dialogue_items,
+                inbox_messages=inbox_messages,
+            )
+            parallel_inputs.append((effective_spec, round_number, prompt, assigned_command, inbox_messages))
 
         parallel_start_time = datetime.utcnow()
         logger.info(
@@ -222,15 +237,26 @@ class PhaseExecutor:
             round_number = round_cursor
             round_cursor += 1
             inbox_messages, mailbox = dequeue_messages(mailbox, receiver=spec.name)
-            prompt = orchestrator._build_collaboration_prompt(
-                spec=spec,
+            context_with_tools = await orchestrator._build_agent_context_with_tools(
+                agent_name=spec.name,
+                compact_context=compact_context,
                 loop_round=loop_round,
-                context=compact_context,
+                round_number=round_number,
+                assigned_command=None,
+            )
+            effective_spec = orchestrator._apply_tool_switch_to_spec(
+                spec=spec,
+                context_with_tools=context_with_tools,
+            )
+            prompt = orchestrator._build_collaboration_prompt(
+                spec=effective_spec,
+                loop_round=loop_round,
+                context=context_with_tools,
                 peer_cards=peer_cards,
                 dialogue_items=dialogue_items,
                 inbox_messages=inbox_messages,
             )
-            collab_inputs.append((spec, round_number, prompt, inbox_messages))
+            collab_inputs.append((effective_spec, round_number, prompt, inbox_messages))
 
         await orchestrator._emit_event(
             {

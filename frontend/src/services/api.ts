@@ -142,6 +142,36 @@ export interface InterfaceLocateResult {
   }>;
 }
 
+export interface CodeRepoToolConfig {
+  enabled: boolean;
+  repo_url: string;
+  access_token: string;
+  branch: string;
+  local_repo_path: string;
+  max_hits: number;
+}
+
+export interface LogFileToolConfig {
+  enabled: boolean;
+  file_path: string;
+  max_lines: number;
+}
+
+export interface DomainExcelToolConfig {
+  enabled: boolean;
+  excel_path: string;
+  sheet_name: string;
+  max_rows: number;
+  max_matches: number;
+}
+
+export interface AgentToolingConfig {
+  code_repo: CodeRepoToolConfig;
+  log_file: LogFileToolConfig;
+  domain_excel: DomainExcelToolConfig;
+  updated_at: string;
+}
+
 export const authApi = {
   async login(username: string, password: string): Promise<LoginResponse> {
     const { data } = await api.post<LoginResponse>('/auth/login', { username, password });
@@ -242,6 +272,17 @@ export const assetApi = {
       log_content: logContent,
       symptom,
     });
+    return data;
+  },
+};
+
+export const settingsApi = {
+  async getTooling(): Promise<AgentToolingConfig> {
+    const { data } = await api.get<AgentToolingConfig>('/settings/tooling');
+    return data;
+  },
+  async updateTooling(payload: AgentToolingConfig): Promise<AgentToolingConfig> {
+    const { data } = await api.put<AgentToolingConfig>('/settings/tooling', payload);
     return data;
   },
 };

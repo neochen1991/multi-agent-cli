@@ -171,6 +171,84 @@ const IncidentPage: React.FC = () => {
     }
   };
 
+  const formatToolDataPreview = (
+    toolName: string,
+    preview: Record<string, unknown>,
+    truncate = true,
+  ): string => {
+    if (!preview || Object.keys(preview).length === 0) return '无数据摘要';
+    if (toolName === 'local_log_reader') {
+      const filePath = String(preview.file_path || '-');
+      const lineCount = String(preview.line_count || '-');
+      const keywords = Array.isArray(preview.keywords) ? preview.keywords.map(String).join(', ') : '-';
+      const excerpt = String(preview.excerpt || '').trim();
+      const excerptText = truncate
+        ? `${excerpt.slice(0, 180)}${excerpt.length > 180 ? '...' : ''}`
+        : excerpt;
+      return [
+        `日志文件：${filePath}`,
+        `采样行数：${lineCount}`,
+        `关键词：${keywords || '-'}`,
+        excerpt ? `日志片段：${excerptText}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    }
+    if (toolName === 'domain_excel_lookup') {
+      const excelPath = String(preview.excel_path || '-');
+      const rowCount = String(preview.row_count || '-');
+      const matches = Array.isArray(preview.matches) ? preview.matches : [];
+      const owners = matches
+        .map((item) => asRecord(item))
+        .map((item) => `${String(item.domain || '-')}/${String(item.aggregate || '-')} -> ${String(item.owner_team || '-')}/${String(item.owner || '-')}`)
+        .slice(0, truncate ? 3 : 10);
+      return [
+        `责任田文件：${excelPath}`,
+        `扫描行数：${rowCount}`,
+        `命中条数：${matches.length}`,
+        owners.length ? `命中摘要：${owners.join('；')}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    }
+    if (toolName === 'git_repo_search') {
+      const repoPath = String(preview.repo_path || '-');
+      const keywords = Array.isArray(preview.keywords) ? preview.keywords.map(String).join(', ') : '-';
+      const hits = Array.isArray(preview.hits) ? preview.hits : [];
+      const topHits = hits
+        .map((item) => asRecord(item))
+        .map((item) => `${String(item.file || '-')}:${String(item.line || '-')} [${String(item.keyword || '-')}]`)
+        .slice(0, truncate ? 3 : 10);
+      return [
+        `代码仓目录：${repoPath}`,
+        `检索关键词：${keywords || '-'}`,
+        `命中片段：${hits.length} 条`,
+        topHits.length ? `命中示例：${topHits.join('；')}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    }
+    const lines = Object.entries(preview)
+      .slice(0, 6)
+      .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : toDisplayText(value)}`);
+    return lines.join('\n');
+  };
+
+  const formatToolAuditLog = (auditItems: unknown[]): string => {
+    if (!Array.isArray(auditItems) || auditItems.length === 0) return '无审计记录';
+    return auditItems
+      .slice(0, 12)
+      .map((item, index) => {
+        const row = asRecord(item);
+        const ts = firstTextValue(row, ['timestamp']) || '-';
+        const action = firstTextValue(row, ['action']) || '-';
+        const status = firstTextValue(row, ['status']) || '-';
+        const detail = toDisplayText(row.detail);
+        return `${index + 1}. [${ts}] action=${action} status=${status}\n${detail}`;
+      })
+      .join('\n');
+  };
+
   const extractSessionError = (detail: DebateDetail | null): string => {
     const context = (detail?.context || {}) as Record<string, unknown>;
     const direct = String(context.last_error || '').trim();
@@ -440,6 +518,71 @@ const IncidentPage: React.FC = () => {
       } else {
         detail = normalizeMarkdownText(speechText);
       }
+    } else if (kind === 'agent_tool_context_prepared') {
+      const toolName = firstTextValue(data, ['tool_name']) || 'unknown_tool';
+      const enabled = Boolean(data.enabled);
+      const used = Boolean(data.used);
+      const toolStatus = firstTextValue(data, ['status']) || 'unknown';
+      const toolSummary = firstTextValue(data, ['summary']) || '无摘要';
+      const dataPreview = asRecord(data.data_preview);
+      const dataDetail = asRecord(data.data_detail);
+      const commandGate = asRecord(data.command_gate);
+      const auditLog = Array.isArray(data.audit_log) ? data.audit_log : [];
+      const toolLabelMap: Record<string, string> = {
+        local_log_reader: '日志文件读取工具',
+        domain_excel_lookup: '责任田文档查询工具',
+        git_repo_search: '代码仓检索工具',
+      };
+      const statusLabelMap: Record<string, string> = {
+        ok: '成功',
+        disabled: '已关闭',
+        unavailable: '不可用',
+        skipped: '跳过',
+        skipped_by_command: '按命令跳过',
+        error: '失败',
+      };
+      const toolLabel = toolLabelMap[toolName] || toolName;
+      const statusLabel = statusLabelMap[toolStatus] || toolStatus;
+      const dataSummaryText = formatToolDataPreview(toolName, dataPreview);
+      const dataDetailText = formatToolDataPreview(
+        toolName,
+        Object.keys(dataDetail).length > 0 ? dataDetail : dataPreview,
+        false,
+      );
+      const commandGateReason = firstTextValue(commandGate, ['reason']) || '-';
+      const commandGateSource = firstTextValue(commandGate, ['decision_source']) || '-';
+      const commandGateAllow = typeof commandGate.allow_tool === 'boolean' ? (commandGate.allow_tool ? '是' : '否') : '-';
+      const auditText = formatToolAuditLog(auditLog);
+      status = toolStatus === 'error' ? 'error' : 'done';
+      summary = `${agentName} 工具调用：${toolLabel}（${statusLabel}）`;
+      detail = normalizeMarkdownText(
+        [
+          `我使用了工具：${toolLabel}`,
+          `开关状态：${enabled ? '开启' : '关闭'}`,
+          `是否实际调用：${used ? '是' : '否'}`,
+          `执行结果：${statusLabel}`,
+          `命令门禁：允许调用=${commandGateAllow}，原因=${commandGateReason}，来源=${commandGateSource}`,
+          `工具反馈：${toolSummary}`,
+          `获取数据摘要：\n${dataSummaryText}`,
+          `工具返回详情：\n${dataDetailText}`,
+          `调用审计记录：\n${auditText}`,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      );
+    } else if (kind === 'agent_tool_io') {
+      const action = firstTextValue(data, ['io_action']) || '-';
+      const ioStatus = firstTextValue(data, ['io_status']) || '-';
+      const ioDetail = toDisplayText(data.io_detail);
+      status = ioStatus === 'error' ? 'error' : 'done';
+      summary = `${agentName} 工具I/O：${action}（${ioStatus}）`;
+      detail = normalizeMarkdownText(`I/O 详情：\n${ioDetail}`);
+    } else if (kind === 'agent_tool_context_failed') {
+      status = 'error';
+      summary = `${agentName} 工具调用失败`;
+      detail = normalizeMarkdownText(
+        `我尝试调用工具时发生异常。\n错误信息：${firstTextValue(data, ['error']) || messageText || '未知错误'}`,
+      );
     } else if (
       (kind === 'autogen_call_completed' || kind === 'llm_call_completed') &&
       ['analysis', 'critique', 'rebuttal', 'judgment'].includes(phase)
@@ -565,6 +708,12 @@ const IncidentPage: React.FC = () => {
         return `LLM响应参数 [${phase || stage || '-'}] ${agent || ''} ${model || ''}`.trim();
       case 'agent_chat_message':
         return `Agent发言 [${phase || '-'}] ${agent || ''}`.trim();
+      case 'agent_tool_context_prepared':
+        return `Agent工具调用 [${phase || '-'}] ${agent || ''} ${String(data?.tool_name || '')} ${String(data?.status || '')}`.trim();
+      case 'agent_tool_context_failed':
+        return `Agent工具调用失败 [${phase || '-'}] ${agent || ''} ${error}`.trim();
+      case 'agent_tool_io':
+        return `Agent工具I/O [${phase || '-'}] ${agent || ''} ${String(data?.io_action || '')} ${String(data?.io_status || '')}`.trim();
       case 'agent_command_issued':
         return `主Agent下达指令 [${phase || '-'}] ${agent || ''} -> ${String(data?.target_agent || '-')}`.trim();
       case 'agent_command_feedback':
@@ -632,6 +781,13 @@ const IncidentPage: React.FC = () => {
 
   const advanceStep = (nextStep: number) => {
     setActiveStep((prev) => (nextStep > prev ? nextStep : prev));
+  };
+
+  const resetDialogueFilters = () => {
+    setEventFilterAgent('all');
+    setEventFilterPhase('all');
+    setEventFilterType('all');
+    setEventSearchText('');
   };
 
   const loadSessionArtifacts = async (sid: string) => {
@@ -717,6 +873,7 @@ const IncidentPage: React.FC = () => {
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
+      resetDialogueFilters();
       assetMappingReadyRef.current = false;
       setReportResult(null);
       setIncidentId(incident.id);
@@ -742,6 +899,7 @@ const IncidentPage: React.FC = () => {
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
+      resetDialogueFilters();
       assetMappingReadyRef.current = false;
       setReportResult(null);
       setSessionId(session.id);
@@ -814,6 +972,7 @@ const IncidentPage: React.FC = () => {
     const targetSessionId = options?.sessionId || sessionId;
     const targetIncidentId = options?.incidentId || incidentId;
     if (!targetSessionId || !targetIncidentId) return;
+    resetDialogueFilters();
     setRunning(true);
     appendEvent('start', '开始实时辩论');
 
@@ -997,6 +1156,7 @@ const IncidentPage: React.FC = () => {
     setEventRecords([]);
     setStreamedMessageText({});
     setExpandedDialogueIds({});
+    resetDialogueFilters();
     assetMappingReadyRef.current = false;
     setIncidentId(iid);
     incidentApi
@@ -1160,19 +1320,19 @@ const IncidentPage: React.FC = () => {
     });
   }, [filteredDialogueMessages]);
 
-  const buildCompactDetail = (value: string): string => {
+  const buildCompactDetail = (value: string): { text: string; truncated: boolean } => {
     const normalized = normalizeMarkdownText(value || '');
     const lines = normalized
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean);
-    if (lines.length === 0) return '';
+    if (lines.length === 0) return { text: '', truncated: false };
     const compact = lines.slice(0, 3).join('\n');
     if (compact.length > 220) {
-      return `${compact.slice(0, 220).trim()}...`;
+      return { text: `${compact.slice(0, 220).trim()}...`, truncated: true };
     }
-    if (lines.length > 3) return `${compact}\n...`;
-    return compact;
+    if (lines.length > 3) return { text: `${compact}\n...`, truncated: true };
+    return { text: compact, truncated: false };
   };
 
   const renderDialogueStream = () => {
@@ -1184,11 +1344,12 @@ const IncidentPage: React.FC = () => {
         {filteredDialogueMessages.map((msg) => {
           const renderedText = streamedMessageText[msg.id] ?? '';
           const fullText = msg.status === 'streaming' ? renderedText : msg.detail;
-          const compactText = buildCompactDetail(fullText || msg.detail);
+          const compactView = buildCompactDetail(fullText || msg.detail);
+          const compactText = compactView.text;
           const showCursor =
             msg.status === 'streaming' && renderedText.length < (msg.detail || '').length;
           const isExpanded = Boolean(expandedDialogueIds[msg.id]);
-          const canExpand = (msg.detail || '').length > 220 || (msg.detail || '').split('\n').length > 3;
+          const canExpand = compactView.truncated;
           return (
             <div
               key={msg.id}

@@ -274,8 +274,7 @@ body {
 }
 
 .dialogue-content-compact {
-  max-height: 72px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .dialogue-cursor {

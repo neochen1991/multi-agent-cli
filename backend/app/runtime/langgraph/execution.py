@@ -10,10 +10,10 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from time import perf_counter
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import structlog
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -21,6 +21,7 @@ from app.config import settings
 from app.core.llm_client import LLMClient
 from app.runtime.langgraph.parsers import normalize_agent_output
 from app.runtime.langgraph.state import AgentSpec, DebateTurn
+from app.runtime.langgraph.schemas import get_schema_for_agent
 
 logger = structlog.get_logger()
 
@@ -90,7 +91,7 @@ def run_agent_once(orchestrator: Any, spec: AgentSpec, prompt: str, max_tokens: 
     )
     # Prefer AgentFactory (tool-enabled ReAct path) when configured and tools exist.
     factory_error = ""
-    if settings.AGENT_USE_FACTORY and tuple(spec.tools or ()):
+    if settings.AGENT_USE_FACTORY and spec.name in {"LogAgent", "DomainAgent", "CodeAgent"} and tuple(spec.tools or ()):
         factory = orchestrator._get_agent_factory()
         if factory is not None:
             try:
@@ -101,7 +102,7 @@ def run_agent_once(orchestrator: Any, spec: AgentSpec, prompt: str, max_tokens: 
                     system_prompt=spec.system_prompt or "",
                 )
                 response = agent.invoke({"messages": [HumanMessage(content=prompt)]})
-                extracted = LLMClient._extract_reply_text(response, agent_name=spec.name)
+                extracted = _extract_factory_text(response, agent_name=spec.name)
                 if extracted.strip():
                     return AgentInvokeResult(
                         content=extracted,
@@ -121,6 +122,98 @@ def run_agent_once(orchestrator: Any, spec: AgentSpec, prompt: str, max_tokens: 
         invoke_mode="direct",
         factory_error=factory_error,
     )
+
+
+def _extract_factory_text(response: Any, *, agent_name: str) -> str:
+    # create_react_agent 常见返回: {"messages": [...]}
+    if isinstance(response, dict):
+        messages = response.get("messages")
+        if isinstance(messages, list):
+            for item in reversed(messages):
+                if not isinstance(item, BaseMessage):
+                    continue
+                text = LLMClient._extract_reply_text(item, agent_name=agent_name)
+                if text:
+                    return text
+    return LLMClient._extract_reply_text(response, agent_name=agent_name)
+
+
+def run_agent_with_structured_output(
+    orchestrator: Any,
+    spec: AgentSpec,
+    prompt: str,
+    max_tokens: int,
+) -> tuple[Dict[str, Any], str]:
+    """
+    Run agent with structured output validation using Pydantic.
+
+    Uses LLM's with_structured_output for native structured output,
+    falling back to manual parsing if needed.
+
+    Args:
+        orchestrator: Runtime orchestrator instance
+        spec: Agent specification
+        prompt: Input prompt
+        max_tokens: Maximum tokens for response
+
+    Returns:
+        Tuple of (parsed_output_dict, invoke_mode)
+    """
+    if not settings.LLM_API_KEY:
+        raise RuntimeError("LLM_API_KEY 未配置，无法调用模型")
+
+    llm = ChatOpenAI(
+        model=settings.llm_model,
+        api_key=settings.LLM_API_KEY,
+        base_url=orchestrator._base_url_for_llm(),
+        temperature=0.15,
+        timeout=orchestrator._agent_http_timeout(spec.name),
+        max_retries=max(0, int(settings.LLM_MAX_RETRIES)),
+        max_tokens=max(128, int(max_tokens or 256)),
+        model_kwargs={"extra_body": {"thinking": {"type": "disabled"}}},
+    )
+
+    # Get appropriate schema for agent
+    schema = get_schema_for_agent(spec.name)
+
+    try:
+        # Try structured output mode
+        structured_llm = llm.with_structured_output(schema)
+        messages = [
+            SystemMessage(content=spec.system_prompt or "你是严谨的 SRE 分析助手。"),
+            HumanMessage(content=prompt),
+        ]
+        result = structured_llm.invoke(messages)
+
+        if hasattr(result, "model_dump"):
+            output = result.model_dump()
+        elif isinstance(result, dict):
+            output = result
+        else:
+            output = {"raw_content": str(result)}
+
+        logger.info(
+            "structured_output_success",
+            agent_name=spec.name,
+            schema=schema.__name__,
+        )
+        return output, "structured"
+
+    except Exception as e:
+        logger.warning(
+            "structured_output_fallback",
+            agent_name=spec.name,
+            error=str(e)[:200],
+            fallback="manual_parsing",
+        )
+
+        # Fallback to regular invocation
+        reply = llm.invoke([
+            SystemMessage(content=spec.system_prompt or "你是严谨的 SRE 分析助手。"),
+            HumanMessage(content=prompt),
+        ])
+        raw_content = LLMClient._extract_reply_text(reply, agent_name=spec.name)
+        return {"raw_content": raw_content}, "direct_fallback"
 
 
 async def call_agent(

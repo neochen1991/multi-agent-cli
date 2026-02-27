@@ -25,6 +25,7 @@ def coordinator_command_schema() -> Dict[str, Any]:
                 "task": "",
                 "focus": "",
                 "expected_output": "",
+                "use_tool": True,
             }
         ],
         "evidence_chain": [""],

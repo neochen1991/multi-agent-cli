@@ -43,17 +43,28 @@ async def execute_single_phase_agent(
             round_number=round_number,
             command=assigned_command,
         )
-    prompt = orchestrator._build_peer_driven_prompt(
-        spec=spec,
+    context_with_tools = await orchestrator._build_agent_context_with_tools(
+        agent_name=agent_name,
+        compact_context=compact_context,
         loop_round=loop_round,
-        context=compact_context,
+        round_number=round_number,
+        assigned_command=assigned_command,
+    )
+    effective_spec = orchestrator._apply_tool_switch_to_spec(
+        spec=spec,
+        context_with_tools=context_with_tools,
+    )
+    prompt = orchestrator._build_peer_driven_prompt(
+        spec=effective_spec,
+        loop_round=loop_round,
+        context=context_with_tools,
         history_cards=history_cards,
         assigned_command=assigned_command,
         dialogue_items=dialogue_items,
         inbox_messages=inbox_messages,
     )
     turn = await orchestrator._agent_runner.run_agent(
-        spec=spec,
+        spec=effective_spec,
         prompt=prompt,
         round_number=round_number,
         loop_round=loop_round,

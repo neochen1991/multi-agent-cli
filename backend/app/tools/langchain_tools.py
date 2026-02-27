@@ -271,6 +271,7 @@ class BaseToolAdapter(StructuredTool):
             name=base_tool.name,
             description=base_tool.description,
             args_schema=args_schema,
+            base_tool=base_tool,
         )
         self.base_tool = base_tool
 
