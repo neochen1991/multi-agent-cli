@@ -1,188 +1,176 @@
-# SRE Debate Platform - 多模型辩论式 SRE 智能体平台
+# 生产问题根因分析系统（LangGraph Multi-Agent）
 
-基于 AutoGen 多 Agent 编排构建的多模型辩论式 SRE 智能体平台，实现三态资产融合与 AI 技术委员会决策系统。
+基于 **LangGraph + FastAPI + React** 的生产故障根因分析系统。  
+系统通过主 Agent 协调多个专家 Agent（日志/领域/代码/质疑/反驳/裁决）进行多轮讨论，结合责任田资产映射与工具检索，输出结构化结论与报告。
 
-## 🚀 核心特性
+## 1. 当前实现状态
 
-- **🔥 三态资产融合**：统一建模运行态、开发态、设计态资产
-- **🧠 专家委员会协作**：统一使用 glm-5 模型执行多角色协作分析
-- **⚖️ AI 内部辩论机制**：通过质疑、反驳、裁决四阶段辩论流程
-- **🔗 可扩展自动修复能力**：支持自动 PR 生成与灰度发布建议
+- 已完成底层编排从旧方案迁移到 **LangGraph Runtime**。
+- 主 Agent（`ProblemAnalysisAgent`）负责任务拆解、命令分发、收敛决策。
+- 前端分析页拆分为三块：
+  - `资产映射`
+  - `辩论过程`
+  - `辩论结果`
+- 工具调用已支持：
+  - 开关控制
+  - 命令驱动（由主 Agent 指令决定是否调用）
+  - 审计日志（文件读取/Git 操作/参数摘要）
 
-## 📋 系统架构
+## 2. 架构概览
 
-```
-┌────────────────────────────────────┐
-│           交互与接口层             │
-│  Web UI / API / 日志上传 / 结果展示 │
-└────────────────────────────────────┘
-                    ↓
-┌────────────────────────────────────┐
-│          Flow 编排层               │
-│    SRE Debate Flow (AutoGen)      │
-└────────────────────────────────────┘
-                    ↓
-┌────────────────────────────────────┐
-│        多模型专家协作层            │
-│ Code | Design | Critic | Judge     │
-└────────────────────────────────────┘
-                    ↓
-┌────────────────────────────────────┐
-│     AutoGen Agent Orchestration   │
-│   Multi-agent multi-round debate  │
-└────────────────────────────────────┘
-```
+### 2.0 系统架构图
 
-## 🛠️ 技术栈
+```mermaid
+flowchart TB
+    U["用户 / 运维工程师"] --> FE["Frontend (React + Ant Design)"]
+    FE --> API["Backend API (FastAPI)"]
+    FE --> WS["WebSocket 实时事件流 (/ws/debates/{session_id})"]
+    WS --> ORCH["LangGraph Runtime Orchestrator"]
+    API --> ORCH
 
-### 后端
-- Python 3.11+
-- FastAPI
-- AutoGen (pyautogen)
-- 本地文件仓储（默认）/ 内存仓储（可选）
-- Redis + Celery（可选）
+    ORCH --> PA["ProblemAnalysisAgent (主Agent)"]
+    PA --> LOG["LogAgent"]
+    PA --> DOM["DomainAgent"]
+    PA --> CODE["CodeAgent"]
+    PA --> CRI["CriticAgent"]
+    PA --> REB["RebuttalAgent"]
+    PA --> JUDGE["JudgeAgent"]
 
-### 前端
-- React 18
-- TypeScript
-- Ant Design 5
-- Vite
+    LOG --> TOOLS["Tool Context Service (命令门禁 + 审计)"]
+    DOM --> TOOLS
+    CODE --> TOOLS
 
-### 已实现能力（可运行）
-- Incident 全流程（创建 -> 会话 -> 辩论 -> 报告）
-- WebSocket 实时辩论流（`/ws/debates/{session_id}`）
-- 资产融合查询（`/api/v1/assets/fusion/{incident_id}`）
-- 历史记录与资产图谱页面
-- 可选鉴权（JWT/RBAC，`AUTH_ENABLED=true`）
-- 限流、熔断、指标端点（`/metrics`）
+    TOOLS --> LOGFILE["本地日志文件"]
+    TOOLS --> EXCEL["责任田 Excel/CSV"]
+    TOOLS --> GIT["Git 仓库 (本地/远程)"]
 
-## 📁 项目结构
-
-```
-multi-agent-cli_v2/
-├── backend/                    # Python 后端
-│   ├── app/
-│   │   ├── api/               # API 路由
-│   │   ├── agents/            # Agent 实现
-│   │   ├── flows/             # Flow 编排
-│   │   ├── tools/             # 工具实现
-│   │   ├── models/            # 数据模型
-│   │   ├── services/          # 业务服务
-│   │   └── core/              # 核心组件
-│   └── tests/                 # 测试
-│
-├── frontend/                   # React 前端
-│   └── src/
-│       ├── components/        # 组件
-│       ├── pages/             # 页面
-│       ├── stores/            # 状态管理
-│       └── hooks/             # 自定义 Hooks
-│
-├── docker/                     # Docker 配置
-│   ├── docker-compose.yml
-│   ├── Dockerfile.backend
-│   └── Dockerfile.frontend
-│
-└── plans/                      # 规划文档
-    ├── sre-debate-platform-architecture.md
-    ├── implementation-roadmap.md
-    └── project-structure.md
+    ORCH --> STORE["Runtime Session Store (file/memory)"]
+    STORE --> REPORT["Report Service"]
+    REPORT --> FE
 ```
 
-## 🤖 多模型专家分工
+### 2.1 运行时链路图
 
-| Agent | 模型 | 角色 |
-|-------|------|------|
-| LogAgent | glm-5 | 日志分析专家 |
-| DomainAgent | glm-5 | 领域映射专家 |
-| CodeAgent | glm-5 | 代码分析专家 |
-| CriticAgent | glm-5 | 架构质疑专家 |
-| RebuttalAgent | glm-5 | 技术反驳专家 |
-| JudgeAgent | glm-5 | 技术委员会主席 |
+```mermaid
+sequenceDiagram
+    participant UI as Frontend
+    participant WS as WebSocket
+    participant DS as DebateService
+    participant LG as LangGraphRuntime
+    participant PA as ProblemAnalysisAgent
+    participant AG as Expert Agents
+    participant TS as ToolContextService
 
-## 🔄 辩论流程
+    UI->>DS: 创建 Incident + Session
+    UI->>WS: 连接并发送 start/auto_start
+    WS->>DS: execute_debate(session_id)
+    DS->>LG: run(context, event_callback)
+    LG->>PA: 主Agent开场与任务分发
+    PA->>AG: agent_command_issued
+    AG->>TS: 按命令决定是否调用工具
+    TS-->>AG: 工具结果 + 审计记录
+    AG-->>LG: Agent 结论/证据/反馈
+    LG-->>WS: 实时事件流 (agent_chat/tool_io/phase)
+    LG->>DS: 最终裁决结果
+    DS->>DS: 生成并保存报告
+    DS-->>UI: result + report
+```
 
-1. **独立分析** - CodeAgent 提出根因假设
-2. **交叉质疑** - CriticAgent 检查 DDD 原则违反
-3. **反驳修正** - RebuttalAgent 回应质疑
-4. **最终裁决** - JudgeAgent 综合裁决
+### 2.2 后端
 
-## 🚀 快速开始
+- 框架：`FastAPI`
+- 编排：`LangGraph`
+- LLM 接入：`langchain-openai (OpenAI-compatible API)`
+- 存储：本地文件或内存（默认本地文件）
+- 运行模式：WebSocket 实时事件流 + REST 查询
 
-### 前置要求
+核心路径：
 
-1. **安装 Python 依赖（含 AutoGen）**
+- `backend/app/runtime/langgraph_runtime.py`：运行时编排入口
+- `backend/app/runtime/langgraph/`：节点、路由、状态、执行器
+- `backend/app/services/debate_service.py`：会话执行与事件沉淀
+- `backend/app/services/agent_tool_context_service.py`：Agent 工具上下文、门禁、审计
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+### 2.3 前端
 
-2. **配置模型提供商**
+- 技术栈：`React 18 + TypeScript + Ant Design + Vite`
+- 页面：
+  - `/` 首页
+  - `/incident` 分析页
+  - `/history` 历史记录
+  - `/assets` 资产视图
+  - `/settings` 工具与登录配置
 
-通过环境变量配置 OpenAI 兼容网关：
-- `LLM_BASE_URL=https://coding.dashscope.aliyuncs.com/v1`
-- `LLM_API_KEY=sk-sp-5abc4c1d85414988979e90771e112f2f`
-- `LLM_MODEL=glm-5`
-- `LOCAL_STORE_BACKEND=file`
-- `LOCAL_STORE_DIR=/tmp/sre_debate_store`
+分析页关键文件：
 
-### 环境要求
-- Python 3.11+
-- Node.js 18+
-- Docker & Docker Compose (可选)
+- `frontend/src/pages/Incident/index.tsx`
 
-### 后端启动
+## 3. Multi-Agent 角色
+
+- `ProblemAnalysisAgent`：主控协调、命令分发、阶段推进
+- `LogAgent`：日志证据分析
+- `DomainAgent`：接口到领域/聚合根/责任田映射
+- `CodeAgent`：代码路径与风险点分析
+- `CriticAgent`：质疑与证据缺口识别
+- `RebuttalAgent`：反驳与证据补强
+- `JudgeAgent`：最终裁决与建议输出
+
+## 4. 分析流程
+
+1. 创建 Incident。
+2. 采集上下文并执行接口责任田映射。
+3. 主 Agent 先发言并下发命令（`agent_command_issued`）。
+4. 被指派 Agent 按命令决定是否调用工具，再执行 LLM 分析。
+5. 多 Agent 轮次协作（含质疑/反驳）。
+6. JudgeAgent 裁决并生成最终结果。
+7. 报告生成并可在历史记录回看全过程。
+
+## 5. 工具调用机制（重点）
+
+当前支持三个专家工具入口：
+
+- `CodeAgent`：Git 仓库检索
+- `LogAgent`：本地日志文件读取
+- `DomainAgent`：责任田 Excel/CSV 查询
+
+设计约束：
+
+- 工具调用必须在主 Agent 下发命令后触发。
+- 命令可显式携带 `use_tool`。
+- 未配置工具的 Agent 不展示工具调用记录。
+- 每次工具调用会输出审计信息：
+  - 命令门禁决策
+  - 工具执行状态
+  - 核心返回数据摘要
+  - I/O 审计轨迹（例如文件读取、Git 命令）
+
+## 6. 快速启动
+
+### 6.1 环境要求
+
+- Python `3.11+`（建议 3.11/3.12）
+- Node.js `18+`
+- npm
+
+### 6.2 安装依赖
+
+后端：
 
 ```bash
 cd backend
-
-# 创建虚拟环境
-python -m venv venv
-source venv/bin/activate  # Linux/macOS
-# 或 venv\Scripts\activate  # Windows
-
-# 安装依赖
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-
-# 配置环境变量
-export LLM_BASE_URL=https://coding.dashscope.aliyuncs.com/v1
-export LLM_API_KEY=sk-sp-5abc4c1d85414988979e90771e112f2f
-export LLM_MODEL=glm-5
-export LOCAL_STORE_BACKEND=file
-
-# 启动服务
-uvicorn app.main:app --reload
 ```
 
-对应系统 LLM 配置结构：
-
-```json
-{
-  "options": {
-    "baseURL": "https://coding.dashscope.aliyuncs.com/v1",
-    "apiKey": "sk-sp-5abc4c1d85414988979e90771e112f2f"
-  },
-  "models": {
-    "glm-5": {
-      "name": "glm-5"
-    }
-  }
-}
-```
-
-### 前端启动
+前端：
 
 ```bash
 cd frontend
-
-# 安装依赖
 npm install
-
-# 启动开发服务器
-npm run dev
 ```
 
-### 一键启动（Backend + Frontend）
+### 6.3 一键启动（推荐）
 
 在项目根目录执行：
 
@@ -190,159 +178,132 @@ npm run dev
 npm run start:all
 ```
 
-说明：
-- 会一次性启动后端 `uvicorn`、前端 `vite`
-- 日志输出目录：`.run/logs/`
-- 按 `Ctrl+C` 可停止全部服务
+会启动：
 
-常用停止命令：
+- Backend: `http://localhost:8000`
+- Frontend: `http://localhost:5173`
+
+日志目录：
+
+- `/Users/neochen/multi-agent-cli_v2/.run/logs/backend.log`
+- `/Users/neochen/multi-agent-cli_v2/.run/logs/frontend.log`
+
+停止：
 
 ```bash
-# 按 PID 文件停止
 npm run stop:all
-
-# 如果有端口残留占用，强制清理 8000/5173
+# 或强制释放端口
 npm run stop:all:force
 ```
 
-本地仓储维护命令：
+## 7. 关键配置
+
+主要配置位于：
+
+- `backend/app/config.py`
+
+核心 LLM 配置（当前默认）：
+
+- `LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/coding`
+- `LLM_MODEL=kimi-k2.5`
+- `LLM_API_KEY=<your_api_key>`
+
+其他常用：
+
+- `LOCAL_STORE_BACKEND=file|memory`
+- `LOCAL_STORE_DIR=/tmp/sre_debate_store`
+- `DEBATE_MAX_ROUNDS=1`
+- `AUTH_ENABLED=false`
+- `LOG_FORMAT=json`
+
+## 8. API 速览
+
+前缀：`/api/v1`
+
+- Incident
+  - `POST /incidents/`
+  - `GET /incidents/`
+  - `GET /incidents/{incident_id}`
+- Debate
+  - `POST /debates/?incident_id=...`
+  - `POST /debates/{session_id}/execute`
+  - `GET /debates/{session_id}`
+  - `GET /debates/{session_id}/result`
+  - `POST /debates/{session_id}/cancel`
+- Assets
+  - `POST /assets/locate`
+  - `GET /assets/fusion/{incident_id}`
+- Reports
+  - `GET /reports/{incident_id}`
+  - `POST /reports/{incident_id}/regenerate`
+- Settings
+  - `GET /settings/tooling`
+  - `PUT /settings/tooling`
+
+WebSocket：
+
+- `ws://localhost:8000/ws/debates/{session_id}?auto_start=true`
+
+## 9. 前后端联调与验收
+
+仓库内提供 smoke 脚本：
 
 ```bash
-# 迁移历史仓储文件，补齐 schema_version
-npm run store:migrate
-
-# 清理本地仓储临时文件与备份文件
-npm run store:clean
+node ./scripts/smoke-e2e.mjs
 ```
 
-### Docker 部署
+会覆盖：
 
-```bash
-# 启动所有服务
-docker-compose -f docker/docker-compose.yml up -d
+- 首页与后端健康检查
+- Incident 创建
+- Session 创建
+- WebSocket 实时辩论
+- 结果与报告拉取
+- 资产定位接口
+
+## 10. 常见问题
+
+### Q1: CodeAgent 明明配置了远程 Git，为什么看起来在读本地仓？
+
+已修复：`local_repo_path` 为空时不再误判为当前目录。当前逻辑是：
+
+- `local_repo_path` 非空且存在：走本地
+- 否则：走 `repo_url` 远程 clone/fetch
+
+### Q2: Git clone 超时怎么办？
+
+已实现重试与降级：
+
+- clone/fetch 分级超时重试
+- 轻量 clone 参数（`--depth 1 --filter=blob:none --single-branch`）
+- 远程同步失败时可降级使用已有缓存仓库
+
+### Q3: 为什么有些 Agent 不显示工具调用？
+
+未配置工具的 Agent（例如 Critic/Rebuttal/Judge）默认不展示工具调用记录。
+
+## 11. 仓库结构（精简）
+
+```text
+multi-agent-cli_v2/
+├── backend/
+│   ├── app/
+│   │   ├── api/
+│   │   ├── runtime/langgraph/
+│   │   ├── services/
+│   │   ├── models/
+│   │   └── tools/
+│   ├── tests/
+│   └── pyproject.toml
+├── frontend/
+│   └── src/
+├── scripts/
+├── plans/
+└── README.md
 ```
 
-## 📚 API 文档
+## 12. 说明
 
-启动后端服务后，访问：
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
-- Metrics: http://localhost:8000/metrics
-
-## 🗂️ 资产示例（领域-聚合根）
-
-新增本地 Markdown 资产样例（目录：`backend/examples/assets`）：
-- `domain-aggregate-design.md`：领域-聚合根详细设计方案
-- `domain-aggregate-responsibility.md`：领域-聚合根责任田清单（接口/代码/数据库表）
-- `operations-case-library.md`：运维案例库
-
-新增接口定位能力：
-
-```bash
-curl -X POST http://localhost:8000/api/v1/assets/locate \\
-  -H 'Content-Type: application/json' \\
-  -d '{
-    "log_content": "ERROR POST /api/v1/orders failed with NullPointerException",
-    "symptom": "下单失败"
-  }'
-```
-
-返回将包含：
-- 命中的领域与聚合根
-- 对应接口、代码清单、数据库表清单
-- 详细设计引用与聚合根设计要点
-- 相似运维案例
-
-## 🔧 AutoGen 调用说明
-
-本项目通过 AutoGen 组织多 Agent 多轮对话调用大模型。
-
-### 核心工作流程
-
-```python
-from app.core.autogen_client import AutoGenClient
-
-# 创建客户端
-client = AutoGenClient()
-
-# 创建会话
-session = await client.create_session(title="故障分析会话")
-
-# 发送提示消息
-result = await client.send_prompt(
-    session_id=session.id,
-    parts=[{"type": "text", "text": "分析这个日志..."}],
-    model={"name": "glm-5"}
-)
-
-# 获取结构化输出
-result = await client.send_structured_prompt(
-    session_id=session.id,
-    text="分析日志并输出 JSON 格式结果",
-    schema={
-        "type": "object",
-        "properties": {
-            "root_cause": {"type": "string"},
-            "confidence": {"type": "number"}
-        }
-    }
-)
-```
-
-### 可用的 API
-
-| API | 说明 |
-|-----|------|
-| `create_session()` | 创建会话 |
-| `send_prompt()` | 发送提示消息 |
-| `send_structured_prompt()` | 发送结构化输出提示 |
-| `get_messages()` | 获取消息列表 |
-| `list_agents()` | 列出可用 Agent |
-| `get_providers()` | 获取模型提供商 |
-
-## 🔐 鉴权（可选）
-
-默认关闭鉴权：`AUTH_ENABLED=false`。  
-如需开启：
-
-```bash
-export AUTH_ENABLED=true
-```
-
-默认测试账号：
-- `admin / admin123`
-- `analyst / analyst123`
-- `viewer / viewer123`
-
-## 📖 详细文档
-
-- [技术架构方案](plans/sre-debate-platform-architecture.md)
-- [实施路线图](plans/implementation-roadmap.md)
-- [项目目录结构](plans/project-structure.md)
-- [测试矩阵](plans/test-matrix.md)
-- [运行手册](plans/operations-runbook.md)
-- [AutoGen 文档](https://microsoft.github.io/autogen/)
-
-## 📝 开发状态
-
-### 已完成
-- [x] 项目架构设计
-- [x] 后端核心框架
-- [x] AutoGen 多 Agent 调用集成
-- [x] Agent 基类和各专家 Agent
-- [x] 辩论流程编排
-- [x] 工具层实现
-- [x] API 路由
-- [x] 前端基础框架
-- [x] Docker 配置
-
-### 待完成
-- [ ] 数据库持久化
-- [ ] WebSocket 实时通信
-- [ ] 案例库集成
-- [ ] 测试覆盖
-- [ ] 生产环境部署
-
-## 📄 License
-
-MIT License
+- 当前实现默认不依赖外部数据库即可运行（本地存储/内存存储）。
+- 生产环境请务必通过环境变量注入真实密钥，不要在代码库中明文保存。  
+- 若你继续做架构演进，建议优先保持 `state/event/tool-audit` 三条主线的一致性。
