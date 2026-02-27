@@ -302,6 +302,87 @@ def test_execute_debate_degrades_when_llm_unavailable(monkeypatch):
     assert latest.status_code == 200
 
 
+def test_execute_debate_accepts_coordination_phase_in_history(monkeypatch):
+    _reset_state()
+    client = TestClient(app)
+    monkeypatch.setattr(settings, "DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION", False)
+    monkeypatch.setattr(
+        report_service_module.report_generation_service,
+        "generate_report",
+        _create_fake_report_generator(),
+    )
+
+    async def _fake_ai_debate(*args, **kwargs):
+        return (
+            {
+                "confidence": 0.84,
+                "consensus_reached": True,
+                "executed_rounds": 1,
+                "final_judgment": {
+                    "root_cause": {
+                        "summary": "连接池泄漏导致订单接口线程耗尽",
+                        "category": "resource_exhaustion",
+                        "confidence": 0.84,
+                    },
+                    "evidence_chain": [],
+                },
+                "debate_history": [
+                    {
+                        "round_number": 1,
+                        "phase": "coordination",
+                        "agent_name": "ProblemAnalysisAgent",
+                        "agent_role": "问题分析主Agent/调度协调者",
+                        "model": {"name": "kimi-k2.5"},
+                        "input_message": "启动分析",
+                        "output_content": {
+                            "analysis": "分派任务给日志/代码/领域专家",
+                            "conclusion": "先进行并行分析",
+                            "confidence": 0.62,
+                        },
+                        "confidence": 0.62,
+                    },
+                    {
+                        "round_number": 2,
+                        "phase": "judgment",
+                        "agent_name": "JudgeAgent",
+                        "agent_role": "技术委员会主席",
+                        "model": {"name": "kimi-k2.5"},
+                        "input_message": "汇总结论",
+                        "output_content": {
+                            "conclusion": "连接池泄漏导致订单接口线程耗尽",
+                            "confidence": 0.84,
+                        },
+                        "confidence": 0.84,
+                    },
+                ],
+            },
+            "ags_test_coord",
+        )
+
+    monkeypatch.setattr(debate_service, "_execute_ai_debate", _fake_ai_debate)
+
+    created = client.post("/api/v1/incidents/", json={"title": "coordination phase incident"})
+    assert created.status_code == 201
+    incident_id = created.json()["id"]
+
+    session_resp = client.post(f"/api/v1/debates/?incident_id={incident_id}")
+    assert session_resp.status_code == 201
+    session_id = session_resp.json()["id"]
+
+    execute_resp = client.post(f"/api/v1/debates/{session_id}/execute")
+    assert execute_resp.status_code == 200
+    payload = execute_resp.json()
+    assert payload["session_id"] == session_id
+    assert "连接池泄漏" in payload["root_cause"]
+
+    detail_resp = client.get(f"/api/v1/debates/{session_id}")
+    assert detail_resp.status_code == 200
+    rounds = detail_resp.json().get("rounds") or []
+    assert rounds
+    # coordination phase should be normalized to analysis in persisted session model.
+    assert rounds[0]["phase"] == "analysis"
+
+
 def test_interface_locate_endpoint_maps_to_domain_aggregate():
     _reset_state()
     client = TestClient(app)

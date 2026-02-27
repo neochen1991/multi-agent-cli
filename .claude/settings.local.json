@@ -4,7 +4,18 @@
       "WebSearch",
       "Bash(pip show playwright 2>/dev/null || echo \"not installed in pip\")",
       "Bash(osascript -e 'tell application \"Google Chrome\" to get count of tabs of front window' 2>/dev/null || echo \"无法获取\")",
-      "Bash(osascript -e 'tell application \"Google Chrome\" to get count of windows' 2>/dev/null)"
+      "Bash(osascript -e 'tell application \"Google Chrome\" to get count of windows' 2>/dev/null)",
+      "Bash(cd /Users/neochen/multi-agent-cli_v2/backend && python -m pytest tests/test_router.py tests/test_state_reducer.py tests/test_agent_factory.py -v --tb=short 2>&1 | head -150)",
+      "Bash(python -m pytest tests/test_router.py tests/test_state_reducer.py tests/test_agent_factory.py -v --tb=short 2>&1 | head -150)",
+      "Bash(python -m pytest tests/test_router.py tests/test_state_reducer.py tests/test_agent_factory.py -v --tb=short 2>&1 | head -200)",
+      "Bash(python -m pytest tests/test_router.py tests/test_state_reducer.py tests/test_agent_factory.py -v --tb=short 2>&1 | tail -30)",
+      "Bash(python -m pytest tests/test_router.py tests/test_state_reducer.py tests/test_agent_factory.py -v --tb=short 2>&1 | tail -20)",
+      "Bash(pip show python-pptx 2>/dev/null || echo \"not installed\")",
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(claude plugin --help 2>/dev/null)",
+      "Bash(claude plugin marketplace list 2>/dev/null)",
+      "Bash(claude plugin list 2>/dev/null)",
+      "Bash(claude plugin install pyright-lsp 2>&1)"
     ]
   }
 }

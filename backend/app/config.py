@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     LLM_MAX_RETRIES: int = 0
     LLM_MAX_CONCURRENCY: int = 3
     LLM_FAILFAST_ON_RATE_LIMIT: bool = True
+    AGENT_USE_FACTORY: bool = True
     LLM_PROVIDER_ID: Optional[str] = None
     # OpenAI-compatible endpoint (LangGraph config_list)
     LLM_BASE_URL: str = Field(default="https://ark.cn-beijing.volces.com/api/coding")

@@ -7,6 +7,36 @@ from typing import Any, Dict, List, Optional, Sequence
 from app.runtime.messages import AgentEvidence
 
 
+def _agent_output_from_state(state: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
+    outputs = state.get("agent_outputs")
+    if not isinstance(outputs, dict):
+        return {}
+    payload = outputs.get(str(agent_name or "").strip())
+    return payload if isinstance(payload, dict) else {}
+
+
+def _output_confidence(payload: Dict[str, Any], default: float = 0.0) -> float:
+    if not isinstance(payload, dict):
+        return float(default or 0.0)
+    for key in ("confidence",):
+        value = payload.get(key)
+        try:
+            if value is not None:
+                return float(value)
+        except (TypeError, ValueError):
+            pass
+    final_judgment = payload.get("final_judgment")
+    if isinstance(final_judgment, dict):
+        root_cause = final_judgment.get("root_cause")
+        if isinstance(root_cause, dict):
+            try:
+                if root_cause.get("confidence") is not None:
+                    return float(root_cause.get("confidence"))
+            except (TypeError, ValueError):
+                pass
+    return float(default or 0.0)
+
+
 def step_for_agent(agent_name: str) -> str:
     return f"speak:{str(agent_name or '').strip()}"
 
@@ -97,7 +127,9 @@ def route_guardrail(
         return route_decision
 
     judge_card = recent_judge_card(round_cards)
-    if judge_card and float(judge_card.confidence or 0.0) >= consensus_threshold:
+    judge_output = _agent_output_from_state(state, "JudgeAgent")
+    judge_confidence = _output_confidence(judge_output, default=float((judge_card.confidence if judge_card else 0.0) or 0.0))
+    if judge_confidence >= consensus_threshold:
         return {
             **route_decision,
             "next_step": "",
@@ -106,11 +138,19 @@ def route_guardrail(
             "reason": "路由守卫：已有高置信裁决，终止讨论",
         }
 
-    if not judge_is_ready(
+    ready_from_cards = judge_is_ready(
         round_cards,
         parallel_analysis_agents=parallel_analysis_agents,
         debate_enable_critique=debate_enable_critique,
-    ):
+    )
+    state_seen = set()
+    outputs = state.get("agent_outputs")
+    if isinstance(outputs, dict):
+        state_seen = {str(name or "").strip() for name in outputs.keys() if str(name or "").strip()}
+    ready_from_state = all(name in state_seen for name in parallel_analysis_agents) and (
+        (not debate_enable_critique) or ("CriticAgent" in state_seen and "RebuttalAgent" in state_seen)
+    )
+    if not (ready_from_cards or ready_from_state):
         return route_decision
 
     discussion_step_count = int(state.get("discussion_step_count") or 0)
@@ -119,12 +159,13 @@ def route_guardrail(
     counts = round_agent_counts(round_cards)
     recent_agents = [str(card.agent_name or "") for card in round_cards[-4:]]
     commander_card = recent_agent_card(round_cards, "ProblemAnalysisAgent")
-    commander_output = (
-        commander_card.raw_output
-        if commander_card and isinstance(getattr(commander_card, "raw_output", None), dict)
-        else {}
+    commander_output = _agent_output_from_state(state, "ProblemAnalysisAgent")
+    if not commander_output and commander_card and isinstance(getattr(commander_card, "raw_output", None), dict):
+        commander_output = commander_card.raw_output
+    commander_confidence = _output_confidence(
+        commander_output,
+        default=float(getattr(commander_card, "confidence", 0.0) or 0.0),
     )
-    commander_confidence = float(getattr(commander_card, "confidence", 0.0) or 0.0)
     unresolved_items: List[str] = []
     for key in ("open_questions", "missing_info", "needs_validation"):
         value = commander_output.get(key)
@@ -210,11 +251,15 @@ def fallback_supervisor_route(
     parallel_analysis_agents: Sequence[str],
 ) -> Dict[str, Any]:
     seen_agents = [card.agent_name for card in round_cards]
-    seen_set = set(seen_agents)
+    seen_set = {str(name or "").strip() for name in seen_agents if str(name or "").strip()}
+    outputs = state.get("agent_outputs")
+    if isinstance(outputs, dict):
+        seen_set.update({str(name or "").strip() for name in outputs.keys() if str(name or "").strip()})
     discussion_step_count = int(state.get("discussion_step_count") or 0)
     max_steps = int(state.get("max_discussion_steps") or max_discussion_steps_default)
     judge_card = recent_judge_card(round_cards)
-    judge_conf = float(judge_card.confidence or 0.0) if judge_card else 0.0
+    judge_output = _agent_output_from_state(state, "JudgeAgent")
+    judge_conf = _output_confidence(judge_output, default=float(judge_card.confidence or 0.0) if judge_card else 0.0)
 
     if not all(name in seen_set for name in parallel_analysis_agents):
         return {
@@ -240,7 +285,7 @@ def fallback_supervisor_route(
             "stop_reason": "",
         }
 
-    if judge_card is None:
+    if judge_card is None and not judge_output:
         return {
             "next_step": step_for_agent("JudgeAgent"),
             "reason": "已收集主要观点，进入裁决汇总",
@@ -316,17 +361,24 @@ def route_from_commander_output(
 
     if should_stop:
         judge_card = recent_judge_card(round_cards)
-        if not judge_card:
+        judge_output = _agent_output_from_state(state, "JudgeAgent")
+        judge_available = bool(judge_card) or bool(judge_output)
+        if not judge_available:
             next_step = step_for_agent("JudgeAgent")
             should_stop = False
             if not stop_reason:
                 stop_reason = "主Agent请求停止，但尚无裁决，先触发 JudgeAgent 汇总"
-        elif is_placeholder_summary(
-            str((((judge_card.raw_output or {}).get("final_judgment", {})).get("root_cause", {})).get("summary", ""))
-        ):
-            next_step = step_for_agent("JudgeAgent")
-            should_stop = False
-            stop_reason = "JudgeAgent 结论仍为占位，继续裁决一次"
+        else:
+            source = (
+                judge_card.raw_output
+                if judge_card and isinstance(getattr(judge_card, "raw_output", None), dict)
+                else judge_output
+            )
+            summary = str((((source or {}).get("final_judgment", {})).get("root_cause", {})).get("summary", ""))
+            if is_placeholder_summary(summary):
+                next_step = step_for_agent("JudgeAgent")
+                should_stop = False
+                stop_reason = "JudgeAgent 结论仍为占位，继续裁决一次"
 
     if not next_step and not should_stop:
         return fallback_supervisor_route_fn(state=state, round_cards=round_cards)

@@ -8,7 +8,6 @@ import {
   Descriptions,
   Empty,
   Input,
-  Progress,
   Select,
   Space,
   Steps,
@@ -17,15 +16,13 @@ import {
   Typography,
   message,
 } from 'antd';
-import { LinkOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons';
+import { PlayCircleOutlined } from '@ant-design/icons';
 import { useParams, useSearchParams } from 'react-router-dom';
 import {
-  assetApi,
   buildDebateWsUrl,
   debateApi,
   incidentApi,
   reportApi,
-  type AssetFusion,
   type DebateDetail,
   type DebateResult,
   type Report,
@@ -74,9 +71,8 @@ const IncidentPage: React.FC = () => {
   const [sessionId, setSessionId] = useState<string>('');
   const [sessionDetail, setSessionDetail] = useState<DebateDetail | null>(null);
   const [debateResult, setDebateResult] = useState<DebateResult | null>(null);
-  const [report, setReport] = useState<Report | null>(null);
-  const [shareUrl, setShareUrl] = useState<string>('');
-  const [fusion, setFusion] = useState<AssetFusion | null>(null);
+  const [reportResult, setReportResult] = useState<Report | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
   const [eventRecords, setEventRecords] = useState<EventRecord[]>([]);
   const [streamedMessageText, setStreamedMessageText] = useState<Record<string, string>>({});
   const [expandedDialogueIds, setExpandedDialogueIds] = useState<Record<string, boolean>>({});
@@ -95,9 +91,9 @@ const IncidentPage: React.FC = () => {
   const steps = useMemo(
     () => [
       { title: '输入故障信息', description: '创建 Incident 与 Session' },
-      { title: '资产与辩论', description: 'WebSocket 实时执行' },
-      { title: '辩论结果', description: '轮次、置信度、结论' },
-      { title: '报告与图谱', description: '报告输出与资产融合' },
+      { title: '资产映射', description: '责任田映射结果' },
+      { title: '辩论过程', description: '所有 Agent 实时辩论' },
+      { title: '辩论结果', description: '主Agent最终结论' },
     ],
     [],
   );
@@ -214,6 +210,119 @@ const IncidentPage: React.FC = () => {
       .map((line) => line.replace(/^\s{0,3}#{1,6}\s+/, '').replace(/^\s*[-*]\s+/, '• '))
       .join('\n');
 
+  const tryParseJson = (text: string): Record<string, unknown> | null => {
+    const source = String(text || '').trim();
+    if (!source) return null;
+    const candidates: string[] = [];
+    const fencedMatches = Array.from(source.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi));
+    fencedMatches.forEach((match) => {
+      const body = String(match[1] || '').trim();
+      if (body) candidates.push(body);
+    });
+    if ((source.startsWith('{') && source.endsWith('}')) || (source.startsWith('[') && source.endsWith(']'))) {
+      candidates.push(source);
+    }
+    const firstBrace = source.indexOf('{');
+    const lastBrace = source.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      candidates.push(source.slice(firstBrace, lastBrace + 1));
+    }
+    for (const candidate of candidates) {
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed as Record<string, unknown>;
+        }
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  };
+
+  const extractReadableTextFromObject = (value: Record<string, unknown>): string => {
+    const chat = firstTextValue(value, ['chat_message', 'message', 'summary']);
+    const conclusion = firstTextValue(value, ['conclusion', 'root_cause', 'judgment']);
+    const analysis = firstTextValue(value, ['analysis', 'reason', 'detail']);
+    const confidenceRaw = value.confidence;
+    const confidence =
+      typeof confidenceRaw === 'number' ? `置信度 ${(Number(confidenceRaw) * 100).toFixed(1)}%` : '';
+    const lines = [chat, conclusion ? `结论：${conclusion}` : '', analysis ? `依据：${analysis}` : '', confidence]
+      .map((line) => String(line || '').trim())
+      .filter(Boolean);
+    if (lines.length > 0) return lines.join('\n');
+    return '结构化分析结果已生成';
+  };
+
+  const extractLooseJsonStringField = (source: string, fieldName: string): string => {
+    const marker = `"${fieldName}"`;
+    const markerIndex = source.indexOf(marker);
+    if (markerIndex < 0) return '';
+    const colonIndex = source.indexOf(':', markerIndex + marker.length);
+    if (colonIndex < 0) return '';
+    let idx = colonIndex + 1;
+    while (idx < source.length && /\s/.test(source[idx])) idx += 1;
+    if (idx >= source.length || source[idx] !== '"') return '';
+    idx += 1;
+    let output = '';
+    let escaping = false;
+    while (idx < source.length) {
+      const ch = source[idx];
+      if (escaping) {
+        if (ch === 'n') output += '\n';
+        else if (ch === 't') output += '\t';
+        else output += ch;
+        escaping = false;
+        idx += 1;
+        continue;
+      }
+      if (ch === '\\') {
+        escaping = true;
+        idx += 1;
+        continue;
+      }
+      if (ch === '"') {
+        break;
+      }
+      output += ch;
+      idx += 1;
+    }
+    return output.trim();
+  };
+
+  const stripJsonTail = (source: string): string => {
+    const firstBrace = source.indexOf('{');
+    if (firstBrace < 0) return source.trim();
+    const prefix = source.slice(0, firstBrace).trim();
+    if (prefix) return prefix;
+    return source
+      .replace(/\{[\s\S]*$/, '')
+      .trim();
+  };
+
+  const extractChatMessageText = (raw: unknown): string => {
+    if (raw === null || raw === undefined) return '';
+    if (typeof raw === 'object') return extractReadableTextFromObject(asRecord(raw));
+    const source = String(raw || '')
+      .replace(/```(?:json)?\s*/gi, '')
+      .replace(/```/g, '')
+      .trim();
+    if (!source) return '';
+    const parsed = tryParseJson(source);
+    if (parsed) return extractReadableTextFromObject(parsed);
+    const chatFromLooseJson =
+      extractLooseJsonStringField(source, 'chat_message') ||
+      extractLooseJsonStringField(source, 'message') ||
+      extractLooseJsonStringField(source, 'summary');
+    if (chatFromLooseJson) return chatFromLooseJson;
+    if (source.includes('{') && /"(chat_message|message|summary|conclusion|analysis)"/.test(source)) {
+      const stripped = stripJsonTail(source);
+      if (stripped) return stripped;
+      return '结构化分析结果已生成';
+    }
+    return source.trim();
+  };
+
   const buildDialogueMessage = (row: EventRecord): DialogueMessage | null => {
     const data = asRecord(row.data);
     const kind = row.kind;
@@ -272,7 +381,9 @@ const IncidentPage: React.FC = () => {
       status = 'done';
       const replyTo = firstTextValue(data, ['reply_to']);
       summary = replyTo && replyTo !== 'all' ? `${agentName} 回复 ${replyTo}` : `${agentName} 发言`;
-      detail = normalizeMarkdownText(firstTextValue(data, ['message']) || messageText || '（空发言）');
+      detail = normalizeMarkdownText(
+        extractChatMessageText(firstTextValue(data, ['message']) || messageText || '（空发言）'),
+      );
     } else if (
       (kind === 'autogen_call_completed' || kind === 'llm_call_completed') &&
       ['analysis', 'critique', 'rebuttal', 'judgment'].includes(phase)
@@ -290,9 +401,9 @@ const IncidentPage: React.FC = () => {
       status = 'done';
       summary = `${agentName} 输出结论`;
       if (typeof outputJson !== 'undefined') {
-        detail = normalizeMarkdownText(toDisplayText(outputJson));
+        detail = normalizeMarkdownText(extractReadableTextFromObject(asRecord(outputJson)));
       } else {
-        detail = normalizeMarkdownText(output || messageText || '已完成该轮分析');
+        detail = normalizeMarkdownText(extractChatMessageText(output || messageText || '已完成该轮分析'));
       }
     } else if (isErrorKind) {
       status = 'error';
@@ -423,53 +534,52 @@ const IncidentPage: React.FC = () => {
     }
   };
 
-  const inferStepForEvent = (row: EventRecord): number => {
-    const data = (row.data || {}) as Record<string, unknown>;
-    const phase = String(data.phase || '').toLowerCase();
-    const stage = String(data.stage || '').toLowerCase();
-    const kind = row.kind.toLowerCase();
+  const isAssetMappingEvent = (row: EventRecord): boolean => row.kind === 'asset_interface_mapping_completed';
 
-    if (phase.includes('report') || stage.includes('report') || kind.includes('report')) {
-      return 3;
+  const isDebateProcessEvent = (row: EventRecord): boolean => {
+    const data = asRecord(row.data);
+    const phase = String(data.phase || '').toLowerCase();
+    const kind = row.kind.toLowerCase();
+    if (isAssetMappingEvent(row)) return false;
+    if (kind === 'session_created_local' || kind === 'ws_open' || kind === 'ws_close' || kind === 'snapshot') {
+      return false;
     }
-    if (phase.includes('asset') || stage.includes('asset')) {
-      return 1;
-    }
-    if (
-      phase.includes('debating') ||
-      phase.includes('failed') ||
+    return (
+      kind === 'agent_chat_message' ||
+      kind === 'agent_round' ||
+      kind === 'agent_command_issued' ||
+      kind === 'agent_command_feedback' ||
+      kind.startsWith('llm_call_') ||
+      kind.startsWith('llm_http_') ||
+      kind === 'llm_stream_delta' ||
+      kind === 'llm_invoke_path' ||
+      kind === 'agent_factory_fallback' ||
       phase === 'analysis' ||
+      phase.includes('coordination') ||
       phase.includes('critique') ||
       phase.includes('rebuttal') ||
-      phase.includes('judgment') ||
-      stage.includes('debate') ||
-      kind.startsWith('llm_call_') ||
-      kind.startsWith('llm_prompt_') ||
-      kind.startsWith('round_') ||
-      kind === 'agent_round' ||
-      kind === 'session_failed' ||
-      kind === 'error'
-    ) {
-      return 2;
-    }
-    return 1;
+      phase.includes('judgment')
+    );
   };
 
   const advanceStep = (nextStep: number) => {
     setActiveStep((prev) => (nextStep > prev ? nextStep : prev));
   };
 
-  const loadSessionArtifacts = async (sid: string, iid: string) => {
-    const [detail, result, rpt, fusing] = await Promise.all([
+  const loadSessionArtifacts = async (sid: string) => {
+    const [detail, result] = await Promise.all([
       debateApi.get(sid),
       debateApi.getResult(sid).catch(() => null),
-      reportApi.get(iid).catch(() => null),
-      assetApi.fusion(iid).catch(() => null),
     ]);
     setSessionDetail(detail);
     setDebateResult(result);
-    setReport(rpt);
-    setFusion(fusing);
+    const reportIncidentId = detail.incident_id || incidentId;
+    if (reportIncidentId) {
+      const report = await reportApi.get(reportIncidentId).catch(() => null);
+      setReportResult(report);
+    } else {
+      setReportResult(null);
+    }
     const config = ((detail.context as Record<string, unknown> | undefined) || {})
       .debate_config as Record<string, unknown> | undefined;
     const maxRoundsRaw = config?.max_rounds;
@@ -508,10 +618,10 @@ const IncidentPage: React.FC = () => {
     return detail;
   };
 
-  const createIncidentAndSession = async () => {
+  const createIncidentAndSession = async (): Promise<{ incidentId: string; sessionId: string } | null> => {
     if (!incidentForm.title.trim()) {
       message.error('请填写故障标题');
-      return;
+      return null;
     }
     setLoading(true);
     try {
@@ -528,20 +638,23 @@ const IncidentPage: React.FC = () => {
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
+      setReportResult(null);
       setIncidentId(incident.id);
       setSessionId(session.id);
       advanceStep(1);
       appendEvent('session_created_local', `会话已创建 ${session.id}`, { session_id: session.id });
       message.success('故障会话创建成功');
+      return { incidentId: incident.id, sessionId: session.id };
     } catch (e: any) {
       message.error(e?.response?.data?.detail || e.message || '创建失败');
+      return null;
     } finally {
       setLoading(false);
     }
   };
 
-  const initSessionForExistingIncident = async () => {
-    if (!incidentId) return;
+  const initSessionForExistingIncident = async (): Promise<string | null> => {
+    if (!incidentId) return null;
     setLoading(true);
     try {
       const session = await debateApi.createSession(incidentId, { maxRounds: debateMaxRounds });
@@ -549,18 +662,21 @@ const IncidentPage: React.FC = () => {
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
+      setReportResult(null);
       setSessionId(session.id);
       appendEvent('session_created_local', `会话已创建 ${session.id}`, { session_id: session.id });
       advanceStep(1);
       message.success('已初始化辩论会话');
+      return session.id;
     } catch (e: any) {
       message.error(e?.response?.data?.detail || e.message || '初始化会话失败');
+      return null;
     } finally {
       setLoading(false);
     }
   };
 
-  const pollResultUntilReady = async (sid: string, iid: string) => {
+  const pollResultUntilReady = async (sid: string) => {
     if (pollingRef.current) return;
     pollingRef.current = true;
     try {
@@ -576,7 +692,7 @@ const IncidentPage: React.FC = () => {
         if (result) {
           appendEvent('result_polled', '后台任务已完成，正在刷新结果');
           setDebateResult(result);
-          await loadSessionArtifacts(sid, iid);
+          await loadSessionArtifacts(sid);
           advanceStep(3);
           setRunning(false);
           return;
@@ -602,13 +718,17 @@ const IncidentPage: React.FC = () => {
     }
   };
 
-  const startRealtimeDebate = async () => {
-    if (!sessionId || !incidentId) return;
+  const startRealtimeDebate = async (
+    options?: { sessionId?: string; incidentId?: string },
+  ) => {
+    const targetSessionId = options?.sessionId || sessionId;
+    const targetIncidentId = options?.incidentId || incidentId;
+    if (!targetSessionId || !targetIncidentId) return;
     setRunning(true);
     appendEvent('start', '开始实时辩论');
 
     try {
-      const ws = new WebSocket(buildDebateWsUrl(sessionId));
+      const ws = new WebSocket(buildDebateWsUrl(targetSessionId));
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -624,7 +744,7 @@ const IncidentPage: React.FC = () => {
             if (type === 'session_failed') {
               setRunning(false);
               advanceStep(2);
-              await loadSessionArtifacts(sessionId, incidentId).catch(() => undefined);
+              await loadSessionArtifacts(targetSessionId).catch(() => undefined);
               return;
             }
             const eventPhase = String(payload.data?.phase || '').toLowerCase();
@@ -668,7 +788,7 @@ const IncidentPage: React.FC = () => {
                 confidence: payload.data.confidence ?? prev?.confidence ?? 0,
               }));
             }
-            await loadSessionArtifacts(sessionId, incidentId);
+            await loadSessionArtifacts(targetSessionId);
             advanceStep(3);
             setRunning(false);
             return;
@@ -680,7 +800,7 @@ const IncidentPage: React.FC = () => {
           if (payload.type === 'error') {
             appendEvent('error', `错误: ${payload.message || 'unknown'}`, payload);
             setRunning(false);
-            await loadSessionArtifacts(sessionId, incidentId).catch(() => undefined);
+            await loadSessionArtifacts(targetSessionId).catch(() => undefined);
             advanceStep(2);
           }
         } catch {
@@ -690,19 +810,38 @@ const IncidentPage: React.FC = () => {
 
       ws.onerror = async () => {
         appendEvent('ws_error', 'WebSocket 连接异常，改为后台轮询结果');
-        await pollResultUntilReady(sessionId, incidentId);
+        await pollResultUntilReady(targetSessionId);
       };
 
       ws.onclose = () => {
         appendEvent('ws_close', 'WebSocket 已关闭');
         if (runningRef.current) {
-          void pollResultUntilReady(sessionId, incidentId);
+          void pollResultUntilReady(targetSessionId);
         }
       };
     } catch (e: any) {
       message.error(e?.message || '启动失败');
       setRunning(false);
     }
+  };
+
+  const startAnalysisFromInput = async () => {
+    let targetIncidentId = incidentId;
+    let targetSessionId = sessionId;
+    if (!targetIncidentId) {
+      const created = await createIncidentAndSession();
+      if (!created) return;
+      targetIncidentId = created.incidentId;
+      targetSessionId = created.sessionId;
+    } else if (!targetSessionId) {
+      const sid = await initSessionForExistingIncident();
+      if (!sid) return;
+      targetSessionId = sid;
+    }
+    if (!targetIncidentId || !targetSessionId) return;
+    advanceStep(2);
+    await loadSessionArtifacts(targetSessionId).catch(() => undefined);
+    await startRealtimeDebate({ sessionId: targetSessionId, incidentId: targetIncidentId });
   };
 
   const sendWsControl = async (action: 'cancel' | 'resume') => {
@@ -740,40 +879,13 @@ const IncidentPage: React.FC = () => {
     void startRealtimeDebate();
   };
 
-  const regenerateReport = async () => {
-    if (!incidentId) return;
-    setLoading(true);
-    try {
-      const rpt = await reportApi.regenerate(incidentId);
-      setReport(rpt);
-      message.success('报告已重新生成');
-    } catch (e: any) {
-      const detail = e?.response?.data?.detail || e?.message || '报告重新生成失败';
-      message.error(detail);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const generateShareLink = async () => {
-    if (!incidentId) return;
-    setLoading(true);
-    try {
-      const share = await reportApi.share(incidentId);
-      setShareUrl(share.share_url);
-      message.success('分享链接已生成');
-    } catch (e: any) {
-      const detail = e?.response?.data?.detail || e?.message || '生成分享链接失败';
-      message.error(detail);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
     const iid = routeIncidentId || searchParams.get('incident_id');
     const preferredView = (searchParams.get('view') || '').toLowerCase();
-    if (!iid) return;
+    if (!iid) {
+      setReportResult(null);
+      return;
+    }
     seenEventIdsRef.current.clear();
     setEventRecords([]);
     setStreamedMessageText({});
@@ -791,9 +903,9 @@ const IncidentPage: React.FC = () => {
         }));
         if (incident.debate_session_id) {
           setSessionId(incident.debate_session_id);
-          const detail = await loadSessionArtifacts(incident.debate_session_id, iid);
+          const detail = await loadSessionArtifacts(incident.debate_session_id);
           const status = detail?.status || '';
-          if (preferredView === 'report') {
+          if (preferredView === 'result' || preferredView === 'report') {
             advanceStep(3);
           } else if (preferredView === 'analysis') {
             advanceStep(1);
@@ -821,17 +933,24 @@ const IncidentPage: React.FC = () => {
     };
   }, []);
 
-  const stageEvents =
-    activeStep === 0 ? [] : eventRecords.filter((row) => inferStepForEvent(row) === activeStep);
+  const mappingEvents = useMemo(
+    () => eventRecords.filter((row) => isAssetMappingEvent(row)),
+    [eventRecords],
+  );
+
+  const debateEvents = useMemo(
+    () => eventRecords.filter((row) => isDebateProcessEvent(row)),
+    [eventRecords],
+  );
 
   const dialogueMessages = useMemo(
     () =>
-      stageEvents
+      debateEvents
         .slice()
         .reverse()
         .map((row) => buildDialogueMessage(row))
         .filter((item): item is DialogueMessage => Boolean(item)),
-    [stageEvents],
+    [debateEvents],
   );
 
   const filteredDialogueMessages = useMemo(() => {
@@ -846,10 +965,10 @@ const IncidentPage: React.FC = () => {
     });
   }, [dialogueMessages, eventFilterAgent, eventFilterPhase, eventFilterType, eventSearchText]);
 
-  const filteredStageEvents = useMemo(() => {
+  const filteredDebateEvents = useMemo(() => {
     const includeIds = new Set(filteredDialogueMessages.map((item) => item.id));
-    return stageEvents.filter((row) => includeIds.has(row.id));
-  }, [stageEvents, filteredDialogueMessages]);
+    return debateEvents.filter((row) => includeIds.has(row.id));
+  }, [debateEvents, filteredDialogueMessages]);
 
   const eventFilterOptions = useMemo(() => {
     const agentSet = new Set<string>();
@@ -923,80 +1042,6 @@ const IncidentPage: React.FC = () => {
     });
   }, [filteredDialogueMessages]);
 
-  const reportSections = useMemo(() => {
-    const content = report?.content || '';
-    if (!content.trim()) return [];
-    const lines = content.replace(/\r/g, '').split('\n');
-    const sections: Array<{ title: string; lines: string[] }> = [];
-    let currentTitle = '报告概览';
-    let currentLines: string[] = [];
-    const pushCurrent = () => {
-      if (currentLines.length === 0) return;
-      sections.push({ title: currentTitle, lines: [...currentLines] });
-      currentLines = [];
-    };
-    for (const rawLine of lines) {
-      const line = rawLine.trimEnd();
-      if (/^#\s+/.test(line)) continue;
-      const sectionMatch = /^##\s+(.+)$/.exec(line.trim());
-      if (sectionMatch) {
-        pushCurrent();
-        currentTitle = normalizeInlineText(sectionMatch[1]);
-        continue;
-      }
-      if (line.trim() === '---') continue;
-      currentLines.push(line);
-    }
-    pushCurrent();
-    if (sections.length === 0) {
-      return [{ title: '报告详情', lines }];
-    }
-    return sections;
-  }, [report?.content]);
-
-  const renderReportSectionBody = (lines: string[]) => {
-    const blocks: React.ReactNode[] = [];
-    let listBuffer: string[] = [];
-    const flushList = () => {
-      if (listBuffer.length === 0) return;
-      blocks.push(
-        <ul key={`list_${blocks.length}`} style={{ paddingInlineStart: 18, marginBottom: 12 }}>
-          {listBuffer.map((item, index) => (
-            <li key={`${item}_${index}`} style={{ marginBottom: 6 }}>
-              {normalizeInlineText(item)}
-            </li>
-          ))}
-        </ul>,
-      );
-      listBuffer = [];
-    };
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        flushList();
-        continue;
-      }
-      const listMatch = /^[-*]\s+(.+)$/.exec(trimmed) || /^\d+\.\s+(.+)$/.exec(trimmed);
-      if (listMatch) {
-        listBuffer.push(listMatch[1]);
-        continue;
-      }
-      flushList();
-      const text = normalizeInlineText(trimmed.replace(/^###\s+/, ''));
-      blocks.push(
-        <Paragraph key={`p_${blocks.length}`} style={{ marginBottom: 10 }}>
-          {text}
-        </Paragraph>,
-      );
-    }
-    flushList();
-    if (blocks.length === 0) {
-      return <Text type="secondary">暂无内容</Text>;
-    }
-    return <>{blocks}</>;
-  };
-
   const buildCompactDetail = (value: string): string => {
     const normalized = normalizeMarkdownText(value || '');
     const lines = normalized
@@ -1017,7 +1062,7 @@ const IncidentPage: React.FC = () => {
       return <Empty description="暂无匹配的事件明细" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
     }
     return (
-      <div className="dialogue-stream">
+      <div className="dialogue-stream discord-thread">
         {filteredDialogueMessages.map((msg) => {
           const renderedText = streamedMessageText[msg.id] ?? '';
           const fullText = msg.status === 'streaming' ? renderedText : msg.detail;
@@ -1034,18 +1079,15 @@ const IncidentPage: React.FC = () => {
               <Avatar size="small" className="dialogue-avatar">
                 {msg.agentName.slice(0, 1).toUpperCase()}
               </Avatar>
-              <div className={`dialogue-bubble dialogue-bubble-${msg.status}`}>
+              <div className={`dialogue-message dialogue-status-${msg.status}`}>
                 <div className="dialogue-meta">
-                  <Text strong>{msg.agentName}</Text>
-                  {msg.phase && <Tag style={{ marginLeft: 8 }}>{msg.phase}</Tag>}
-                  <Tag style={{ marginLeft: 8 }}>{msg.eventType}</Tag>
-                  {msg.latencyMs ? <Tag color="blue">{`${msg.latencyMs}ms`}</Tag> : null}
-                  {msg.traceId && msg.traceId !== '-' ? <Tag>{`trace:${msg.traceId}`}</Tag> : null}
-                  <Text type="secondary" style={{ marginLeft: 8 }}>
-                    {msg.timeText}
-                  </Text>
+                  <Text className="dialogue-username">{msg.agentName}</Text>
+                  <Text className="dialogue-time">{msg.timeText}</Text>
+                  {msg.phase && <Tag className="dialogue-tag">{msg.phase}</Tag>}
+                  <Tag className="dialogue-tag">{msg.eventType}</Tag>
+                  {msg.latencyMs ? <Tag className="dialogue-tag">{`${msg.latencyMs}ms`}</Tag> : null}
                 </div>
-                <Paragraph style={{ marginBottom: 8 }}>{msg.summary}</Paragraph>
+                <Paragraph className="dialogue-summary">{msg.summary}</Paragraph>
                 {isExpanded ? (
                   <pre className="dialogue-content">
                     {fullText}
@@ -1138,7 +1180,7 @@ const IncidentPage: React.FC = () => {
     if (nextStep === 3 && incidentId && sessionId) {
       setLoading(true);
       try {
-        await loadSessionArtifacts(sessionId, incidentId);
+        await loadSessionArtifacts(sessionId);
       } finally {
         setLoading(false);
       }
@@ -1155,11 +1197,106 @@ const IncidentPage: React.FC = () => {
         <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{round.input_message || '无'}</pre>
         <Text type="secondary">输出内容：</Text>
         <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
-          {JSON.stringify(round.output_content || {}, null, 2)}
+          {extractReadableTextFromObject(asRecord(round.output_content || {}))}
         </pre>
       </Space>
     ),
   }));
+
+  const mappingItems = useMemo(() => {
+    return mappingEvents
+      .slice()
+      .reverse()
+      .map((row, index) => {
+        const data = asRecord(row.data);
+        return {
+          id: `${row.id}_${index}`,
+          timeText: row.timeText,
+          matched: typeof data.matched === 'boolean' ? (data.matched ? '命中' : '未命中') : '未知',
+          domain: firstTextValue(data, ['domain']) || '-',
+          aggregate: firstTextValue(data, ['aggregate']) || '-',
+          ownerTeam: firstTextValue(data, ['owner_team']) || '-',
+          owner: firstTextValue(data, ['owner']) || '-',
+          confidence:
+            typeof data.confidence === 'number'
+              ? `${(Number(data.confidence) * 100).toFixed(1)}%`
+              : '-',
+          reason: firstTextValue(data, ['reason']) || '-',
+        };
+      });
+  }, [mappingEvents]);
+
+  const mainAgentConclusion = useMemo(() => {
+    for (const row of eventRecords) {
+      if (row.kind !== 'agent_chat_message') continue;
+      const data = asRecord(row.data);
+      const agent = firstTextValue(data, ['agent_name', 'agent']);
+      if (agent !== 'ProblemAnalysisAgent') continue;
+      const messageText = firstTextValue(data, ['message']);
+      if (messageText) {
+        return {
+          text: normalizeMarkdownText(extractChatMessageText(messageText)),
+          timeText: row.timeText,
+        };
+      }
+    }
+    if (debateResult?.root_cause) {
+      return {
+        text: debateResult.root_cause,
+        timeText: formatBeijingDateTime(debateResult.created_at),
+      };
+    }
+    return null;
+  }, [eventRecords, debateResult]);
+
+  const reportSections = useMemo(() => {
+    const content = String(reportResult?.content || '').trim();
+    if (!content) return [];
+    const lines = content.replace(/\r/g, '').split('\n');
+    const sections: Array<{ title: string; body: string }> = [];
+    let currentTitle = '报告摘要';
+    let currentBody: string[] = [];
+    const flush = () => {
+      const body = currentBody
+        .join('\n')
+        .replace(/```[\s\S]*?```/g, '')
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+        .replace(/`([^`]+)`/g, '$1')
+        .trim();
+      if (body) {
+        sections.push({ title: currentTitle, body });
+      }
+      currentBody = [];
+    };
+    lines.forEach((line) => {
+      const heading = line.match(/^\s{0,3}#{1,6}\s+(.+)$/);
+      if (heading) {
+        flush();
+        currentTitle = heading[1].trim();
+        return;
+      }
+      currentBody.push(line.replace(/^\s*[-*]\s+/, '• '));
+    });
+    flush();
+    if (sections.length === 0 && content) {
+      return [{ title: '报告内容', body: normalizeMarkdownText(content) }];
+    }
+    return sections;
+  }, [reportResult]);
+
+  const regenerateReport = async () => {
+    if (!incidentId) return;
+    setReportLoading(true);
+    try {
+      const report = await reportApi.regenerate(incidentId);
+      setReportResult(report);
+      message.success('报告已重新生成');
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || e?.message || '报告生成失败');
+    } finally {
+      setReportLoading(false);
+    }
+  };
 
   return (
     <div className="incident-page">
@@ -1177,13 +1314,13 @@ const IncidentPage: React.FC = () => {
             输入故障信息
           </Button>
           <Button type={activeStep === 1 ? 'primary' : 'default'} onClick={() => void switchToStep(1)}>
-            资产与辩论
+            资产映射
           </Button>
           <Button type={activeStep === 2 ? 'primary' : 'default'} onClick={() => void switchToStep(2)}>
-            辩论结果
+            辩论过程
           </Button>
           <Button type={activeStep === 3 ? 'primary' : 'default'} onClick={() => void switchToStep(3)}>
-            报告与图谱
+            辩论结果
           </Button>
           <Tag color="processing">当前查看：{steps[activeStep]?.title}</Tag>
         </Space>
@@ -1242,13 +1379,28 @@ const IncidentPage: React.FC = () => {
                 onChange={(e) => setIncidentForm((s) => ({ ...s, log_content: e.target.value }))}
               />
               {!incidentId && (
-                <Button type="primary" loading={loading} onClick={createIncidentAndSession}>
-                  创建故障并初始化辩论会话
-                </Button>
+                <Space>
+                  <Button type="primary" loading={loading || running} onClick={() => void startAnalysisFromInput()}>
+                    创建并启动分析
+                  </Button>
+                  <Button loading={loading} onClick={() => void createIncidentAndSession()}>
+                    仅创建故障与会话
+                  </Button>
+                </Space>
               )}
               {incidentId && !sessionId && (
-                <Button loading={loading} onClick={initSessionForExistingIncident}>
-                  使用当前故障初始化会话
+                <Space>
+                  <Button type="primary" loading={loading || running} onClick={() => void startAnalysisFromInput()}>
+                    初始化并启动分析
+                  </Button>
+                  <Button loading={loading} onClick={() => void initSessionForExistingIncident()}>
+                    使用当前故障初始化会话
+                  </Button>
+                </Space>
+              )}
+              {incidentId && sessionId && (
+                <Button type="primary" loading={loading || running} onClick={() => void startAnalysisFromInput()}>
+                  启动分析
                 </Button>
               )}
             </Space>
@@ -1256,6 +1408,35 @@ const IncidentPage: React.FC = () => {
         )}
 
         {activeStep === 1 && (
+          <Space direction="vertical" size="large" style={{ width: '100%' }}>
+            <Card title="责任田映射结果">
+              {mappingItems.length === 0 ? (
+                <Empty description="暂无责任田映射结果" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+              ) : (
+                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                  {mappingItems.map((item) => (
+                    <Card key={item.id} size="small">
+                      <Descriptions column={2} size="small">
+                        <Descriptions.Item label="时间">{item.timeText}</Descriptions.Item>
+                        <Descriptions.Item label="匹配状态">
+                          <Tag color={item.matched === '命中' ? 'success' : 'warning'}>{item.matched}</Tag>
+                        </Descriptions.Item>
+                        <Descriptions.Item label="领域">{item.domain}</Descriptions.Item>
+                        <Descriptions.Item label="聚合根">{item.aggregate}</Descriptions.Item>
+                        <Descriptions.Item label="责任团队">{item.ownerTeam}</Descriptions.Item>
+                        <Descriptions.Item label="责任人">{item.owner}</Descriptions.Item>
+                        <Descriptions.Item label="置信度">{item.confidence}</Descriptions.Item>
+                        <Descriptions.Item label="匹配原因">{item.reason}</Descriptions.Item>
+                      </Descriptions>
+                    </Card>
+                  ))}
+                </Space>
+              )}
+            </Card>
+          </Space>
+        )}
+
+        {activeStep === 2 && (
           <Space direction="vertical" size="large" style={{ width: '100%' }}>
             <Card title="会话信息">
               <Descriptions column={2}>
@@ -1266,7 +1447,12 @@ const IncidentPage: React.FC = () => {
                 </Descriptions.Item>
                 <Descriptions.Item label="辩论轮数">{debateMaxRounds}</Descriptions.Item>
               </Descriptions>
-              <Button type="primary" icon={<PlayCircleOutlined />} loading={running} onClick={startRealtimeDebate}>
+              <Button
+                type="primary"
+                icon={<PlayCircleOutlined />}
+                loading={running}
+                onClick={() => void startRealtimeDebate()}
+              >
                 启动实时辩论
               </Button>
               <Space style={{ marginLeft: 12 }}>
@@ -1277,54 +1463,9 @@ const IncidentPage: React.FC = () => {
               </Space>
             </Card>
 
-            <Card title="事件明细（流式对话）">
+            <Card title="辩论事件明细（流式对话）">
               {renderEventFilters()}
               {renderDialogueStream()}
-            </Card>
-
-            <Card title="资产与辩论过程记录">
-              {filteredStageEvents.length === 0 ? (
-                <Text type="secondary">尚无过程记录</Text>
-              ) : (
-                <Timeline
-                  items={filteredStageEvents.map((row) => ({
-                    children: `${row.timeText} [${row.kind}] ${row.text}${String((asRecord(row.data).trace_id || '')) ? ` trace=${String(asRecord(row.data).trace_id || '')}` : ''}`,
-                  }))}
-                />
-              )}
-            </Card>
-          </Space>
-        )}
-
-        {activeStep === 2 && (
-          <Space direction="vertical" size="large" style={{ width: '100%' }}>
-            <Card title="事件明细（流式对话）">
-              {renderEventFilters()}
-              {renderDialogueStream()}
-            </Card>
-
-            <Card title="辩论结论">
-              {debateResult ? (
-                <>
-                  <Paragraph>
-                    <Text strong>根因：</Text>
-                    {debateResult.root_cause || '-'}
-                  </Paragraph>
-                  <Paragraph>
-                    <Text strong>置信度：</Text>
-                    {(debateResult.confidence * 100).toFixed(1)}%
-                  </Paragraph>
-                  <Progress percent={Number((debateResult.confidence * 100).toFixed(1))} />
-                </>
-              ) : sessionDetail?.status === 'failed' ? (
-                <Alert
-                  type="error"
-                  showIcon
-                  message={`辩论失败：${extractSessionError(sessionDetail) || '请查看过程记录中的错误详情'}`}
-                />
-              ) : (
-                <Alert type="info" message="辩论执行中，请等待结果" />
-              )}
             </Card>
 
             <Card title="辩论轮次过程（可展开查看每轮输入输出）">
@@ -1335,12 +1476,12 @@ const IncidentPage: React.FC = () => {
               )}
             </Card>
 
-            <Card title="分析过程记录">
-              {filteredStageEvents.length === 0 ? (
+            <Card title="辩论过程记录">
+              {filteredDebateEvents.length === 0 ? (
                 <Text type="secondary">尚无过程记录</Text>
               ) : (
                 <Timeline
-                  items={filteredStageEvents.map((row) => ({
+                  items={filteredDebateEvents.map((row) => ({
                     children: `${row.timeText} [${row.kind}] ${row.text}${String((asRecord(row.data).trace_id || '')) ? ` trace=${String(asRecord(row.data).trace_id || '')}` : ''}`,
                   }))}
                 />
@@ -1351,85 +1492,61 @@ const IncidentPage: React.FC = () => {
 
         {activeStep === 3 && (
           <Space direction="vertical" size="large" style={{ width: '100%' }}>
-            <Card title="事件明细（流式对话）">
-              {renderEventFilters()}
-              {renderDialogueStream()}
-            </Card>
-
-            <Card
-              title="分析报告"
-              extra={
-                <Space>
-                  <Button icon={<ReloadOutlined />} loading={loading} onClick={regenerateReport}>
-                    重新生成
-                  </Button>
-                  <Button icon={<LinkOutlined />} loading={loading} onClick={generateShareLink}>
-                    生成分享链接
-                  </Button>
+            <Card title="主Agent结论">
+              {mainAgentConclusion ? (
+                <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                  <Tag color="processing">ProblemAnalysisAgent</Tag>
+                  <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
+                    {mainAgentConclusion.text}
+                  </Paragraph>
+                  <Text type="secondary">结论时间：{mainAgentConclusion.timeText}</Text>
                 </Space>
+              ) : sessionDetail?.status === 'failed' ? (
+                <Alert
+                  type="error"
+                  showIcon
+                  message={`辩论失败：${extractSessionError(sessionDetail) || '请查看辩论过程中的错误详情'}`}
+                />
+              ) : (
+                <Alert type="info" showIcon message="主Agent结论尚未生成，请先完成辩论过程" />
+              )}
+            </Card>
+            <Card
+              title="报告结果"
+              extra={
+                <Button loading={reportLoading} onClick={regenerateReport} disabled={!incidentId}>
+                  重新生成报告
+                </Button>
               }
             >
-              {shareUrl && (
-                <Alert type="success" message={`分享地址：${shareUrl}`} showIcon style={{ marginBottom: 12 }} />
-              )}
-              {!report?.content ? (
-                <Empty description="暂无报告" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-              ) : (
+              {reportResult ? (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                  <Card size="small" title="报告摘要">
-                    <Descriptions column={2} size="small">
-                      <Descriptions.Item label="根因摘要">
-                        {debateResult?.root_cause || '待生成'}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="置信度">
-                        {debateResult ? `${(debateResult.confidence * 100).toFixed(1)}%` : '-'}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="影响服务">
-                        {(debateResult?.impact_analysis?.affected_services || []).join(', ') || '-'}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="风险等级">
-                        {debateResult?.risk_assessment?.risk_level || '-'}
-                      </Descriptions.Item>
-                    </Descriptions>
-                  </Card>
-                  <Descriptions column={2} size="small">
-                    <Descriptions.Item label="报告ID">{report.report_id}</Descriptions.Item>
+                  <Descriptions size="small" column={2}>
+                    <Descriptions.Item label="报告ID">{reportResult.report_id}</Descriptions.Item>
                     <Descriptions.Item label="生成时间">
-                      {formatBeijingDateTime(report.generated_at)}
+                      {formatBeijingDateTime(reportResult.generated_at)}
                     </Descriptions.Item>
-                    <Descriptions.Item label="格式">{report.format}</Descriptions.Item>
-                    <Descriptions.Item label="关联会话">{report.debate_session_id || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="格式">{reportResult.format}</Descriptions.Item>
+                    <Descriptions.Item label="会话ID">
+                      {reportResult.debate_session_id || sessionId || '-'}
+                    </Descriptions.Item>
                   </Descriptions>
-                  {reportSections.map((section, index) => (
-                    <Card key={`${section.title}_${index}`} size="small" title={section.title}>
-                      {renderReportSectionBody(section.lines)}
-                    </Card>
-                  ))}
+                  {reportSections.length === 0 ? (
+                    <Alert type="info" showIcon message="报告内容为空，请点击“重新生成报告”" />
+                  ) : (
+                    <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                      {reportSections.map((section, index) => (
+                        <Card key={`${section.title}_${index}`} size="small" title={section.title}>
+                          <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
+                            {section.body}
+                          </Paragraph>
+                        </Card>
+                      ))}
+                    </Space>
+                  )}
                 </Space>
-              )}
-            </Card>
-            <Card title="资产融合结果">
-              {fusion ? (
-                <Descriptions column={2}>
-                  <Descriptions.Item label="运行态资产">{fusion.runtime_assets.length}</Descriptions.Item>
-                  <Descriptions.Item label="开发态资产">{fusion.dev_assets.length}</Descriptions.Item>
-                  <Descriptions.Item label="设计态资产">{fusion.design_assets.length}</Descriptions.Item>
-                  <Descriptions.Item label="关联关系">{fusion.relationships.length}</Descriptions.Item>
-                </Descriptions>
               ) : (
-                <Text type="secondary">暂无融合结果</Text>
-              )}
-            </Card>
-
-            <Card title="报告阶段过程记录">
-              {filteredStageEvents.length === 0 ? (
-                <Text type="secondary">尚无过程记录</Text>
-              ) : (
-                <Timeline
-                  items={filteredStageEvents.map((row) => ({
-                    children: `${row.timeText} [${row.kind}] ${row.text}${String((asRecord(row.data).trace_id || '')) ? ` trace=${String(asRecord(row.data).trace_id || '')}` : ''}`,
-                  }))}
-                />
+                <Alert type="info" showIcon message="暂未生成报告，请先完成辩论或点击“重新生成报告”" />
               )}
             </Card>
           </Space>

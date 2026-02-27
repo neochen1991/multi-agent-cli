@@ -34,6 +34,7 @@ export interface Incident {
   debate_session_id?: string;
   created_at: string;
   updated_at: string;
+  resolved_at?: string;
 }
 
 export interface DebateRound {
@@ -160,8 +161,16 @@ export const incidentApi = {
     const { data } = await api.post<Incident>('/incidents/', payload);
     return data;
   },
-  async list(page = 1, pageSize = 20): Promise<{ items: Incident[]; total: number }> {
-    const { data } = await api.get('/incidents/', { params: { page, page_size: pageSize } });
+  async list(
+    page = 1,
+    pageSize = 20,
+    filters?: { status?: string; severity?: string; service_name?: string },
+  ): Promise<{ items: Incident[]; total: number }> {
+    const params: Record<string, string | number> = { page, page_size: pageSize };
+    if (filters?.status) params.status = filters.status;
+    if (filters?.severity) params.severity = filters.severity;
+    if (filters?.service_name) params.service_name = filters.service_name;
+    const { data } = await api.get('/incidents/', { params });
     return data;
   },
   async get(incidentId: string): Promise<Incident> {

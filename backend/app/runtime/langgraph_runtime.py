@@ -13,16 +13,10 @@ from uuid import uuid4
 import structlog
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import END, START, StateGraph
 
 from app.config import settings
-from app.core.event_schema import enrich_event
+from app.runtime.langgraph.builder import GraphBuilder
 from app.runtime.langgraph.prompts import (
-    build_agent_prompt as build_agent_prompt_template,
-    build_collaboration_prompt as build_collaboration_prompt_template,
-    build_peer_driven_prompt as build_peer_driven_prompt_template,
-    build_problem_analysis_commander_prompt as build_problem_analysis_commander_prompt_template,
-    build_problem_analysis_supervisor_prompt as build_problem_analysis_supervisor_prompt_template,
     coordinator_command_schema as coordinator_command_schema_template,
     judge_output_schema as judge_output_schema_template,
 )
@@ -32,7 +26,31 @@ from app.runtime.langgraph.parsers import (
     normalize_judge_output,
     normalize_normal_output,
 )
-from app.runtime.langgraph.execution import call_agent as execute_runtime_agent_call
+from app.runtime.langgraph.context_builders import (
+    collect_peer_items_from_cards as collect_peer_items_from_cards_ctx,
+    collect_peer_items_from_dialogue as collect_peer_items_from_dialogue_ctx,
+    coordination_peer_items as coordination_peer_items_ctx,
+    history_items_for_agent_prompt as history_items_for_agent_prompt_ctx,
+    peer_items_for_collaboration_prompt as peer_items_for_collaboration_prompt_ctx,
+    supervisor_recent_messages as supervisor_recent_messages_ctx,
+)
+from app.runtime.langgraph.agent_runner import AgentRunner
+from app.runtime.langgraph.event_dispatcher import EventDispatcher
+from app.runtime.langgraph.message_ops import (
+    dedupe_new_messages as dedupe_new_messages_ops,
+    merge_round_and_message_cards as merge_round_and_message_cards_ops,
+    message_signature as message_signature_ops,
+    messages_to_cards as messages_to_cards_ops,
+)
+from app.runtime.langgraph.prompt_builder import PromptBuilder
+from app.runtime.langgraph.phase_executor import PhaseExecutor
+from app.runtime.langgraph.routing_strategy import HybridRouter
+from app.runtime.langgraph.mailbox import (
+    clone_mailbox,
+    compact_mailbox,
+    dequeue_messages,
+    enqueue_message,
+)
 from app.runtime.langgraph.routing import (
     agent_from_step as agent_from_step_route,
     fallback_supervisor_route as fallback_supervisor_route_helper,
@@ -45,13 +63,6 @@ from app.runtime.langgraph.routing import (
     supervisor_step_to_node as supervisor_step_to_node_route,
 )
 from app.runtime.langgraph.nodes import (
-    build_agent_node,
-    build_finalize_node,
-    build_init_session_node,
-    build_phase_handler_node,
-    build_round_evaluate_node,
-    build_round_start_node,
-    build_supervisor_node,
     execute_supervisor_decide,
     execute_single_phase_agent,
 )
@@ -59,8 +70,13 @@ from app.runtime.langgraph.specs import (
     agent_sequence as build_agent_sequence,
     problem_analysis_agent_spec as build_problem_analysis_agent_spec,
 )
-from app.runtime.langgraph.state import AgentSpec, DebateExecState as _DebateExecState, DebateTurn
-from app.runtime.messages import AgentEvidence, FinalVerdict, RoundCheckpoint
+from app.runtime.langgraph.state import (
+    AgentSpec,
+    DebateExecState as _DebateExecState,
+    DebateTurn,
+    structured_state_snapshot,
+)
+from app.runtime.messages import AgentEvidence, AgentMessage, FinalVerdict, RoundCheckpoint
 from app.runtime.session_store import runtime_session_store
 
 logger = structlog.get_logger()
@@ -87,8 +103,22 @@ class LangGraphRuntimeOrchestrator:
         self.turns: List[DebateTurn] = []
         self._active_round_commands: Dict[str, Dict[str, Any]] = {}
         self._event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
-        self._llm_semaphore = asyncio.Semaphore(max(1, int(settings.LLM_MAX_CONCURRENCY or 1)))
+        self._event_dispatcher = EventDispatcher()
+        self._agent_runner = AgentRunner(self)
+        self._routing_strategy = HybridRouter()
+        self._agent_factory = None
+        self._llm_semaphore_limit = max(1, int(settings.LLM_MAX_CONCURRENCY or 1))
+        self._llm_semaphore: Optional[asyncio.Semaphore] = None
+        self._llm_semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
         self._graph_checkpointer = MemorySaver()
+        self._prompt_builder = PromptBuilder(
+            max_rounds=self.max_rounds,
+            max_history_items=self.MAX_HISTORY_ITEMS,
+            to_json=self._to_compact_json,
+            derive_conversation_state_with_context=self._derive_conversation_state_with_context,
+        )
+        self._phase_executor = PhaseExecutor(self)
+
         logger.info(
             "langgraph_runtime_orchestrator_initialized",
             model=settings.llm_model,
@@ -96,6 +126,24 @@ class LangGraphRuntimeOrchestrator:
             max_rounds=max_rounds,
             consensus_threshold=consensus_threshold,
         )
+
+    def _get_llm_semaphore(self) -> asyncio.Semaphore:
+        loop = asyncio.get_running_loop()
+        if self._llm_semaphore is None or self._llm_semaphore_loop is not loop:
+            self._llm_semaphore = asyncio.Semaphore(self._llm_semaphore_limit)
+            self._llm_semaphore_loop = loop
+        return self._llm_semaphore
+
+    def _get_agent_factory(self):
+        if self._agent_factory is not None:
+            return self._agent_factory
+        try:
+            from app.runtime.agents.factory import AgentFactory
+        except Exception:
+            self._agent_factory = None
+            return None
+        self._agent_factory = AgentFactory()
+        return self._agent_factory
 
     @staticmethod
     def _is_rate_limited_error(error_text: str) -> bool:
@@ -117,6 +165,11 @@ class LangGraphRuntimeOrchestrator:
         self._event_callback = event_callback
         self.session_id = f"ags_{uuid4().hex[:20]}"
         self.trace_id = str(context.get("trace_id") or "")
+        self._event_dispatcher.bind(
+            trace_id=self.trace_id,
+            session_id=str(self.session_id or ""),
+            callback=event_callback,
+        )
         context_summary = {
             "log_excerpt": str(context.get("log_content") or "")[:1400],
             "parsed_data": context.get("parsed_data") or {},
@@ -126,58 +179,8 @@ class LangGraphRuntimeOrchestrator:
             "design_assets_count": len(context.get("design_assets") or []),
         }
 
-        graph = StateGraph(_DebateExecState)
-        graph.add_node("init_session", build_init_session_node(self))
-        graph.add_node("round_start", build_round_start_node(self))
-        graph.add_node("supervisor_decide", build_supervisor_node(self))
-        graph.add_node("analysis_parallel_node", build_phase_handler_node(self, "_graph_analysis_parallel"))
-        graph.add_node(
-            "analysis_collaboration_node",
-            build_phase_handler_node(self, "_graph_analysis_collaboration"),
-        )
-        graph.add_node("log_agent_node", build_agent_node(self, "LogAgent"))
-        graph.add_node("domain_agent_node", build_agent_node(self, "DomainAgent"))
-        graph.add_node("code_agent_node", build_agent_node(self, "CodeAgent"))
-        graph.add_node("critic_agent_node", build_agent_node(self, "CriticAgent"))
-        graph.add_node("rebuttal_agent_node", build_agent_node(self, "RebuttalAgent"))
-        graph.add_node("judge_agent_node", build_agent_node(self, "JudgeAgent"))
-        graph.add_node("round_evaluate", build_round_evaluate_node(self))
-        graph.add_node("finalize", build_finalize_node(self))
-        graph.add_edge(START, "init_session")
-        graph.add_edge("init_session", "round_start")
-        graph.add_edge("round_start", "supervisor_decide")
-        graph.add_conditional_edges(
-            "supervisor_decide",
-            self._route_after_supervisor_decide,
-            {
-                "analysis_parallel_node": "analysis_parallel_node",
-                "analysis_collaboration_node": "analysis_collaboration_node",
-                "log_agent_node": "log_agent_node",
-                "domain_agent_node": "domain_agent_node",
-                "code_agent_node": "code_agent_node",
-                "critic_agent_node": "critic_agent_node",
-                "rebuttal_agent_node": "rebuttal_agent_node",
-                "judge_agent_node": "judge_agent_node",
-                "round_evaluate": "round_evaluate",
-            },
-        )
-        graph.add_edge("analysis_parallel_node", "supervisor_decide")
-        graph.add_edge("analysis_collaboration_node", "supervisor_decide")
-        graph.add_edge("log_agent_node", "supervisor_decide")
-        graph.add_edge("domain_agent_node", "supervisor_decide")
-        graph.add_edge("code_agent_node", "supervisor_decide")
-        graph.add_edge("critic_agent_node", "supervisor_decide")
-        graph.add_edge("rebuttal_agent_node", "supervisor_decide")
-        graph.add_edge("judge_agent_node", "supervisor_decide")
-        graph.add_conditional_edges(
-            "round_evaluate",
-            self._route_after_round_evaluate,
-            {
-                "round_start": "round_start",
-                "finalize": "finalize",
-            },
-        )
-        graph.add_edge("finalize", END)
+        graph_builder = GraphBuilder(self)
+        graph = graph_builder.build(self._agent_sequence())
         app = graph.compile(checkpointer=self._graph_checkpointer)
 
         try:
@@ -208,7 +211,7 @@ class LangGraphRuntimeOrchestrator:
                 "mode": "langgraph_runtime",
             }
         )
-        return {
+        init_state = {
             "history_cards": [],
             "messages": [],
             "claims": [],
@@ -221,12 +224,14 @@ class LangGraphRuntimeOrchestrator:
             "agent_commands": {},
             "next_step": "",
             "round_start_turn_index": 0,
+            "agent_mailbox": {},
             "discussion_step_count": 0,
             "max_discussion_steps": self.MAX_DISCUSSION_STEPS_PER_ROUND,
             "supervisor_stop_requested": False,
             "supervisor_stop_reason": "",
             "supervisor_notes": [],
         }
+        return {**init_state, **structured_state_snapshot(init_state)}
 
     def _route_after_analysis_parallel(self, state: _DebateExecState) -> str:
         return "analysis_collaboration" if settings.DEBATE_ENABLE_COLLABORATION else "critic"
@@ -268,6 +273,19 @@ class LangGraphRuntimeOrchestrator:
             return history_cards
         # round_start_turn_index is indexed against self.turns; cards track the same append order.
         return history_cards[start_index:]
+
+    def _messages_to_cards(
+        self,
+        messages: List[Any],
+        *,
+        limit: int = 12,
+    ) -> List[AgentEvidence]:
+        return messages_to_cards_ops(messages, limit=limit)
+
+    def _round_cards_for_routing(self, state: _DebateExecState) -> List[AgentEvidence]:
+        round_cards = self._round_cards_from_state(state)
+        message_cards = self._messages_to_cards(list(state.get("messages") or []), limit=12)
+        return merge_round_and_message_cards_ops(round_cards, message_cards, limit=20)
 
     def _recent_judge_turn(self, round_turns: List[DebateTurn]) -> Optional[DebateTurn]:
         for turn in reversed(round_turns):
@@ -415,6 +433,16 @@ class LangGraphRuntimeOrchestrator:
         items.reverse()
         return items
 
+    def _message_signature(self, msg: Any) -> str:
+        return message_signature_ops(msg)
+
+    def _dedupe_new_messages(
+        self,
+        existing_messages: List[Any],
+        new_messages: List[Any],
+    ) -> List[Any]:
+        return dedupe_new_messages_ops(existing_messages, new_messages)
+
     def _message_deltas_from_cards(self, cards: List[AgentEvidence]) -> List[AIMessage]:
         deltas: List[AIMessage] = []
         for card in cards:
@@ -424,17 +452,52 @@ class LangGraphRuntimeOrchestrator:
         return deltas
 
     def _derive_conversation_state(self, history_cards: List[AgentEvidence]) -> Dict[str, Any]:
+        return self._derive_conversation_state_with_context(history_cards)
+
+    def _derive_conversation_state_with_context(
+        self,
+        history_cards: List[AgentEvidence],
+        *,
+        messages: Optional[List[Any]] = None,
+        existing_agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         claims: List[Dict[str, Any]] = []
         open_questions: List[str] = []
-        agent_outputs: Dict[str, Dict[str, Any]] = {}
-        for card in history_cards:
+        agent_outputs: Dict[str, Dict[str, Any]] = {
+            str(name or "").strip(): (payload if isinstance(payload, dict) else {})
+            for name, payload in dict(existing_agent_outputs or {}).items()
+            if str(name or "").strip()
+        }
+        cards = list(history_cards or [])
+        if messages:
+            cards.extend(self._messages_to_cards(messages, limit=12))
+        merged_cards: List[AgentEvidence] = []
+        seen_card_sig: set[tuple[str, str]] = set()
+        for card in cards:
+            sig = (
+                str(card.agent_name or "").strip(),
+                str(card.conclusion or "").strip()[:120] or str(card.summary or "").strip()[:120],
+            )
+            if sig in seen_card_sig:
+                continue
+            seen_card_sig.add(sig)
+            merged_cards.append(card)
+
+        for card in merged_cards:
             output = card.raw_output if isinstance(getattr(card, "raw_output", None), dict) else {}
-            agent_outputs[card.agent_name] = output
+            name = str(card.agent_name or "").strip()
+            if not name:
+                continue
+            if output:
+                previous = agent_outputs.get(name) or {}
+                agent_outputs[name] = {**previous, **output}
+            else:
+                agent_outputs.setdefault(name, {})
             conclusion = str(card.conclusion or output.get("conclusion") or "").strip()
             if conclusion:
                 claims.append(
                     {
-                        "agent_name": card.agent_name,
+                        "agent_name": name,
                         "phase": card.phase,
                         "round_number": None,
                         "conclusion": conclusion,
@@ -470,21 +533,37 @@ class LangGraphRuntimeOrchestrator:
     ) -> _DebateExecState:
         prev_history_cards = list(state.get("history_cards") or [])
         next_history_cards = list((result or {}).get("history_cards") or state.get("history_cards") or [])
-        message_deltas = self._message_deltas_from_cards(next_history_cards[len(prev_history_cards):])
-        return {
+        new_cards = next_history_cards[len(prev_history_cards):]
+        # Count only actual new agent evidence turns as discussion progress.
+        step_delta = len(new_cards)
+        explicit_messages = list((result or {}).get("messages") or [])
+        derived_messages = self._message_deltas_from_cards(new_cards) if not explicit_messages else []
+        new_messages = explicit_messages or derived_messages
+        deduped_messages = self._dedupe_new_messages(
+            existing_messages=list(state.get("messages") or []),
+            new_messages=new_messages,
+        )
+        merged_messages = list(state.get("messages") or []) + list(deduped_messages or [])
+        convo_state = self._derive_conversation_state_with_context(
+            next_history_cards,
+            messages=merged_messages,
+            existing_agent_outputs=dict(state.get("agent_outputs") or {}),
+        )
+        next_state = {
             **(result or {}),
             "next_step": "",
-            "discussion_step_count": int(state.get("discussion_step_count") or 0) + 1,
-            **({"messages": message_deltas} if message_deltas else {}),
-            **self._derive_conversation_state(next_history_cards),
+            "discussion_step_count": int(state.get("discussion_step_count") or 0) + step_delta,
+            **({"messages": deduped_messages} if deduped_messages else {}),
+            **convo_state,
         }
+        merged_preview = {**dict(state), **next_state}
+        return {**next_state, **structured_state_snapshot(merged_preview)}
 
     async def _graph_round_start(self, state: _DebateExecState) -> _DebateExecState:
         current_round = int(state.get("current_round") or 0) + 1
         if current_round > max(1, self.max_rounds):
             return {"continue_next_round": False}
         history_cards = list(state.get("history_cards") or [])
-        prev_history_count = len(history_cards)
         dialogue_items = self._dialogue_items_from_messages(
             list(state.get("messages") or []),
             limit=4,
@@ -505,32 +584,60 @@ class LangGraphRuntimeOrchestrator:
             compact_context=compact_context,
             history_cards=history_cards,
             dialogue_items=dialogue_items,
+            existing_agent_outputs=dict(state.get("agent_outputs") or {}),
         )
         commands = dict(commander_result.get("commands") or {})
         self._active_round_commands = commands
+        mailbox = clone_mailbox(state.get("agent_mailbox") or {})
+        for target, command in commands.items():
+            command_text = str((command or {}).get("task") or "").strip()
+            focus = str((command or {}).get("focus") or "").strip()
+            expected = str((command or {}).get("expected_output") or "").strip()
+            enqueue_message(
+                mailbox,
+                receiver=target,
+                message=AgentMessage(
+                    sender="ProblemAnalysisAgent",
+                    receiver=target,
+                    message_type="command",
+                    content={
+                        "task": command_text,
+                        "focus": focus,
+                        "expected_output": expected,
+                    },
+                ),
+            )
         preseed_route = self._route_from_commander_output(
             payload=commander_result,
             state=state,
-            round_cards=self._round_cards_from_state({"history_cards": history_cards, "round_start_turn_index": len(self.turns) - 1}),
+            round_cards=self._round_cards_for_routing(
+                {
+                    "history_cards": history_cards,
+                    "messages": list(state.get("messages") or []),
+                    "round_start_turn_index": len(self.turns) - 1,
+                }
+            ),
         )
-        return {
+        next_state = {
             "current_round": current_round,
             "continue_next_round": False,
             "history_cards": history_cards,
             "agent_commands": commands,
+            "agent_mailbox": compact_mailbox(mailbox),
             "next_step": str(preseed_route.get("next_step") or ""),
             "round_start_turn_index": len(self.turns),
             "discussion_step_count": 0,
             "max_discussion_steps": self._round_discussion_budget(),
             "supervisor_stop_requested": bool(preseed_route.get("should_stop") or False),
             "supervisor_stop_reason": str(preseed_route.get("stop_reason") or ""),
-            **(
-                {"messages": self._message_deltas_from_cards(history_cards[prev_history_count:])}
-                if len(history_cards) > prev_history_count
-                else {}
+            **self._derive_conversation_state_with_context(
+                history_cards,
+                messages=list(state.get("messages") or []),
+                existing_agent_outputs=dict(state.get("agent_outputs") or {}),
             ),
-            **self._derive_conversation_state(history_cards),
         }
+        merged_preview = {**dict(state), **next_state}
+        return {**next_state, **structured_state_snapshot(merged_preview)}
 
     async def _graph_analysis_parallel(self, state: _DebateExecState) -> _DebateExecState:
         loop_round = int(state.get("current_round") or 1)
@@ -542,14 +649,16 @@ class LangGraphRuntimeOrchestrator:
             char_budget=520,
         )
         compact_context = self._compact_round_context(context_summary)
+        agent_mailbox = clone_mailbox(state.get("agent_mailbox") or {})
         await self._run_parallel_analysis_phase(
             loop_round=loop_round,
             compact_context=compact_context,
             history_cards=history_cards,
             agent_commands=dict(state.get("agent_commands") or {}),
             dialogue_items=dialogue_items,
+            agent_mailbox=agent_mailbox,
         )
-        return {"history_cards": history_cards}
+        return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
 
     async def _graph_analysis_collaboration(self, state: _DebateExecState) -> _DebateExecState:
         if not settings.DEBATE_ENABLE_COLLABORATION:
@@ -563,13 +672,15 @@ class LangGraphRuntimeOrchestrator:
             char_budget=620,
         )
         compact_context = self._compact_round_context(context_summary)
+        agent_mailbox = clone_mailbox(state.get("agent_mailbox") or {})
         await self._run_collaboration_phase(
             loop_round=loop_round,
             compact_context=compact_context,
             history_cards=history_cards,
             dialogue_items=dialogue_items,
+            agent_mailbox=agent_mailbox,
         )
-        return {"history_cards": history_cards}
+        return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
 
     async def _graph_critic(self, state: _DebateExecState) -> _DebateExecState:
         if not settings.DEBATE_ENABLE_CRITIQUE:
@@ -583,7 +694,9 @@ class LangGraphRuntimeOrchestrator:
             char_budget=620,
         )
         compact_context = self._compact_round_context(context_summary)
-        await execute_single_phase_agent(
+        agent_mailbox = clone_mailbox(state.get("agent_mailbox") or {})
+        inbox_messages, agent_mailbox = dequeue_messages(agent_mailbox, receiver="CriticAgent")
+        execution_result = await execute_single_phase_agent(
             self,
             agent_name="CriticAgent",
             loop_round=loop_round,
@@ -591,8 +704,11 @@ class LangGraphRuntimeOrchestrator:
             history_cards=history_cards,
             agent_commands=dict(state.get("agent_commands") or {}),
             dialogue_items=dialogue_items,
+            inbox_messages=inbox_messages,
+            agent_mailbox=agent_mailbox,
         )
-        return {"history_cards": history_cards}
+        agent_mailbox = clone_mailbox(execution_result.get("agent_mailbox") or agent_mailbox)
+        return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
 
     async def _graph_rebuttal(self, state: _DebateExecState) -> _DebateExecState:
         if not settings.DEBATE_ENABLE_CRITIQUE:
@@ -606,7 +722,9 @@ class LangGraphRuntimeOrchestrator:
             char_budget=620,
         )
         compact_context = self._compact_round_context(context_summary)
-        await execute_single_phase_agent(
+        agent_mailbox = clone_mailbox(state.get("agent_mailbox") or {})
+        inbox_messages, agent_mailbox = dequeue_messages(agent_mailbox, receiver="RebuttalAgent")
+        execution_result = await execute_single_phase_agent(
             self,
             agent_name="RebuttalAgent",
             loop_round=loop_round,
@@ -614,8 +732,11 @@ class LangGraphRuntimeOrchestrator:
             history_cards=history_cards,
             agent_commands=dict(state.get("agent_commands") or {}),
             dialogue_items=dialogue_items,
+            inbox_messages=inbox_messages,
+            agent_mailbox=agent_mailbox,
         )
-        return {"history_cards": history_cards}
+        agent_mailbox = clone_mailbox(execution_result.get("agent_mailbox") or agent_mailbox)
+        return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
 
     async def _graph_judge(self, state: _DebateExecState) -> _DebateExecState:
         loop_round = int(state.get("current_round") or 1)
@@ -627,7 +748,9 @@ class LangGraphRuntimeOrchestrator:
             char_budget=760,
         )
         compact_context = self._compact_round_context(context_summary)
-        await execute_single_phase_agent(
+        agent_mailbox = clone_mailbox(state.get("agent_mailbox") or {})
+        inbox_messages, agent_mailbox = dequeue_messages(agent_mailbox, receiver="JudgeAgent")
+        execution_result = await execute_single_phase_agent(
             self,
             agent_name="JudgeAgent",
             loop_round=loop_round,
@@ -635,12 +758,15 @@ class LangGraphRuntimeOrchestrator:
             history_cards=history_cards,
             agent_commands=dict(state.get("agent_commands") or {}),
             dialogue_items=dialogue_items,
+            inbox_messages=inbox_messages,
+            agent_mailbox=agent_mailbox,
         )
+        agent_mailbox = clone_mailbox(execution_result.get("agent_mailbox") or agent_mailbox)
         await self._emit_problem_analysis_final_summary(
             loop_round=loop_round,
             history_cards=history_cards,
         )
-        return {"history_cards": history_cards}
+        return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
 
     async def _graph_round_evaluate(self, state: _DebateExecState) -> _DebateExecState:
         current_round = int(state.get("current_round") or 1)
@@ -691,14 +817,14 @@ class LangGraphRuntimeOrchestrator:
         context: Dict[str, Any],
         history_cards: List[AgentEvidence],
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
+        existing_agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> str:
-        return build_problem_analysis_commander_prompt_template(
+        return self._prompt_builder.build_commander_prompt(
             loop_round=loop_round,
-            max_rounds=self.max_rounds,
             context=context,
             history_cards=history_cards,
             dialogue_items=dialogue_items,
-            to_json=self._to_compact_json,
+            existing_agent_outputs=existing_agent_outputs,
         )
 
     def _build_problem_analysis_supervisor_prompt(
@@ -710,18 +836,45 @@ class LangGraphRuntimeOrchestrator:
         discussion_step_count: int,
         max_discussion_steps: int,
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
+        existing_agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> str:
-        open_questions = self._derive_conversation_state(history_cards).get("open_questions") or []
-        return build_problem_analysis_supervisor_prompt_template(
+        return self._prompt_builder.build_supervisor_prompt(
             loop_round=loop_round,
-            max_rounds=self.max_rounds,
             context=context,
+            history_cards=history_cards,
             round_history_cards=round_history_cards,
-            open_questions=open_questions,
-            dialogue_items=dialogue_items,
             discussion_step_count=discussion_step_count,
             max_discussion_steps=max_discussion_steps,
-            to_json=self._to_compact_json,
+            dialogue_items=dialogue_items,
+            existing_agent_outputs=existing_agent_outputs,
+        )
+
+    def _coordination_peer_items(
+        self,
+        history_cards: List[AgentEvidence],
+        dialogue_items: List[Dict[str, Any]],
+        existing_agent_outputs: Dict[str, Dict[str, Any]],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        # compatibility shim: moved to context_builders.coordination_peer_items
+        return coordination_peer_items_ctx(
+            history_cards=history_cards,
+            dialogue_items=dialogue_items,
+            existing_agent_outputs=existing_agent_outputs,
+            limit=limit,
+        )
+
+    def _supervisor_recent_messages(
+        self,
+        round_history_cards: List[AgentEvidence],
+        dialogue_items: List[Dict[str, Any]],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        # compatibility shim: moved to context_builders.supervisor_recent_messages
+        return supervisor_recent_messages_ctx(
+            round_history_cards=round_history_cards,
+            dialogue_items=dialogue_items,
+            limit=limit,
         )
 
     def _extract_agent_commands_from_payload(
@@ -783,6 +936,7 @@ class LangGraphRuntimeOrchestrator:
         compact_context: Dict[str, Any],
         history_cards: List[AgentEvidence],
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
+        existing_agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         spec = self._problem_analysis_agent_spec()
         round_number = len(self.turns) + 1
@@ -807,25 +961,15 @@ class LangGraphRuntimeOrchestrator:
             context=compact_context,
             history_cards=history_cards,
             dialogue_items=dialogue_items,
+            existing_agent_outputs=existing_agent_outputs,
         )
-        try:
-            turn = await execute_runtime_agent_call(
-                self,
-                spec=spec,
-                prompt=prompt,
-                round_number=round_number,
-                loop_round=loop_round,
-                history_cards_context=history_cards,
-            )
-        except Exception as exc:
-            error_text = str(exc).strip() or exc.__class__.__name__
-            turn = await self._create_fallback_turn(
-                spec=spec,
-                prompt=prompt,
-                round_number=round_number,
-                loop_round=loop_round,
-                error_text=error_text,
-            )
+        turn = await self._agent_runner.run_agent(
+            spec=spec,
+            prompt=prompt,
+            round_number=round_number,
+            loop_round=loop_round,
+            history_cards_context=history_cards,
+        )
         await self._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
 
         payload = turn.output_content if isinstance(turn.output_content, dict) else {}
@@ -847,6 +991,7 @@ class LangGraphRuntimeOrchestrator:
         discussion_step_count: int,
         max_discussion_steps: int,
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
+        existing_agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         spec = self._problem_analysis_agent_spec()
         round_number = len(self.turns) + 1
@@ -874,25 +1019,15 @@ class LangGraphRuntimeOrchestrator:
             dialogue_items=dialogue_items,
             discussion_step_count=discussion_step_count,
             max_discussion_steps=max_discussion_steps,
+            existing_agent_outputs=existing_agent_outputs,
         )
-        try:
-            turn = await execute_runtime_agent_call(
-                self,
-                spec=spec,
-                prompt=prompt,
-                round_number=round_number,
-                loop_round=loop_round,
-                history_cards_context=history_cards,
-            )
-        except Exception as exc:
-            error_text = str(exc).strip() or exc.__class__.__name__
-            turn = await self._create_fallback_turn(
-                spec=spec,
-                prompt=prompt,
-                round_number=round_number,
-                loop_round=loop_round,
-                error_text=error_text,
-            )
+        turn = await self._agent_runner.run_agent(
+            spec=spec,
+            prompt=prompt,
+            round_number=round_number,
+            loop_round=loop_round,
+            history_cards_context=history_cards,
+        )
         await self._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
         payload = turn.output_content if isinstance(turn.output_content, dict) else {}
         next_agent = str(payload.get("next_agent") or "").strip()
@@ -931,6 +1066,16 @@ class LangGraphRuntimeOrchestrator:
             message_parts.append(f"重点: {focus}")
         if expected:
             message_parts.append(f"输出: {expected}")
+        agent_message = AgentMessage(
+            sender=commander,
+            receiver=target,
+            message_type="command",
+            content={
+                "task": command_text,
+                "focus": focus,
+                "expected_output": expected,
+            },
+        )
         await self._emit_event(
             {
                 "type": "agent_command_issued",
@@ -941,6 +1086,7 @@ class LangGraphRuntimeOrchestrator:
                 "round_number": round_number,
                 "command": command_text,
                 "message": "\n".join(message_parts),
+                "agent_message": agent_message.model_dump(mode="json"),
                 "session_id": self.session_id,
             }
         )
@@ -955,6 +1101,16 @@ class LangGraphRuntimeOrchestrator:
     ) -> None:
         output = turn.output_content if isinstance(turn.output_content, dict) else {}
         feedback_text = str(output.get("chat_message") or output.get("conclusion") or "")[:300]
+        agent_message = AgentMessage(
+            sender=source,
+            receiver="ProblemAnalysisAgent",
+            message_type="feedback",
+            content={
+                "command": str(command.get("task") or "")[:240],
+                "feedback": feedback_text,
+                "confidence": float(turn.confidence or 0.0),
+            },
+        )
         await self._emit_event(
             {
                 "type": "agent_command_feedback",
@@ -966,6 +1122,7 @@ class LangGraphRuntimeOrchestrator:
                 "command": str(command.get("task") or "")[:240],
                 "feedback": feedback_text,
                 "message": f"{source} 已执行主Agent命令并提交结论",
+                "agent_message": agent_message.model_dump(mode="json"),
                 "session_id": self.session_id,
                 "confidence": float(turn.confidence or 0.0),
             }
@@ -1037,91 +1194,15 @@ class LangGraphRuntimeOrchestrator:
         history_cards: List[AgentEvidence],
         agent_commands: Optional[Dict[str, Dict[str, Any]]] = None,
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
+        agent_mailbox: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ) -> None:
-        parallel_names = set(self.PARALLEL_ANALYSIS_AGENTS)
-        parallel_specs = [
-            spec for spec in self._agent_sequence() if spec.phase == "analysis" and spec.name in parallel_names
-        ]
-        if not parallel_specs:
-            return
-        round_cursor = len(self.turns) + 1
-        parallel_inputs: List[tuple[AgentSpec, int, str, Dict[str, Any]]] = []
-        parallel_history = list(history_cards)
-        for spec in parallel_specs:
-            round_number = round_cursor
-            round_cursor += 1
-            assigned_command = (agent_commands or {}).get(spec.name)
-            prompt = self._build_agent_prompt(
-                spec=spec,
-                loop_round=loop_round,
-                context=compact_context,
-                history_cards=parallel_history,
-                assigned_command=assigned_command,
-                dialogue_items=dialogue_items,
-            )
-            parallel_inputs.append((spec, round_number, prompt, assigned_command or {}))
-
-        await self._emit_event(
-            {
-                "type": "parallel_analysis_started",
-                "phase": "analysis",
-                "loop_round": loop_round,
-                "session_id": self.session_id,
-                "agents": [spec.name for spec, _, _, _ in parallel_inputs],
-            }
-        )
-        for spec, round_number, _, assigned_command in parallel_inputs:
-            if assigned_command:
-                await self._emit_agent_command_issued(
-                    commander="ProblemAnalysisAgent",
-                    target=spec.name,
-                    loop_round=loop_round,
-                    round_number=round_number,
-                    command=assigned_command,
-                )
-        parallel_tasks = [
-            asyncio.create_task(
-                execute_runtime_agent_call(
-                    self,
-                    spec=spec,
-                    prompt=prompt,
-                    round_number=round_number,
-                    loop_round=loop_round,
-                    history_cards_context=history_cards,
-                )
-            )
-            for spec, round_number, prompt, _ in parallel_inputs
-        ]
-        parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
-        for (spec, round_number, prompt, assigned_command), result in zip(parallel_inputs, parallel_results):
-            if isinstance(result, Exception):
-                error_text = str(result).strip() or result.__class__.__name__
-                turn = await self._create_fallback_turn(
-                    spec=spec,
-                    prompt=prompt,
-                    round_number=round_number,
-                    loop_round=loop_round,
-                    error_text=error_text,
-                )
-            else:
-                turn = result
-            await self._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
-            if assigned_command:
-                await self._emit_agent_command_feedback(
-                    source=spec.name,
-                    loop_round=loop_round,
-                    round_number=round_number,
-                    command=assigned_command,
-                    turn=turn,
-                )
-        await self._emit_event(
-            {
-                "type": "parallel_analysis_completed",
-                "phase": "analysis",
-                "loop_round": loop_round,
-                "session_id": self.session_id,
-                "agents": [spec.name for spec, _, _, _ in parallel_inputs],
-            }
+        await self._phase_executor.run_parallel_analysis_phase(
+            loop_round=loop_round,
+            compact_context=compact_context,
+            history_cards=history_cards,
+            agent_commands=agent_commands,
+            dialogue_items=dialogue_items,
+            agent_mailbox=agent_mailbox,
         )
 
     async def _run_collaboration_phase(
@@ -1130,77 +1211,14 @@ class LangGraphRuntimeOrchestrator:
         compact_context: Dict[str, Any],
         history_cards: List[AgentEvidence],
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
+        agent_mailbox: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ) -> None:
-        parallel_specs = [
-            spec
-            for spec in self._agent_sequence()
-            if spec.phase == "analysis" and spec.name in set(self.PARALLEL_ANALYSIS_AGENTS)
-        ]
-        if not parallel_specs:
-            return
-        peer_cards = self._latest_cards_for_agents(
+        await self._phase_executor.run_collaboration_phase(
+            loop_round=loop_round,
+            compact_context=compact_context,
             history_cards=history_cards,
-            agent_names=[spec.name for spec in parallel_specs],
-            limit=self.COLLABORATION_PEER_LIMIT,
-        )
-        round_cursor = len(self.turns) + 1
-        collab_inputs: List[tuple[AgentSpec, int, str]] = []
-        for spec in parallel_specs:
-            round_number = round_cursor
-            round_cursor += 1
-            prompt = self._build_collaboration_prompt(
-                spec=spec,
-                loop_round=loop_round,
-                context=compact_context,
-                peer_cards=peer_cards,
-                dialogue_items=dialogue_items,
-            )
-            collab_inputs.append((spec, round_number, prompt))
-
-        await self._emit_event(
-            {
-                "type": "parallel_analysis_collaboration_started",
-                "phase": "analysis",
-                "loop_round": loop_round,
-                "session_id": self.session_id,
-                "agents": [spec.name for spec, _, _ in collab_inputs],
-            }
-        )
-        collab_tasks = [
-            asyncio.create_task(
-                execute_runtime_agent_call(
-                    self,
-                    spec=spec,
-                    prompt=prompt,
-                    round_number=round_number,
-                    loop_round=loop_round,
-                    history_cards_context=history_cards,
-                )
-            )
-            for spec, round_number, prompt in collab_inputs
-        ]
-        collab_results = await asyncio.gather(*collab_tasks, return_exceptions=True)
-        for (spec, round_number, prompt), result in zip(collab_inputs, collab_results):
-            if isinstance(result, Exception):
-                error_text = str(result).strip() or result.__class__.__name__
-                turn = await self._create_fallback_turn(
-                    spec=spec,
-                    prompt=prompt,
-                    round_number=round_number,
-                    loop_round=loop_round,
-                    error_text=error_text,
-                )
-            else:
-                turn = result
-            await self._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
-        await self._emit_event(
-            {
-                "type": "parallel_analysis_collaboration_completed",
-                "phase": "analysis",
-                "loop_round": loop_round,
-                "session_id": self.session_id,
-                "agents": [spec.name for spec, _, _ in collab_inputs],
-            }
+            dialogue_items=dialogue_items,
+            agent_mailbox=agent_mailbox,
         )
 
     async def _graph_finalize(self, state: _DebateExecState) -> _DebateExecState:
@@ -1226,7 +1244,9 @@ class LangGraphRuntimeOrchestrator:
                 "mode": "langgraph_runtime",
             }
         )
-        return {"final_payload": final_payload}
+        next_state = {"final_payload": final_payload}
+        merged_preview = {**dict(state), **next_state}
+        return {**next_state, **structured_state_snapshot(merged_preview)}
 
     def _build_peer_driven_prompt(
         self,
@@ -1236,25 +1256,30 @@ class LangGraphRuntimeOrchestrator:
         history_cards: List[AgentEvidence],
         assigned_command: Optional[Dict[str, Any]] = None,
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
+        inbox_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        peer_items = self._collect_peer_items(
-            history_cards=history_cards,
-            exclude_agent=spec.name,
-            limit=max(2, self.MAX_HISTORY_ITEMS + 1),
-        )
-        return build_peer_driven_prompt_template(
+        return self._prompt_builder.build_peer_driven_prompt(
             spec=spec,
             loop_round=loop_round,
-            max_rounds=self.max_rounds,
             context=context,
-            peer_items=peer_items,
+            history_cards=history_cards,
             assigned_command=assigned_command,
             dialogue_items=dialogue_items,
-            to_json=self._to_compact_json,
+            inbox_messages=inbox_messages,
         )
 
-    def _judge_output_schema(self) -> Dict[str, Any]:
-        return judge_output_schema_template()
+    def _collect_peer_items_from_dialogue(
+        self,
+        dialogue_items: List[Dict[str, Any]],
+        exclude_agent: str,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        # compatibility shim: moved to context_builders.collect_peer_items_from_dialogue
+        return collect_peer_items_from_dialogue_ctx(
+            dialogue_items=dialogue_items,
+            exclude_agent=exclude_agent,
+            limit=limit,
+        )
 
     def _collect_peer_items(
         self,
@@ -1262,23 +1287,15 @@ class LangGraphRuntimeOrchestrator:
         exclude_agent: str,
         limit: int,
     ) -> List[Dict[str, Any]]:
-        peers: List[Dict[str, Any]] = []
-        for card in reversed(history_cards):
-            if card.agent_name == exclude_agent:
-                continue
-            peers.append(
-                {
-                    "agent": card.agent_name,
-                    "phase": card.phase,
-                    "summary": card.summary[:72],
-                    "conclusion": card.conclusion[:100],
-                    "confidence": round(float(card.confidence), 3),
-                }
-            )
-            if len(peers) >= max(1, limit):
-                break
-        peers.reverse()
-        return peers
+        # compatibility shim: moved to context_builders.collect_peer_items_from_cards
+        return collect_peer_items_from_cards_ctx(
+            history_cards=history_cards,
+            exclude_agent=exclude_agent,
+            limit=limit,
+        )
+
+    def _judge_output_schema(self) -> Dict[str, Any]:
+        return judge_output_schema_template()
 
     def _latest_cards_for_agents(
         self,
@@ -1441,17 +1458,16 @@ class LangGraphRuntimeOrchestrator:
         history_cards: List[AgentEvidence],
         assigned_command: Optional[Dict[str, Any]] = None,
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
+        inbox_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        return build_agent_prompt_template(
+        return self._prompt_builder.build_agent_prompt(
             spec=spec,
             loop_round=loop_round,
-            max_rounds=self.max_rounds,
-            max_history_items=self.MAX_HISTORY_ITEMS,
             context=context,
             history_cards=history_cards,
             assigned_command=assigned_command,
             dialogue_items=dialogue_items,
-            to_json=self._to_compact_json,
+            inbox_messages=inbox_messages,
         )
 
     def _build_collaboration_prompt(
@@ -1462,16 +1478,48 @@ class LangGraphRuntimeOrchestrator:
         peer_cards: List[AgentEvidence],
         assigned_command: Optional[Dict[str, Any]] = None,
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
+        inbox_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        return build_collaboration_prompt_template(
+        return self._prompt_builder.build_collaboration_prompt(
             spec=spec,
             loop_round=loop_round,
-            max_rounds=self.max_rounds,
             context=context,
             peer_cards=peer_cards,
             assigned_command=assigned_command,
             dialogue_items=dialogue_items,
-            to_json=self._to_compact_json,
+            inbox_messages=inbox_messages,
+        )
+
+    def _history_items_for_agent_prompt(
+        self,
+        *,
+        agent_name: str,
+        history_cards: List[AgentEvidence],
+        dialogue_items: List[Dict[str, Any]],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        # compatibility shim: moved to context_builders.history_items_for_agent_prompt
+        return history_items_for_agent_prompt_ctx(
+            agent_name=agent_name,
+            history_cards=history_cards,
+            dialogue_items=dialogue_items,
+            limit=limit,
+        )
+
+    def _peer_items_for_collaboration_prompt(
+        self,
+        *,
+        spec_name: str,
+        peer_cards: List[AgentEvidence],
+        dialogue_items: List[Dict[str, Any]],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        # compatibility shim: moved to context_builders.peer_items_for_collaboration_prompt
+        return peer_items_for_collaboration_prompt_ctx(
+            spec_name=spec_name,
+            peer_cards=peer_cards,
+            dialogue_items=dialogue_items,
+            limit=limit,
         )
 
     def _compact_round_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -1882,22 +1930,12 @@ class LangGraphRuntimeOrchestrator:
         return f"{base}/chat/completions"
 
     async def _emit_event(self, event: Dict[str, Any]) -> None:
-        event_payload = enrich_event(
-            event,
-            trace_id=self.trace_id or None,
-            default_phase=str(event.get("phase") or ""),
+        self._event_dispatcher.bind(
+            trace_id=self.trace_id,
+            session_id=str(self.session_id or ""),
+            callback=self._event_callback,
         )
-        if self.session_id and "session_id" not in event_payload:
-            event_payload["session_id"] = self.session_id
-        await runtime_session_store.append_event(
-            self.session_id or "unknown",
-            event_payload,
-        )
-        if not self._event_callback:
-            return
-        maybe = self._event_callback(event_payload)
-        if asyncio.iscoroutine(maybe):
-            await maybe
+        await self._event_dispatcher.emit(event)
 
 
 langgraph_runtime_orchestrator = LangGraphRuntimeOrchestrator(

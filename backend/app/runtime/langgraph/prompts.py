@@ -72,20 +72,22 @@ def build_problem_analysis_commander_prompt(
     loop_round: int,
     max_rounds: int,
     context: Dict[str, Any],
-    history_cards: List[AgentEvidence],
+    history_cards: Optional[List[AgentEvidence]] = None,
+    peer_items: Optional[List[Dict[str, Any]]] = None,
     dialogue_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
 ) -> str:
-    peer_items = [
-        {
-            "agent": card.agent_name,
-            "phase": card.phase,
-            "summary": card.summary[:100],
-            "conclusion": card.conclusion[:120],
-            "confidence": round(float(card.confidence or 0.0), 3),
-        }
-        for card in history_cards[-6:]
-    ]
+    if peer_items is None:
+        peer_items = [
+            {
+                "agent": card.agent_name,
+                "phase": card.phase,
+                "summary": card.summary[:100],
+                "conclusion": card.conclusion[:120],
+                "confidence": round(float(card.confidence or 0.0), 3),
+            }
+            for card in (history_cards or [])[-6:]
+        ]
     schema = coordinator_command_schema()
     dialogue_block = ""
     if dialogue_items:
@@ -108,22 +110,24 @@ def build_problem_analysis_supervisor_prompt(
     loop_round: int,
     max_rounds: int,
     context: Dict[str, Any],
-    round_history_cards: List[AgentEvidence],
+    round_history_cards: Optional[List[AgentEvidence]] = None,
+    recent_messages: Optional[List[Dict[str, Any]]] = None,
     open_questions: List[str],
     discussion_step_count: int,
     max_discussion_steps: int,
     dialogue_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
 ) -> str:
-    recent_messages = [
-        {
-            "agent": card.agent_name,
-            "phase": card.phase,
-            "conclusion": card.conclusion[:160],
-            "confidence": round(float(card.confidence or 0.0), 3),
-        }
-        for card in round_history_cards[-8:]
-    ]
+    if recent_messages is None:
+        recent_messages = [
+            {
+                "agent": card.agent_name,
+                "phase": card.phase,
+                "conclusion": card.conclusion[:160],
+                "confidence": round(float(card.confidence or 0.0), 3),
+            }
+            for card in (round_history_cards or [])[-8:]
+        ]
     schema = coordinator_command_schema()
     dialogue_block = ""
     if dialogue_items:
@@ -152,22 +156,25 @@ def build_agent_prompt(
     max_rounds: int,
     max_history_items: int,
     context: Dict[str, Any],
-    history_cards: List[AgentEvidence],
+    history_cards: Optional[List[AgentEvidence]] = None,
+    history_items: Optional[List[Dict[str, Any]]] = None,
     assigned_command: Optional[Dict[str, Any]],
     dialogue_items: Optional[List[Dict[str, Any]]] = None,
+    inbox_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
 ) -> str:
-    history_items = [
-        {
-            "agent": card.agent_name,
-            "phase": card.phase,
-            "summary": card.summary[:120],
-            "conclusion": card.conclusion[:140],
-            "evidence": card.evidence_chain[:2],
-            "confidence": round(float(card.confidence), 3),
-        }
-        for card in history_cards[-max_history_items:]
-    ]
+    if history_items is None:
+        history_items = [
+            {
+                "agent": card.agent_name,
+                "phase": card.phase,
+                "summary": card.summary[:120],
+                "conclusion": card.conclusion[:140],
+                "evidence": card.evidence_chain[:2],
+                "confidence": round(float(card.confidence), 3),
+            }
+            for card in (history_cards or [])[-max_history_items:]
+        ]
     output_schema = judge_output_schema() if spec.name == "JudgeAgent" else _normal_output_schema()
     output_constraints = (
         "action_items 最多 3 条，decision_rationale.reasoning 控制在 120 字内。\n\n"
@@ -183,6 +190,9 @@ def build_agent_prompt(
     dialogue_block = ""
     if dialogue_items:
         dialogue_block = f"最近对话消息：\n```json\n{to_json(dialogue_items[-8:])}\n```\n\n"
+    inbox_block = ""
+    if inbox_items:
+        inbox_block = f"你收到的消息（命令/反馈/证据）：\n```json\n{to_json(inbox_items[-8:])}\n```\n\n"
     return (
         f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段={spec.phase}。\n"
         "只需要基于核心观点与结论推理，不要复述全部历史，结论请简短。\n"
@@ -190,6 +200,7 @@ def build_agent_prompt(
         f"{output_constraints}"
         f"{command_block}"
         f"{dialogue_block}"
+        f"{inbox_block}"
         f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
         f"最近结论卡片：\n```json\n{to_json(history_items)}\n```\n\n"
         f"请仅输出 JSON，格式示例：\n```json\n{to_json(output_schema)}\n```"
@@ -202,21 +213,24 @@ def build_collaboration_prompt(
     loop_round: int,
     max_rounds: int,
     context: Dict[str, Any],
-    peer_cards: List[AgentEvidence],
+    peer_cards: Optional[List[AgentEvidence]] = None,
+    peer_items: Optional[List[Dict[str, Any]]] = None,
     assigned_command: Optional[Dict[str, Any]],
     dialogue_items: Optional[List[Dict[str, Any]]] = None,
+    inbox_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
 ) -> str:
-    peer_items = [
-        {
-            "agent": card.agent_name,
-            "summary": card.summary[:120],
-            "conclusion": card.conclusion[:160],
-            "confidence": round(float(card.confidence), 3),
-        }
-        for card in peer_cards
-        if card.agent_name != spec.name
-    ]
+    if peer_items is None:
+        peer_items = [
+            {
+                "agent": card.agent_name,
+                "summary": card.summary[:120],
+                "conclusion": card.conclusion[:160],
+                "confidence": round(float(card.confidence), 3),
+            }
+            for card in (peer_cards or [])
+            if card.agent_name != spec.name
+        ]
     command_block = ""
     if assigned_command:
         command_block = (
@@ -226,6 +240,9 @@ def build_collaboration_prompt(
     dialogue_block = ""
     if dialogue_items:
         dialogue_block = f"最近对话消息：\n```json\n{to_json(dialogue_items[-8:])}\n```\n\n"
+    inbox_block = ""
+    if inbox_items:
+        inbox_block = f"你收到的消息（命令/反馈/证据）：\n```json\n{to_json(inbox_items[-8:])}\n```\n\n"
     return (
         f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段=analysis。\n"
         "现在进入协同复核阶段：你必须基于其他 Agent 的结论进行交叉校验并修正自己的判断。\n"
@@ -236,6 +253,7 @@ def build_collaboration_prompt(
         "3) 仅输出 JSON，不要解释文本，保持精炼。\n\n"
         f"{command_block}"
         f"{dialogue_block}"
+        f"{inbox_block}"
         f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
         f"同伴结论：\n```json\n{to_json(peer_items)}\n```\n\n"
         f"输出格式：\n```json\n{to_json(_normal_output_schema())}\n```"
@@ -251,11 +269,15 @@ def build_peer_driven_prompt(
     peer_items: List[Dict[str, Any]],
     assigned_command: Optional[Dict[str, Any]],
     dialogue_items: Optional[List[Dict[str, Any]]] = None,
+    inbox_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
 ) -> str:
     dialogue_block = ""
     if dialogue_items:
         dialogue_block = f"最近对话消息：\n```json\n{to_json(dialogue_items[-10:])}\n```\n\n"
+    inbox_block = ""
+    if inbox_items:
+        inbox_block = f"你收到的消息（命令/反馈/证据）：\n```json\n{to_json(inbox_items[-10:])}\n```\n\n"
     if spec.name == "JudgeAgent":
         command_block = ""
         if assigned_command:
@@ -270,6 +292,7 @@ def build_peer_driven_prompt(
             "字段尽量精炼，action_items 最多 3 条。\n\n"
             f"{command_block}"
             f"{dialogue_block}"
+            f"{inbox_block}"
             f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
             f"同伴结论：\n```json\n{to_json(peer_items)}\n```\n\n"
             f"输出格式：\n```json\n{to_json(judge_output_schema())}\n```"
@@ -291,6 +314,7 @@ def build_peer_driven_prompt(
         "3) 仅输出 JSON，内容尽量简短。\n\n"
         f"{command_block}"
         f"{dialogue_block}"
+        f"{inbox_block}"
         f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
         f"同伴结论：\n```json\n{to_json(peer_items)}\n```\n\n"
         f"输出格式：\n```json\n{to_json(_normal_output_schema())}\n```"

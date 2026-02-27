@@ -5,7 +5,7 @@ LangGraph runtime message contracts.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +20,17 @@ class AgentEvidence(BaseModel):
     evidence_chain: List[str] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     raw_output: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentMessage(BaseModel):
+    """Explicit inter-agent message contract."""
+
+    sender: str
+    receiver: str = Field(default="broadcast")
+    message_type: Literal["evidence", "question", "conclusion", "command", "feedback"] = Field(
+        default="evidence"
+    )
+    content: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RoundCheckpoint(BaseModel):

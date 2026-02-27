@@ -24,7 +24,7 @@ from app.models.debate import (
     RiskAssessment,
 )
 from app.models.incident import Incident
-from app.flows.debate_flow import ai_debate_orchestrator
+from app.flows.debate_flow import create_ai_debate_orchestrator
 from app.flows.context import context_manager
 from app.services.asset_collection_service import asset_collection_service
 from app.services.asset_service import asset_service
@@ -274,7 +274,7 @@ class DebateService:
                 if bool(session.context.get("is_cancel_requested")):
                     raise asyncio.CancelledError("session cancel requested")
                 try:
-                    debate_result = await self._execute_ai_debate(
+                    debate_result, runtime_session_id = await self._execute_ai_debate(
                         session.context,
                         assets,
                         event_callback=_emit_and_record,
@@ -284,7 +284,7 @@ class DebateService:
                         debate_result
                     ):
                         raise RuntimeError("未获得有效大模型结论，已拒绝生成兜底结论")
-                    session.llm_session_id = getattr(ai_debate_orchestrator, "session_id", None)
+                    session.llm_session_id = runtime_session_id
                     break
                 except Exception as exc:
                     attempt += 1
@@ -361,7 +361,7 @@ class DebateService:
             session.rounds = [
                 DebateRound(
                     round_number=r.get("round_number", i),
-                    phase=DebatePhase(r.get("phase", "analysis")),
+                    phase=self._normalize_round_phase(r.get("phase", "analysis")),
                     agent_name=r.get("agent_name", ""),
                     agent_role=r.get("agent_role", ""),
                     model=r.get("model") or dict(settings.default_model_config),
@@ -500,6 +500,35 @@ class DebateService:
             await self._repository.save_session(session)
             raise
 
+    @staticmethod
+    def _normalize_round_phase(raw_phase: Any) -> DebatePhase:
+        """
+        Normalize runtime phase values into DebatePhase enum.
+
+        Runtime may emit internal phases like 'coordination' for orchestration
+        turns. API/session model stores only analysis/critique/rebuttal/judgment.
+        """
+        text = str(raw_phase or "").strip().lower()
+        mapping = {
+            "analysis": DebatePhase.ANALYSIS,
+            "analyzing": DebatePhase.ANALYSIS,
+            "coordination": DebatePhase.ANALYSIS,
+            "orchestration": DebatePhase.ANALYSIS,
+            "debating": DebatePhase.ANALYSIS,
+            "running": DebatePhase.ANALYSIS,
+            "critique": DebatePhase.CRITIQUE,
+            "critiquing": DebatePhase.CRITIQUE,
+            "rebuttal": DebatePhase.REBUTTAL,
+            "rebutting": DebatePhase.REBUTTAL,
+            "judgment": DebatePhase.JUDGMENT,
+            "judge": DebatePhase.JUDGMENT,
+            "judging": DebatePhase.JUDGMENT,
+        }
+        if text in mapping:
+            return mapping[text]
+        logger.warning("unknown_round_phase_fallback_to_analysis", raw_phase=raw_phase)
+        return DebatePhase.ANALYSIS
+
     async def cancel_session(self, session_id: str, reason: str = "manual_cancel") -> bool:
         session = await self._repository.get_session(session_id)
         if not session:
@@ -605,7 +634,7 @@ class DebateService:
         assets: Dict[str, Any],
         event_callback=None,
         session_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> tuple[Dict[str, Any], Optional[str]]:
         """
         执行AI辩论分析
         
@@ -635,9 +664,10 @@ class DebateService:
             max_rounds = int(settings.DEBATE_MAX_ROUNDS)
         max_rounds = max(1, min(8, max_rounds))
 
-        # 将配置下发到编排器
-        ai_debate_orchestrator.max_rounds = max_rounds
-        ai_debate_orchestrator.consensus_threshold = settings.DEBATE_CONSENSUS_THRESHOLD
+        orchestrator = create_ai_debate_orchestrator(
+            max_rounds=max_rounds,
+            consensus_threshold=settings.DEBATE_CONSENSUS_THRESHOLD,
+        )
 
         async def _forward_event(event: Dict[str, Any]):
             if session_id:
@@ -660,14 +690,14 @@ class DebateService:
         # 执行辩论流程
         debate_timeout = max(30, min(int(settings.DEBATE_TIMEOUT), 300))
         result = await asyncio.wait_for(
-            ai_debate_orchestrator.execute(
+            orchestrator.execute(
                 debate_context,
                 event_callback=_forward_event,
             ),
             timeout=debate_timeout,
         )
-        
-        return result
+
+        return result, getattr(orchestrator, "session_id", None)
 
     def _has_effective_llm_conclusion(self, debate_result: Dict[str, Any]) -> bool:
         if not isinstance(debate_result, dict):
