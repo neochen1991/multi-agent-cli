@@ -394,7 +394,9 @@ class DebateExecState(DebateMessagesState):
 
     # Agent 命令字典（合并）
     # 由Commander（ProblemAnalysisAgent）下发给各Agent的任务
-    agent_commands: Annotated[Dict[str, Dict[str, Any]], merge_agent_outputs]
+    # Commands are step-scoped planner outputs and should be replaced atomically.
+    # Using take_latest avoids stale command carry-over across steps.
+    agent_commands: Annotated[Dict[str, Dict[str, Any]], take_latest]
 
     # 讨论步数计数（取最新）
     # 节点返回绝对步数，避免 reducer 增量语义与节点更新语义冲突
@@ -661,6 +663,247 @@ def sync_structured_state(state_update: Mapping[str, Any]) -> Dict[str, Any]:
     return {**dict(state_update), **structured_state_snapshot(state_update)}
 
 
+# ============================================================================
+# State Accessor (Backward Compatibility Layer)
+# ============================================================================
+
+
+class StateAccessor:
+    """State accessor providing backward-compatible property access.
+
+    This class provides a clean interface for accessing state fields,
+    supporting both the old flat structure and the new nested structure.
+    It handles migration gracefully by checking both locations.
+    """
+
+    @staticmethod
+    def get_current_round(state: Dict[str, Any]) -> int:
+        """Get current round number.
+
+        Supports both:
+        - New: state["phase_state"]["current_round"]
+        - Old: state["current_round"]
+        """
+        if "phase_state" in state and isinstance(state.get("phase_state"), dict):
+            return int(state["phase_state"].get("current_round") or state.get("current_round", 1))
+        return int(state.get("current_round", 1))
+
+    @staticmethod
+    def set_current_round(state: Dict[str, Any], value: int) -> Dict[str, Any]:
+        """Set current round number in both locations."""
+        return {
+            "current_round": value,
+            "phase_state": {
+                **(state.get("phase_state") or {}),
+                "current_round": value,
+            },
+        }
+
+    @staticmethod
+    def get_discussion_step(state: Dict[str, Any]) -> int:
+        """Get discussion step count.
+
+        Supports both:
+        - New: state["routing_state"]["discussion_step_count"]
+        - Old: state["discussion_step_count"]
+        """
+        if "routing_state" in state and isinstance(state.get("routing_state"), dict):
+            return int(state["routing_state"].get("discussion_step_count") or state.get("discussion_step_count", 0))
+        return int(state.get("discussion_step_count", 0))
+
+    @staticmethod
+    def set_discussion_step(state: Dict[str, Any], value: int) -> Dict[str, Any]:
+        """Set discussion step count in both locations."""
+        return {
+            "discussion_step_count": value,
+            "routing_state": {
+                **(state.get("routing_state") or {}),
+                "discussion_step_count": value,
+            },
+        }
+
+    @staticmethod
+    def get_next_step(state: Dict[str, Any]) -> str:
+        """Get next step.
+
+        Supports both:
+        - New: state["routing_state"]["next_step"]
+        - Old: state["next_step"]
+        """
+        if "routing_state" in state and isinstance(state.get("routing_state"), dict):
+            return str(state["routing_state"].get("next_step") or state.get("next_step", ""))
+        return str(state.get("next_step", ""))
+
+    @staticmethod
+    def set_next_step(state: Dict[str, Any], value: str) -> Dict[str, Any]:
+        """Set next step in both locations."""
+        return {
+            "next_step": value,
+            "routing_state": {
+                **(state.get("routing_state") or {}),
+                "next_step": value,
+            },
+        }
+
+    @staticmethod
+    def get_should_stop(state: Dict[str, Any]) -> bool:
+        """Get stop flag.
+
+        Supports both:
+        - New: state["routing_state"]["supervisor_stop_requested"]
+        - Old: state["supervisor_stop_requested"]
+        """
+        if "routing_state" in state and isinstance(state.get("routing_state"), dict):
+            return bool(
+                state["routing_state"].get("supervisor_stop_requested")
+                or state.get("supervisor_stop_requested", False)
+            )
+        return bool(state.get("supervisor_stop_requested", False))
+
+    @staticmethod
+    def get_consensus_reached(state: Dict[str, Any]) -> bool:
+        """Get consensus flag.
+
+        Supports both:
+        - New: state["phase_state"]["consensus_reached"]
+        - Old: state["consensus_reached"]
+        """
+        if "phase_state" in state and isinstance(state.get("phase_state"), dict):
+            return bool(
+                state["phase_state"].get("consensus_reached")
+                or state.get("consensus_reached", False)
+            )
+        return bool(state.get("consensus_reached", False))
+
+    @staticmethod
+    def get_history_cards(state: Dict[str, Any]) -> List[AgentEvidence]:
+        """Get history cards.
+
+        Supports both:
+        - New: state["output_state"]["history_cards"]
+        - Old: state["history_cards"]
+        """
+        if "output_state" in state and isinstance(state.get("output_state"), dict):
+            cards = state["output_state"].get("history_cards")
+            if cards:
+                return list(cards)
+        return list(state.get("history_cards") or [])
+
+    @staticmethod
+    def get_agent_outputs(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """Get agent outputs.
+
+        Supports both:
+        - New: state["output_state"]["agent_outputs"]
+        - Old: state["agent_outputs"]
+        """
+        if "output_state" in state and isinstance(state.get("output_state"), dict):
+            outputs = state["output_state"].get("agent_outputs")
+            if outputs:
+                return dict(outputs)
+        return dict(state.get("agent_outputs") or {})
+
+    @staticmethod
+    def get_agent_mailbox(state: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+        """Get agent mailbox.
+
+        Supports both:
+        - New: state["routing_state"]["agent_mailbox"]
+        - Old: state["agent_mailbox"]
+        """
+        if "routing_state" in state and isinstance(state.get("routing_state"), dict):
+            mailbox = state["routing_state"].get("agent_mailbox")
+            if mailbox:
+                return dict(mailbox)
+        return dict(state.get("agent_mailbox") or {})
+
+    @staticmethod
+    def get_max_discussion_steps(state: Dict[str, Any], default: int = 12) -> int:
+        """Get max discussion steps.
+
+        Supports both:
+        - New: state["routing_state"]["max_discussion_steps"]
+        - Old: state["max_discussion_steps"]
+        """
+        if "routing_state" in state and isinstance(state.get("routing_state"), dict):
+            return int(state["routing_state"].get("max_discussion_steps") or state.get("max_discussion_steps", default))
+        return int(state.get("max_discussion_steps", default))
+
+    @staticmethod
+    def build_update(
+        state: Dict[str, Any],
+        *,
+        current_round: Optional[int] = None,
+        discussion_step: Optional[int] = None,
+        next_step: Optional[str] = None,
+        should_stop: Optional[bool] = None,
+        stop_reason: Optional[str] = None,
+        history_cards: Optional[List[AgentEvidence]] = None,
+        agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
+        agent_mailbox: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        consensus_reached: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Build a state update that writes to both flat and nested locations.
+
+        This method ensures backward compatibility by updating both
+        the flat fields and the nested structures.
+        """
+        result: Dict[str, Any] = {}
+
+        if current_round is not None:
+            result["current_round"] = current_round
+            result["phase_state"] = {
+                **(state.get("phase_state") or {}),
+                "current_round": current_round,
+            }
+
+        if discussion_step is not None:
+            result["discussion_step_count"] = discussion_step
+            result["routing_state"] = {
+                **(state.get("routing_state") or {}),
+                "discussion_step_count": discussion_step,
+            }
+
+        if next_step is not None:
+            result["next_step"] = next_step
+            routing_state = result.get("routing_state", state.get("routing_state") or {})
+            result["routing_state"] = {**routing_state, "next_step": next_step}
+
+        if should_stop is not None:
+            result["supervisor_stop_requested"] = should_stop
+            routing_state = result.get("routing_state", state.get("routing_state") or {})
+            result["routing_state"] = {**routing_state, "supervisor_stop_requested": should_stop}
+
+        if stop_reason is not None:
+            result["supervisor_stop_reason"] = stop_reason
+            routing_state = result.get("routing_state", state.get("routing_state") or {})
+            result["routing_state"] = {**routing_state, "supervisor_stop_reason": stop_reason}
+
+        if history_cards is not None:
+            result["history_cards"] = history_cards
+            result["output_state"] = {
+                **(state.get("output_state") or {}),
+                "history_cards": history_cards,
+            }
+
+        if agent_outputs is not None:
+            result["agent_outputs"] = agent_outputs
+            output_state = result.get("output_state", state.get("output_state") or {})
+            result["output_state"] = {**output_state, "agent_outputs": agent_outputs}
+
+        if agent_mailbox is not None:
+            result["agent_mailbox"] = agent_mailbox
+            routing_state = result.get("routing_state", state.get("routing_state") or {})
+            result["routing_state"] = {**routing_state, "agent_mailbox": agent_mailbox}
+
+        if consensus_reached is not None:
+            result["consensus_reached"] = consensus_reached
+            phase_state = result.get("phase_state", state.get("phase_state") or {})
+            result["phase_state"] = {**phase_state, "consensus_reached": consensus_reached}
+
+        return result
+
+
 __all__ = [
     # Reducers
     "merge_agent_outputs",
@@ -684,4 +927,6 @@ __all__ = [
     "get_state_summary",
     "structured_state_snapshot",
     "sync_structured_state",
+    # State Accessor
+    "StateAccessor",
 ]

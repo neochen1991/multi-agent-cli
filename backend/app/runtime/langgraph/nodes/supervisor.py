@@ -46,6 +46,21 @@ async def execute_supervisor_decide(orchestrator: Any, state: Dict[str, Any]) ->
         existing_agent_outputs=dict(state.get("agent_outputs") or {}),
     )
     next_step = str(route_decision.get("next_step") or "").strip()
+    # Loop guard: if supervisor keeps selecting the same non-judge step, force judge convergence.
+    existing_notes = list(state.get("supervisor_notes") or [])
+    recent_steps = [str((item or {}).get("next_step") or "").strip() for item in existing_notes[-3:]]
+    if (
+        next_step
+        and next_step not in ("speak:JudgeAgent", "JudgeAgent", "judge")
+        and len(recent_steps) == 3
+        and all(step == next_step for step in recent_steps)
+    ):
+        route_decision["next_step"] = "speak:JudgeAgent"
+        route_decision["should_stop"] = False
+        route_decision["stop_reason"] = ""
+        reason = str(route_decision.get("reason") or "").strip()
+        route_decision["reason"] = f"{reason}；检测到重复调度，强制切换JudgeAgent收敛".strip("；")
+        next_step = "speak:JudgeAgent"
     note = {
         "loop_round": loop_round,
         "discussion_step_count": discussion_step_count,
@@ -73,7 +88,7 @@ async def execute_supervisor_decide(orchestrator: Any, state: Dict[str, Any]) ->
             "claims_count": note["claims_count"],
         }
     )
-    notes = list(state.get("supervisor_notes") or [])
+    notes = existing_notes
     notes.append(note)
     result: Dict[str, Any] = {
         "history_cards": history_cards,

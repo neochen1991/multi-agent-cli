@@ -43,6 +43,7 @@ type EventRecord = {
 type DialogueMessage = {
   id: string;
   timeText: string;
+  eventTsMs?: number;
   agentName: string;
   side: 'agent' | 'system';
   phase: string;
@@ -85,6 +86,7 @@ const IncidentPage: React.FC = () => {
   const wsRef = useRef<WebSocket | null>(null);
   const pollingRef = useRef(false);
   const runningRef = useRef(false);
+  const assetMappingReadyRef = useRef(false);
   const streamTimersRef = useRef<Record<string, number>>({});
   const seenEventIdsRef = useRef<Set<string>>(new Set());
 
@@ -323,6 +325,51 @@ const IncidentPage: React.FC = () => {
     return source.trim();
   };
 
+  const normalizeForCompare = (value: string): string =>
+    String(value || '')
+      .toLowerCase()
+      .replace(/[^\u4e00-\u9fa5a-z0-9]/gi, '');
+
+  const isNearDuplicateText = (leftText: string, rightText: string): boolean => {
+    const left = normalizeForCompare(leftText);
+    const right = normalizeForCompare(rightText);
+    if (!left || !right) return false;
+    if (left === right) return true;
+    const minLen = Math.min(left.length, right.length);
+    const maxLen = Math.max(left.length, right.length);
+    if (minLen < 16) return false;
+    if (left.startsWith(right) || right.startsWith(left)) {
+      return minLen / maxLen >= 0.85;
+    }
+    return false;
+  };
+
+  const parseEventTimestampMs = (data: Record<string, unknown>): number | undefined => {
+    const raw = String(data.timestamp || '').trim();
+    if (!raw) return undefined;
+    const hasTimezone = /[zZ]|[+-]\d{2}:\d{2}$/.test(raw);
+    const normalized =
+      !hasTimezone && /^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(raw)
+        ? `${raw.replace(' ', 'T')}Z`
+        : raw;
+    const ms = Date.parse(normalized);
+    return Number.isNaN(ms) ? undefined : ms;
+  };
+
+  const isConsecutiveDuplicateDialogue = (prev: DialogueMessage, current: DialogueMessage): boolean => {
+    if (prev.agentName !== current.agentName) return false;
+    if (prev.side !== current.side) return false;
+    const sameSummary = normalizeForCompare(prev.summary) === normalizeForCompare(current.summary);
+    const sameDetail = normalizeForCompare(prev.detail) === normalizeForCompare(current.detail);
+    if (!sameSummary || !sameDetail) return false;
+    const prevTs = prev.eventTsMs;
+    const currentTs = current.eventTsMs;
+    if (prevTs && currentTs) {
+      return Math.abs(currentTs - prevTs) <= 3000;
+    }
+    return true;
+  };
+
   const buildDialogueMessage = (row: EventRecord): DialogueMessage | null => {
     const data = asRecord(row.data);
     const kind = row.kind;
@@ -381,9 +428,18 @@ const IncidentPage: React.FC = () => {
       status = 'done';
       const replyTo = firstTextValue(data, ['reply_to']);
       summary = replyTo && replyTo !== 'all' ? `${agentName} 回复 ${replyTo}` : `${agentName} 发言`;
-      detail = normalizeMarkdownText(
-        extractChatMessageText(firstTextValue(data, ['message']) || messageText || '（空发言）'),
-      );
+      const speechText = extractChatMessageText(firstTextValue(data, ['message']) || messageText || '（空发言）');
+      const conclusionText = extractChatMessageText(firstTextValue(data, ['conclusion']));
+      if (conclusionText) {
+        const duplicated = speechText && isNearDuplicateText(conclusionText, speechText);
+        detail = normalizeMarkdownText(
+          [`结论：${conclusionText}`, speechText && !duplicated ? `发言：${speechText}` : '']
+            .filter(Boolean)
+            .join('\n'),
+        );
+      } else {
+        detail = normalizeMarkdownText(speechText);
+      }
     } else if (
       (kind === 'autogen_call_completed' || kind === 'llm_call_completed') &&
       ['analysis', 'critique', 'rebuttal', 'judgment'].includes(phase)
@@ -435,7 +491,18 @@ const IncidentPage: React.FC = () => {
       summary = normalizeInlineText(messageText || '状态更新');
       detail = normalizeMarkdownText(messageText || '');
     } else if (kind === 'agent_command_feedback') {
-      return null;
+      status = 'done';
+      summary = `${agentName} 向主Agent反馈`;
+      const feedback = extractChatMessageText(firstTextValue(data, ['feedback']));
+      const command = extractChatMessageText(firstTextValue(data, ['command']));
+      const confidenceRaw = data.confidence;
+      const confidenceLine =
+        typeof confidenceRaw === 'number' ? `置信度：${(Number(confidenceRaw) * 100).toFixed(1)}%` : '';
+      detail = normalizeMarkdownText(
+        [feedback ? `反馈：${feedback}` : '', command ? `命令：${command}` : '', confidenceLine]
+          .filter(Boolean)
+          .join('\n'),
+      );
     } else if (kind === 'agent_command_issued') {
       status = 'done';
       summary = normalizeInlineText(messageText || '主Agent指令');
@@ -449,6 +516,7 @@ const IncidentPage: React.FC = () => {
     return {
       id: row.id,
       timeText: row.timeText,
+      eventTsMs: parseEventTimestampMs(data),
       agentName,
       side,
       phase,
@@ -567,14 +635,16 @@ const IncidentPage: React.FC = () => {
   };
 
   const loadSessionArtifacts = async (sid: string) => {
-    const [detail, result] = await Promise.all([
-      debateApi.get(sid),
-      debateApi.getResult(sid).catch(() => null),
-    ]);
+    const detail = await debateApi.get(sid);
+    const status = String(detail.status || '').toLowerCase();
+    const shouldLoadFinalResult = status === 'completed';
+    const result = shouldLoadFinalResult
+      ? await debateApi.getResult(sid).catch(() => null)
+      : null;
     setSessionDetail(detail);
     setDebateResult(result);
     const reportIncidentId = detail.incident_id || incidentId;
-    if (reportIncidentId) {
+    if (shouldLoadFinalResult && reportIncidentId) {
       const report = await reportApi.get(reportIncidentId).catch(() => null);
       setReportResult(report);
     } else {
@@ -589,6 +659,15 @@ const IncidentPage: React.FC = () => {
 
     const persisted = (detail.context as Record<string, unknown> | undefined)?.event_log;
     if (Array.isArray(persisted)) {
+      if (
+        persisted.some((item) => {
+          const row = (item || {}) as Record<string, unknown>;
+          const event = (row.event || {}) as Record<string, unknown>;
+          return String(event.type || '') === 'asset_interface_mapping_completed';
+        })
+      ) {
+        assetMappingReadyRef.current = true;
+      }
       setEventRecords((prev) => {
         if (prev.length > 0) return prev;
         return persisted
@@ -638,6 +717,7 @@ const IncidentPage: React.FC = () => {
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
+      assetMappingReadyRef.current = false;
       setReportResult(null);
       setIncidentId(incident.id);
       setSessionId(session.id);
@@ -662,6 +742,7 @@ const IncidentPage: React.FC = () => {
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
+      assetMappingReadyRef.current = false;
       setReportResult(null);
       setSessionId(session.id);
       appendEvent('session_created_local', `会话已创建 ${session.id}`, { session_id: session.id });
@@ -682,22 +763,22 @@ const IncidentPage: React.FC = () => {
     try {
       const maxAttempts = 60;
       for (let i = 0; i < maxAttempts; i += 1) {
-        const [detail, result] = await Promise.all([
-          debateApi.get(sid).catch(() => null),
-          debateApi.getResult(sid).catch(() => null),
-        ]);
+        const detail = await debateApi.get(sid).catch(() => null);
         if (detail) {
           setSessionDetail(detail);
         }
-        if (result) {
-          appendEvent('result_polled', '后台任务已完成，正在刷新结果');
-          setDebateResult(result);
-          await loadSessionArtifacts(sid);
-          advanceStep(3);
-          setRunning(false);
-          return;
-        }
         const status = String(detail?.status || '').toLowerCase();
+        if (status === 'completed') {
+          const result = await debateApi.getResult(sid).catch(() => null);
+          if (result) {
+            appendEvent('result_polled', '后台任务已完成，正在刷新结果');
+            setDebateResult(result);
+            await loadSessionArtifacts(sid);
+            advanceStep(3);
+            setRunning(false);
+            return;
+          }
+        }
         if (status === 'failed') {
           const error = extractSessionError(detail);
           appendEvent(
@@ -706,6 +787,15 @@ const IncidentPage: React.FC = () => {
             { type: 'session_failed', phase: 'failed', status: 'failed', error },
           );
           advanceStep(2);
+          setRunning(false);
+          return;
+        }
+        if (status === 'cancelled') {
+          appendEvent('session_cancelled', '会话已取消', {
+            type: 'session_cancelled',
+            phase: 'cancelled',
+            status: 'cancelled',
+          });
           setRunning(false);
           return;
         }
@@ -748,13 +838,29 @@ const IncidentPage: React.FC = () => {
               return;
             }
             const eventPhase = String(payload.data?.phase || '').toLowerCase();
-            if (
-              (type === 'autogen_call_started' || type === 'llm_call_started') &&
-              eventPhase.includes('asset')
-            ) {
+            const isAssetEvent =
+              type === 'asset_interface_mapping_completed' ||
+              type === 'asset_collection_completed' ||
+              type === 'runtime_assets_collected' ||
+              eventPhase.includes('asset');
+            if (type === 'asset_interface_mapping_completed') {
+              assetMappingReadyRef.current = true;
+            }
+            if (isAssetEvent) {
               advanceStep(1);
             }
-            if (type === 'agent_round' || type === 'agent_chat_message' || type === 'round_started' || type === 'llm_call_started') {
+            const isDebatePhase =
+              eventPhase.includes('analysis') ||
+              eventPhase.includes('coordination') ||
+              eventPhase.includes('critique') ||
+              eventPhase.includes('rebuttal') ||
+              eventPhase.includes('judgment');
+            const isDebateProgressEvent =
+              type === 'agent_round' ||
+              type === 'agent_chat_message' ||
+              type === 'round_started' ||
+              ((type === 'autogen_call_started' || type === 'llm_call_started') && isDebatePhase);
+            if (isDebateProgressEvent && assetMappingReadyRef.current) {
               advanceStep(2);
             }
             if (
@@ -839,7 +945,7 @@ const IncidentPage: React.FC = () => {
       targetSessionId = sid;
     }
     if (!targetIncidentId || !targetSessionId) return;
-    advanceStep(2);
+    advanceStep(1);
     await loadSessionArtifacts(targetSessionId).catch(() => undefined);
     await startRealtimeDebate({ sessionId: targetSessionId, incidentId: targetIncidentId });
   };
@@ -884,12 +990,14 @@ const IncidentPage: React.FC = () => {
     const preferredView = (searchParams.get('view') || '').toLowerCase();
     if (!iid) {
       setReportResult(null);
+      assetMappingReadyRef.current = false;
       return;
     }
     seenEventIdsRef.current.clear();
     setEventRecords([]);
     setStreamedMessageText({});
     setExpandedDialogueIds({});
+    assetMappingReadyRef.current = false;
     setIncidentId(iid);
     incidentApi
       .get(iid)
@@ -944,12 +1052,22 @@ const IncidentPage: React.FC = () => {
   );
 
   const dialogueMessages = useMemo(
-    () =>
-      debateEvents
+    () => {
+      const rawMessages = debateEvents
         .slice()
         .reverse()
         .map((row) => buildDialogueMessage(row))
-        .filter((item): item is DialogueMessage => Boolean(item)),
+        .filter((item): item is DialogueMessage => Boolean(item));
+      const deduped: DialogueMessage[] = [];
+      rawMessages.forEach((msg) => {
+        const prev = deduped[deduped.length - 1];
+        if (prev && isConsecutiveDuplicateDialogue(prev, msg)) {
+          return;
+        }
+        deduped.push(msg);
+      });
+      return deduped;
+    },
     [debateEvents],
   );
 
@@ -1226,6 +1344,35 @@ const IncidentPage: React.FC = () => {
       });
   }, [mappingEvents]);
 
+  const mappingEmptyHint = useMemo(() => {
+    if (mappingItems.length > 0) return '';
+    if (!sessionId) {
+      return '尚未启动分析，请先在“输入故障信息”页点击“启动分析”。';
+    }
+    const status = String(sessionDetail?.status || '').toLowerCase();
+    const hasAssetProgressEvent = eventRecords.some((row) => {
+      const data = asRecord(row.data);
+      const phase = String(data.phase || '').toLowerCase();
+      return (
+        row.kind === 'asset_collection_started' ||
+        row.kind === 'runtime_assets_collected' ||
+        row.kind === 'asset_collection_completed' ||
+        row.kind === 'asset_log_parse_fallback_local' ||
+        phase.includes('asset')
+      );
+    });
+    if (running || hasAssetProgressEvent || status === 'running' || status === 'analyzing') {
+      return '正在执行责任田映射，请稍候，结果会自动展示在这里。';
+    }
+    if (status === 'failed' || status === 'cancelled') {
+      return '本次分析未完成，责任田映射结果暂不可用。请查看报错后重试。';
+    }
+    if (status === 'completed') {
+      return '本次分析未命中责任田映射，请补充更具体的接口 URL、错误日志或堆栈后重试。';
+    }
+    return '等待分析开始后，这里会展示责任田映射结果。';
+  }, [eventRecords, mappingItems.length, running, sessionDetail?.status, sessionId]);
+
   const mainAgentConclusion = useMemo(() => {
     for (const row of eventRecords) {
       if (row.kind !== 'agent_chat_message') continue;
@@ -1411,7 +1558,7 @@ const IncidentPage: React.FC = () => {
           <Space direction="vertical" size="large" style={{ width: '100%' }}>
             <Card title="责任田映射结果">
               {mappingItems.length === 0 ? (
-                <Empty description="暂无责任田映射结果" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                <Empty description={mappingEmptyHint} image={Empty.PRESENTED_IMAGE_SIMPLE} />
               ) : (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                   {mappingItems.map((item) => (

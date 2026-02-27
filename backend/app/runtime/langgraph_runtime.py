@@ -995,22 +995,25 @@ class LangGraphRuntimeOrchestrator:
     ) -> Dict[str, Any]:
         spec = self._problem_analysis_agent_spec()
         round_number = len(self.turns) + 1
-        await self._emit_event(
-            {
-                "type": "agent_chat_message",
-                "phase": spec.phase,
-                "agent_name": spec.name,
-                "agent_role": spec.role,
-                "model": settings.llm_model,
-                "session_id": self.session_id,
-                "loop_round": loop_round,
-                "round_number": round_number,
-                "message": "我在检查当前证据和分歧，决定下一位发言者。",
-                "confidence": 0.0,
-                "conclusion": "",
-                "reply_to": "all",
-            }
-        )
+        # Avoid repetitive commander placeholder messages on every supervisor step.
+        # Emit once near round start to keep UI concise and reduce "looping" perception.
+        if int(discussion_step_count or 0) <= 1:
+            await self._emit_event(
+                {
+                    "type": "agent_chat_message",
+                    "phase": spec.phase,
+                    "agent_name": spec.name,
+                    "agent_role": spec.role,
+                    "model": settings.llm_model,
+                    "session_id": self.session_id,
+                    "loop_round": loop_round,
+                    "round_number": round_number,
+                    "message": "我在检查当前证据和分歧，决定下一位发言者。",
+                    "confidence": 0.0,
+                    "conclusion": "",
+                    "reply_to": "all",
+                }
+            )
         prompt = self._build_problem_analysis_supervisor_prompt(
             loop_round=loop_round,
             context=compact_context,
