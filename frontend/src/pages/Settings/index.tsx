@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Button, Card, Form, Input, InputNumber, Space, Switch, Typography, message } from 'antd';
 import { authApi, settingsApi, type AgentToolingConfig } from '@/services/api';
 
-const { Title, Text } = Typography;
+const { Paragraph, Text, Title } = Typography;
 
 const SettingsPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
@@ -56,18 +56,19 @@ const SettingsPage: React.FC = () => {
   return (
     <div className="settings-page">
       <Space direction="vertical" size="large" style={{ width: '100%' }}>
-        <Card>
-          <Title level={4} style={{ marginTop: 0 }}>
+        <Card className="module-card">
+          <Title level={4} style={{ marginTop: 0, marginBottom: 8 }}>
             系统设置
           </Title>
-          <Text>当前模型：kimi-k2.5</Text>
-          <br />
+          <Paragraph style={{ marginBottom: 8 }}>
+            当前前后端统一使用火山引擎 OpenAI 兼容接口，模型为 <Text code>kimi-k2.5</Text>。
+          </Paragraph>
           <Text>LLM Runtime：LangGraph Multi-Agent</Text>
           <br />
           <Text>LLM Base URL：https://ark.cn-beijing.volces.com/api/coding</Text>
         </Card>
 
-        <Card title="登录（AUTH_ENABLED=true 时需要）">
+        <Card className="module-card" title="登录凭证（AUTH_ENABLED=true 时需要）">
           <Form layout="inline" onFinish={login}>
             <Form.Item name="username" rules={[{ required: true }]} initialValue="analyst">
               <Input placeholder="用户名" />
@@ -94,7 +95,7 @@ const SettingsPage: React.FC = () => {
           )}
         </Card>
 
-        <Card title="Agent 工具配置">
+        <Card className="module-card" title="Agent 工具配置">
           <Form
             form={toolingForm}
             layout="vertical"

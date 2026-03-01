@@ -1,9 +1,22 @@
 import React, { useState } from 'react';
-import { Alert, Button, Card, Descriptions, Divider, Input, Space, Table, Typography, message } from 'antd';
+import {
+  Alert,
+  Button,
+  Card,
+  Descriptions,
+  Divider,
+  Empty,
+  Input,
+  Space,
+  Table,
+  Tag,
+  Typography,
+  message,
+} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { assetApi, type AssetFusion, type InterfaceLocateResult } from '@/services/api';
 
-const { Title, Text } = Typography;
+const { Paragraph, Title } = Typography;
 const { TextArea } = Input;
 
 const AssetsPage: React.FC = () => {
@@ -31,7 +44,23 @@ const AssetsPage: React.FC = () => {
     }
   };
 
-  const columns: ColumnsType<AssetFusion['relationships'][number]> = [
+  const locateByLog = async () => {
+    if (!logContent.trim()) {
+      message.error('请输入接口报错日志');
+      return;
+    }
+    setLocateLoading(true);
+    try {
+      const result = await assetApi.locate(logContent.trim(), symptom.trim() || undefined);
+      setLocateResult(result);
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || e.message || '定位失败');
+    } finally {
+      setLocateLoading(false);
+    }
+  };
+
+  const relationColumns: ColumnsType<AssetFusion['relationships'][number]> = [
     { title: '源ID', dataIndex: 'source_id', key: 'source_id' },
     { title: '源类型', dataIndex: 'source_type', key: 'source_type', width: 120 },
     { title: '关系', dataIndex: 'relation', key: 'relation', width: 180 },
@@ -50,49 +79,22 @@ const AssetsPage: React.FC = () => {
     { title: '接口', dataIndex: 'api_endpoint', key: 'api_endpoint', width: 240 },
   ];
 
-  const locateByLog = async () => {
-    if (!logContent.trim()) {
-      message.error('请输入接口报错日志');
-      return;
-    }
-    setLocateLoading(true);
-    try {
-      const result = await assetApi.locate(logContent.trim(), symptom.trim() || undefined);
-      setLocateResult(result);
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || e.message || '定位失败');
-    } finally {
-      setLocateLoading(false);
-    }
-  };
-
   return (
     <div className="assets-page">
-      <Card>
-        <Space direction="vertical" size="large" style={{ width: '100%' }}>
-          <Title level={4} style={{ margin: 0 }}>
-            资产图谱
-          </Title>
-          <Space>
-            <Input
-              placeholder="输入 Incident ID"
-              value={incidentId}
-              style={{ width: 320 }}
-              onChange={(e) => setIncidentId(e.target.value)}
-            />
-            <Button type="primary" loading={loading} onClick={queryFusion}>
-              查询融合结果
-            </Button>
-          </Space>
+      <Card className="module-card" style={{ marginBottom: 16 }}>
+        <Title level={4} style={{ marginTop: 0, marginBottom: 8 }}>
+          资产定位
+        </Title>
+        <Paragraph style={{ marginBottom: 0 }}>
+          输入接口报错日志后，系统会映射到领域、聚合根、责任团队，并给出代码与数据库关联资产。
+        </Paragraph>
+      </Card>
 
-          <Divider style={{ margin: '8px 0' }} />
-
-          <Title level={5} style={{ margin: 0 }}>
-            接口日志定位（领域-聚合根）
-          </Title>
+      <Card className="module-card" title="接口日志定位（领域-聚合根）" style={{ marginBottom: 16 }}>
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           <TextArea
-            rows={6}
-            placeholder="粘贴接口报错日志，例如：ERROR POST /api/v1/orders failed with NullPointerException ..."
+            rows={8}
+            placeholder="粘贴接口报错日志，例如：ERROR POST /api/v1/orders failed ..."
             value={logContent}
             onChange={(e) => setLogContent(e.target.value)}
           />
@@ -101,42 +103,31 @@ const AssetsPage: React.FC = () => {
             value={symptom}
             onChange={(e) => setSymptom(e.target.value)}
           />
-          <Button type="primary" loading={locateLoading} onClick={locateByLog}>
-            定位领域与责任田
-          </Button>
+          <Space>
+            <Button type="primary" loading={locateLoading} onClick={locateByLog}>
+              定位领域与责任田
+            </Button>
+            <Button
+              onClick={() => {
+                setLogContent('');
+                setSymptom('');
+                setLocateResult(null);
+              }}
+            >
+              清空
+            </Button>
+          </Space>
 
-          {!fusion && <Text type="secondary">输入 Incident ID 后可查看三态资产融合图谱。</Text>}
-
-          {fusion && (
+          {!locateResult ? (
+            <Empty description="输入日志并点击“定位领域与责任田”后展示结果" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          ) : (
             <>
-              <Descriptions bordered column={2}>
-                <Descriptions.Item label="Incident">{fusion.incident_id}</Descriptions.Item>
-                <Descriptions.Item label="Debate Session">{fusion.debate_session_id}</Descriptions.Item>
-                <Descriptions.Item label="运行态资产">{fusion.runtime_assets.length}</Descriptions.Item>
-                <Descriptions.Item label="开发态资产">{fusion.dev_assets.length}</Descriptions.Item>
-                <Descriptions.Item label="设计态资产">{fusion.design_assets.length}</Descriptions.Item>
-                <Descriptions.Item label="关联关系">{fusion.relationships.length}</Descriptions.Item>
-              </Descriptions>
-              <Table
-                rowKey={(row, index) => `${row.source_id}-${row.target_id}-${index}`}
-                columns={columns}
-                dataSource={fusion.relationships}
-                pagination={{ pageSize: 10 }}
-              />
-            </>
-          )}
-
-          {locateResult && (
-            <>
-              <Divider />
-              <Alert
-                type={locateResult.matched ? 'success' : 'warning'}
-                message={locateResult.reason}
-                showIcon
-              />
-              <Descriptions bordered column={2} style={{ marginTop: 16 }}>
+              <Alert type={locateResult.matched ? 'success' : 'warning'} message={locateResult.reason} showIcon />
+              <Descriptions bordered column={2} style={{ marginTop: 8 }}>
                 <Descriptions.Item label="匹配状态">
-                  {locateResult.matched ? '已命中' : '未命中'}
+                  <Tag color={locateResult.matched ? 'success' : 'warning'}>
+                    {locateResult.matched ? '已命中' : '未命中'}
+                  </Tag>
                 </Descriptions.Item>
                 <Descriptions.Item label="置信度">{(locateResult.confidence * 100).toFixed(1)}%</Descriptions.Item>
                 <Descriptions.Item label="领域">{locateResult.domain || '-'}</Descriptions.Item>
@@ -160,27 +151,67 @@ const AssetsPage: React.FC = () => {
 
               {!locateResult.matched && locateResult.guidance?.length > 0 && (
                 <Alert
-                  style={{ marginTop: 12 }}
                   type="info"
                   showIcon
                   message={`补充建议：${locateResult.guidance.join('；')}`}
+                  style={{ marginTop: 12 }}
                 />
               )}
 
               <Table
-                style={{ marginTop: 16 }}
+                style={{ marginTop: 12 }}
                 rowKey={(row, index) => `${row.path}-${row.symbol}-${index}`}
                 columns={locateColumns}
                 dataSource={locateResult.code_artifacts}
                 pagination={false}
+                locale={{ emptyText: '未返回关联代码' }}
               />
-
               <Table
-                style={{ marginTop: 16 }}
+                style={{ marginTop: 12 }}
                 rowKey={(row) => row.id}
                 columns={caseColumns}
                 dataSource={locateResult.similar_cases}
                 pagination={false}
+                locale={{ emptyText: '未命中相似案例' }}
+              />
+            </>
+          )}
+        </Space>
+      </Card>
+
+      <Card className="module-card" title="三态资产融合图谱">
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Space wrap>
+            <Input
+              placeholder="输入 Incident ID"
+              value={incidentId}
+              style={{ width: 320 }}
+              onChange={(e) => setIncidentId(e.target.value)}
+            />
+            <Button type="primary" loading={loading} onClick={queryFusion}>
+              查询融合结果
+            </Button>
+          </Space>
+
+          {!fusion ? (
+            <Empty description="输入 Incident ID 后可查看融合图谱结果" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          ) : (
+            <>
+              <Descriptions bordered column={2}>
+                <Descriptions.Item label="Incident">{fusion.incident_id}</Descriptions.Item>
+                <Descriptions.Item label="Debate Session">{fusion.debate_session_id}</Descriptions.Item>
+                <Descriptions.Item label="运行态资产">{fusion.runtime_assets.length}</Descriptions.Item>
+                <Descriptions.Item label="开发态资产">{fusion.dev_assets.length}</Descriptions.Item>
+                <Descriptions.Item label="设计态资产">{fusion.design_assets.length}</Descriptions.Item>
+                <Descriptions.Item label="关联关系">{fusion.relationships.length}</Descriptions.Item>
+              </Descriptions>
+              <Divider style={{ margin: '8px 0' }} />
+              <Table
+                rowKey={(row, index) => `${row.source_id}-${row.target_id}-${index}`}
+                columns={relationColumns}
+                dataSource={fusion.relationships}
+                pagination={{ pageSize: 10 }}
+                locale={{ emptyText: '暂无关系数据' }}
               />
             </>
           )}

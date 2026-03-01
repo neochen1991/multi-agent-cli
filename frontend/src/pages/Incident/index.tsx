@@ -1,12 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   Avatar,
   Button,
   Card,
+  Col,
+  Divider,
   Empty,
   Input,
+  Row,
   Select,
   Space,
+  Statistic,
   Steps,
   Tag,
   Typography,
@@ -1371,6 +1376,21 @@ const IncidentPage: React.FC = () => {
     };
   }, [dialogueMessages]);
 
+  const eventStats = useMemo(() => {
+    const agents = new Set<string>();
+    const phases = new Set<string>();
+    dialogueMessages.forEach((item) => {
+      if (item.agentName) agents.add(item.agentName);
+      if (item.phase) phases.add(item.phase);
+    });
+    return {
+      total: debateEvents.length,
+      filtered: filteredDebateEvents.length,
+      agentCount: agents.size,
+      phaseCount: phases.size,
+    };
+  }, [debateEvents.length, dialogueMessages, filteredDebateEvents.length]);
+
   useEffect(() => {
     const currentIds = new Set(filteredDialogueMessages.map((item) => item.id));
     setStreamedMessageText((prev) => {
@@ -1554,6 +1574,7 @@ const IncidentPage: React.FC = () => {
       >
         重置筛选
       </Button>
+      <Tag color="blue">{`显示 ${filteredDialogueMessages.length} / ${dialogueMessages.length} 条`}</Tag>
     </Space>
   );
 
@@ -1790,90 +1811,154 @@ const IncidentPage: React.FC = () => {
     }
   };
 
+  const sessionStatus = String(sessionDetail?.status || '').toLowerCase();
+
+  const fillDemoIncident = () => {
+    setIncidentForm((prev) => ({
+      ...prev,
+      title: '/api/v1/orders 接口 502 + CPU 飙高',
+      description: '网关 502，order-service CPU 飙高，连接池打满',
+      severity: 'high',
+      service_name: 'order-service',
+      log_content: [
+        '2026-02-20T14:01:38.124+08:00 ERROR gateway upstream timeout status=502 uri=POST /api/v1/orders costMs=30211',
+        '2026-02-20T14:01:38.095+08:00 ERROR order-service HikariPool-1 - Connection is not available, request timed out after 30000ms',
+        '2026-02-20T14:02:01.122+08:00 WARN mysql lock wait timeout exceeded table=t_order_item',
+      ].join('\n'),
+    }));
+    message.success('已填充示例故障，可直接启动分析');
+  };
+
   return (
     <div className="incident-page">
-      <Card>
-        <Steps
-          type="navigation"
-          current={activeStep}
-          items={steps}
-          onChange={(idx) => {
-            void switchToStep(idx);
-          }}
-        />
-        <Space style={{ marginTop: 16 }}>
-          <Button type={activeStep === 0 ? 'primary' : 'default'} onClick={() => void switchToStep(0)}>
-            输入故障信息
-          </Button>
-          <Button type={activeStep === 1 ? 'primary' : 'default'} onClick={() => void switchToStep(1)}>
-            资产映射
-          </Button>
-          <Button type={activeStep === 2 ? 'primary' : 'default'} onClick={() => void switchToStep(2)}>
-            辩论过程
-          </Button>
-          <Button type={activeStep === 3 ? 'primary' : 'default'} onClick={() => void switchToStep(3)}>
-            辩论结果
-          </Button>
-          <Tag color="processing">当前查看：{steps[activeStep]?.title}</Tag>
+      <Card className="module-card">
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Steps
+            type="navigation"
+            current={activeStep}
+            items={steps}
+            onChange={(idx) => {
+              void switchToStep(idx);
+            }}
+          />
+
+          <Row gutter={[12, 12]}>
+            <Col xs={12} md={6}>
+              <Card size="small" className="incident-kpi-card">
+                <Statistic title="事件总数" value={eventRecords.length} />
+              </Card>
+            </Col>
+            <Col xs={12} md={6}>
+              <Card size="small" className="incident-kpi-card">
+                <Statistic title="辩论事件" value={debateEvents.length} valueStyle={{ color: '#1677ff' }} />
+              </Card>
+            </Col>
+            <Col xs={12} md={6}>
+              <Card size="small" className="incident-kpi-card">
+                <Statistic title="映射命中" value={mappingItems.length} />
+              </Card>
+            </Col>
+            <Col xs={12} md={6}>
+              <Card size="small" className="incident-kpi-card">
+                <Statistic title="辩论轮次" value={debateMaxRounds} />
+              </Card>
+            </Col>
+          </Row>
+
+          <Space wrap>
+            <Tag color={running ? 'processing' : 'default'}>{running ? '会话运行中' : '会话未运行'}</Tag>
+            <Tag color={sessionId ? 'blue' : 'default'}>{sessionId ? `Session: ${sessionId}` : '未创建会话'}</Tag>
+            <Tag color="purple">{`当前步骤：${steps[activeStep]?.title}`}</Tag>
+          </Space>
         </Space>
       </Card>
 
       <div style={{ marginTop: 24 }}>
         {activeStep === 0 && (
-          <Card title="故障输入">
+          <Card
+            className="module-card"
+            title="输入故障信息"
+            extra={
+              <Button onClick={fillDemoIncident} disabled={running || loading}>
+                填充示例故障
+              </Button>
+            }
+          >
             <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-              <Input
-                placeholder="故障标题 *"
-                value={incidentForm.title}
-                onChange={(e) => setIncidentForm((s) => ({ ...s, title: e.target.value }))}
+              <Alert
+                type="info"
+                showIcon
+                message="建议输入接口 URL、错误日志和堆栈，主 Agent 会按命令调度各专家分析。"
               />
-              <Input
-                placeholder="故障描述"
-                value={incidentForm.description}
-                onChange={(e) => setIncidentForm((s) => ({ ...s, description: e.target.value }))}
-              />
-              <Space style={{ width: '100%' }}>
-                <Select
-                  value={incidentForm.severity}
-                  style={{ width: 180 }}
-                  onChange={(value) => setIncidentForm((s) => ({ ...s, severity: value }))}
-                  options={[
-                    { label: 'Critical', value: 'critical' },
-                    { label: 'High', value: 'high' },
-                    { label: 'Medium', value: 'medium' },
-                    { label: 'Low', value: 'low' },
-                  ]}
-                />
-                <Input
-                  placeholder="服务名（可选）"
-                  value={incidentForm.service_name}
-                  onChange={(e) => setIncidentForm((s) => ({ ...s, service_name: e.target.value }))}
-                />
-                <Select
-                  value={debateMaxRounds}
-                  style={{ width: 140 }}
-                  onChange={(value) => setDebateMaxRounds(value)}
-                  options={[
-                    { label: '辩论1轮', value: 1 },
-                    { label: '辩论2轮', value: 2 },
-                    { label: '辩论3轮', value: 3 },
-                    { label: '辩论4轮', value: 4 },
-                    { label: '辩论5轮', value: 5 },
-                    { label: '辩论6轮', value: 6 },
-                  ]}
-                />
-              </Space>
+
+              <Row gutter={[12, 12]}>
+                <Col xs={24} md={12}>
+                  <Input
+                    placeholder="故障标题 *"
+                    value={incidentForm.title}
+                    onChange={(e) => setIncidentForm((s) => ({ ...s, title: e.target.value }))}
+                  />
+                </Col>
+                <Col xs={24} md={12}>
+                  <Input
+                    placeholder="故障描述"
+                    value={incidentForm.description}
+                    onChange={(e) => setIncidentForm((s) => ({ ...s, description: e.target.value }))}
+                  />
+                </Col>
+                <Col xs={24} md={8}>
+                  <Select
+                    value={incidentForm.severity}
+                    style={{ width: '100%' }}
+                    onChange={(value) => setIncidentForm((s) => ({ ...s, severity: value }))}
+                    options={[
+                      { label: 'Critical', value: 'critical' },
+                      { label: 'High', value: 'high' },
+                      { label: 'Medium', value: 'medium' },
+                      { label: 'Low', value: 'low' },
+                    ]}
+                  />
+                </Col>
+                <Col xs={24} md={8}>
+                  <Input
+                    placeholder="服务名（可选）"
+                    value={incidentForm.service_name}
+                    onChange={(e) => setIncidentForm((s) => ({ ...s, service_name: e.target.value }))}
+                  />
+                </Col>
+                <Col xs={24} md={8}>
+                  <Select
+                    value={debateMaxRounds}
+                    style={{ width: '100%' }}
+                    onChange={(value) => setDebateMaxRounds(value)}
+                    options={[
+                      { label: '辩论1轮', value: 1 },
+                      { label: '辩论2轮', value: 2 },
+                      { label: '辩论3轮', value: 3 },
+                      { label: '辩论4轮', value: 4 },
+                      { label: '辩论5轮', value: 5 },
+                      { label: '辩论6轮', value: 6 },
+                    ]}
+                  />
+                </Col>
+              </Row>
+
+              <Divider style={{ margin: 0 }} />
               <TextArea
                 rows={10}
                 className="log-input-area"
-                placeholder="粘贴日志内容"
+                placeholder="粘贴日志内容、报错堆栈、监控现象。建议包含 traceId / URL / 状态码。"
                 value={incidentForm.log_content}
                 onChange={(e) => setIncidentForm((s) => ({ ...s, log_content: e.target.value }))}
               />
               {!incidentId && (
                 <Space>
-                  <Button type="primary" loading={loading || running} onClick={() => void startAnalysisFromInput()}>
-                    创建并启动分析
+                  <Button
+                    type="primary"
+                    loading={loading || running}
+                    onClick={() => void startAnalysisFromInput()}
+                  >
+                    启动分析
                   </Button>
                   <Button loading={loading} onClick={() => void createIncidentAndSession()}>
                     仅创建故障与会话
@@ -1882,7 +1967,11 @@ const IncidentPage: React.FC = () => {
               )}
               {incidentId && !sessionId && (
                 <Space>
-                  <Button type="primary" loading={loading || running} onClick={() => void startAnalysisFromInput()}>
+                  <Button
+                    type="primary"
+                    loading={loading || running}
+                    onClick={() => void startAnalysisFromInput()}
+                  >
                     初始化并启动分析
                   </Button>
                   <Button loading={loading} onClick={() => void initSessionForExistingIncident()}>
@@ -1916,13 +2005,14 @@ const IncidentPage: React.FC = () => {
             dialogueNode={renderDialogueStream()}
             roundCollapseItems={roundCollapseItems}
             timelineItems={timelineItems}
+            eventStats={eventStats}
           />
         )}
 
         {activeStep === 3 && (
           <DebateResultPanel
             mainAgentConclusion={mainAgentConclusion}
-            sessionStatus={String(sessionDetail?.status || '').toLowerCase()}
+            sessionStatus={sessionStatus}
             sessionError={extractSessionError(sessionDetail)}
             debateSummaryCards={debateSummaryCards}
             reportResult={reportResult}
@@ -1930,6 +2020,7 @@ const IncidentPage: React.FC = () => {
             reportLoading={reportLoading}
             incidentId={incidentId}
             sessionId={sessionId}
+            debateConfidence={debateResult?.confidence}
             onRegenerateReport={regenerateReport}
           />
         )}

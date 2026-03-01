@@ -1,192 +1,291 @@
-/* 全局样式 */
+:root {
+  --bg-page: #f3f6fb;
+  --bg-page-accent: #ecf2ff;
+  --surface-card: rgba(255, 255, 255, 0.94);
+  --surface-card-strong: #ffffff;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --border-soft: #dbe3ef;
+  --shadow-soft: 0 10px 30px rgba(15, 23, 42, 0.06);
+  --radius-lg: 14px;
+  --radius-md: 10px;
+  --brand: #2563eb;
+  --brand-strong: #1d4ed8;
+}
+
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
 
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
-    'Noto Sans', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
-    'Noto Color Emoji';
+  font-family: 'IBM Plex Sans', 'Source Han Sans SC', 'Noto Sans SC', 'PingFang SC', sans-serif;
+  color: var(--text-primary);
+  background: linear-gradient(180deg, #f1f5fb 0%, #eef3fa 32%, #edf2f8 100%);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* 自定义滚动条 */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #f1f1f1;
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #a8a8a8;
-}
-
-/* 辩论可视化样式 */
-.debate-viewer {
-  padding: 16px;
-}
-
-.debate-header {
-  margin-bottom: 24px;
-  padding: 16px;
-  background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
-}
-
-.debate-round {
-  margin-bottom: 16px;
-}
-
-.agent-card {
-  transition: all 0.3s ease;
-}
-
-.agent-card:hover {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-}
-
-/* 证据链样式 */
-.evidence-chain {
-  margin-top: 12px;
-  padding: 12px;
-  background: #fafafa;
+  background: #edf2f7;
   border-radius: 6px;
 }
 
-.evidence-item {
-  display: flex;
-  align-items: flex-start;
-  margin-bottom: 8px;
-  padding: 8px;
-  background: #fff;
-  border-radius: 4px;
-  border-left: 3px solid #1677ff;
+::-webkit-scrollbar-thumb {
+  background: #c0ccdb;
+  border-radius: 6px;
 }
 
-.evidence-step {
-  min-width: 24px;
-  height: 24px;
-  line-height: 24px;
-  text-align: center;
-  background: #1677ff;
-  color: #fff;
-  border-radius: 50%;
-  margin-right: 12px;
-  font-size: 12px;
+::-webkit-scrollbar-thumb:hover {
+  background: #9fb0c6;
 }
 
-/* 置信度指示器 */
-.confidence-meter {
+.app-shell {
+  min-height: 100vh;
+  background: transparent;
+}
+
+.app-main-layout {
+  background: transparent;
+}
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
+  height: 68px;
+  line-height: normal;
+  padding: 0 18px 0 20px;
+  background: linear-gradient(120deg, #0f172a 0%, #1e293b 55%, #1f2937 100%);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.26);
 }
 
-.confidence-bar {
-  flex: 1;
-  height: 8px;
-  background: #f0f0f0;
-  border-radius: 4px;
-  overflow: hidden;
+.app-header-brand {
+  min-width: 0;
 }
 
-.confidence-fill {
-  height: 100%;
-  transition: width 0.3s ease;
+.app-header-logo {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  color: #dbeafe;
+  font-size: 18px;
+  background: linear-gradient(135deg, #2563eb, #38bdf8);
 }
 
-.confidence-fill.high {
-  background: #52c41a;
+.app-header-subtitle {
+  color: rgba(226, 232, 240, 0.86) !important;
+  font-size: 12px;
+  line-height: 1.25;
 }
 
-.confidence-fill.medium {
-  background: #faad14;
+.app-header-title-wrap {
+  min-width: 0;
 }
 
-.confidence-fill.low {
-  background: #ff4d4f;
+.app-header-title {
+  color: #f8fafc;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
 }
 
-/* 资产图谱样式 */
-.asset-graph {
+.app-header-actions {
+  flex-shrink: 0;
+}
+
+.app-header-github {
+  color: rgba(226, 232, 240, 0.82);
+  font-size: 20px;
+}
+
+.app-header-github:hover {
+  color: #fff;
+}
+
+.app-sider {
+  background: rgba(255, 255, 255, 0.82) !important;
+  border-right: 1px solid var(--border-soft);
+  backdrop-filter: blur(6px);
+}
+
+.app-sider .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+}
+
+.app-sider-title {
+  padding: 14px 16px 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.app-sider-menu {
+  border-right: 0 !important;
+  background: transparent !important;
+  padding-inline: 8px;
+}
+
+.app-sider-menu .ant-menu-item {
+  height: 42px;
+  line-height: 42px;
+  border-radius: 9px;
+  margin-block: 4px;
+}
+
+.app-sider-menu .ant-menu-item-selected {
+  background: #e0ebff !important;
+  color: #1d4ed8 !important;
+  font-weight: 600;
+}
+
+.app-content-shell {
+  min-height: calc(100vh - 64px);
+  background: transparent;
+}
+
+.app-content {
+  background: transparent;
+  padding: 18px;
+}
+
+.page-container {
   width: 100%;
-  height: 500px;
-  background: #fafafa;
-  border-radius: 8px;
+  max-width: none;
+  margin: 0;
 }
 
-/* 日志输入区域 */
+.app-footer {
+  text-align: center;
+  padding: 10px 16px 14px;
+  color: var(--text-muted);
+  background: transparent;
+  border-top: 0;
+}
+
+.module-card {
+  border-radius: var(--radius-lg) !important;
+  border: 1px solid var(--border-soft) !important;
+  background: #ffffff !important;
+  box-shadow: var(--shadow-soft);
+}
+
+.module-card .ant-card-head {
+  border-bottom: 1px solid #e8edf5;
+}
+
+.compact-card .ant-card-body {
+  padding: 14px 16px;
+}
+
+.home-hero-card {
+  border: 1px solid #cfe0ff !important;
+  background: #f8fbff !important;
+}
+
+.incident-page .ant-steps-item-description {
+  color: var(--text-muted) !important;
+}
+
+.incident-kpi-card {
+  background: #fcfdff !important;
+  border: 1px solid #e8edf5 !important;
+}
+
+.result-conclusion-paragraph {
+  margin-bottom: 0 !important;
+  white-space: pre-wrap;
+  line-height: 1.75;
+  font-size: 14px;
+}
+
+.asset-map-item-card {
+  border-radius: var(--radius-md) !important;
+  border: 1px solid #e6edf7 !important;
+}
+
+.process-timeline-wrap {
+  max-height: 560px;
+  overflow: auto;
+  border: 1px solid #e6edf7;
+  border-radius: 10px;
+  background: #f9fbff;
+}
+
+.process-timeline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+}
+
+.process-timeline-item {
+  border-left: 3px solid #a5b4fc;
+  background: #fff;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
 .log-input-area {
-  min-height: 200px;
+  min-height: 220px;
 }
 
 .log-input-area textarea {
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-family: 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
   font-size: 12px;
-  line-height: 1.5;
-}
-
-/* 动画 */
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.fade-in {
-  animation: fadeIn 0.3s ease-out;
+  line-height: 1.6;
 }
 
 @keyframes pulse {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 1;
   }
   50% {
-    opacity: 0.5;
+    opacity: 0.45;
   }
 }
 
-.pulse {
-  animation: pulse 2s infinite;
-}
-
-/* 事件流式对话 */
 .dialogue-stream {
-  background: #313338;
-  border: 1px solid #232428;
-  border-radius: 10px;
+  background: linear-gradient(180deg, #1f2430 0%, #1d222d 100%);
+  border: 1px solid #2b3444;
+  border-radius: 12px;
   padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   max-height: 680px;
   overflow: auto;
 }
 
 .discord-thread {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .dialogue-row {
@@ -195,36 +294,36 @@ body {
   gap: 12px;
   padding: 8px;
   border-radius: 8px;
-  transition: background-color 0.18s ease;
+  transition: background-color 0.16s ease;
 }
 
 .dialogue-row:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.045);
 }
 
 .dialogue-avatar {
   margin-top: 1px;
-  background: #5865f2;
+  background: linear-gradient(135deg, #2563eb, #22c1f1);
   color: #fff;
   flex-shrink: 0;
 }
 
 .dialogue-row-system .dialogue-avatar {
-  background: #4e5058;
+  background: #475569;
 }
 
 .dialogue-message {
-  max-width: min(920px, calc(100vw - 180px));
+  max-width: min(980px, calc(100vw - 210px));
   min-width: 0;
-  color: #dcddde;
+  color: #d8dee9;
 }
 
 .dialogue-status-streaming .dialogue-summary {
-  color: #9cdcfe;
+  color: #90cdf4;
 }
 
 .dialogue-status-error .dialogue-summary {
-  color: #ff9ca2;
+  color: #fda4af;
 }
 
 .dialogue-meta {
@@ -236,39 +335,39 @@ body {
 }
 
 .dialogue-username {
-  color: #f2f3f5 !important;
+  color: #f1f5f9 !important;
   font-size: 14px;
   font-weight: 600;
 }
 
 .dialogue-time {
-  color: #949ba4 !important;
+  color: #94a3b8 !important;
   font-size: 12px;
 }
 
 .dialogue-tag {
   margin-inline-start: 0 !important;
-  border-color: #3f4147 !important;
-  background: #2b2d31 !important;
-  color: #b5bac1 !important;
+  border-color: #3c475b !important;
+  background: #273244 !important;
+  color: #cbd5e1 !important;
   font-size: 11px !important;
 }
 
 .dialogue-summary {
   margin-bottom: 6px !important;
-  color: #dbdee1;
+  color: #e2e8f0;
   font-size: 13px;
 }
 
 .dialogue-content {
   white-space: pre-wrap;
   margin: 0;
-  color: #dcddde;
-  font-family: 'Consolas', 'Menlo', monospace;
+  color: #dbe4f0;
+  font-family: 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
   font-size: 12px;
-  line-height: 1.6;
-  background: #2b2d31;
-  border: 1px solid #3f4147;
+  line-height: 1.65;
+  background: #212939;
+  border: 1px solid #334155;
   border-radius: 8px;
   padding: 8px 10px;
 }
@@ -281,7 +380,29 @@ body {
   animation: pulse 1s infinite;
 }
 
+@media (max-width: 992px) {
+  .app-content {
+    padding: 14px;
+  }
+
+  .app-footer {
+    font-size: 12px;
+  }
+
+  .dialogue-message {
+    max-width: 100%;
+  }
+}
+
 @media (max-width: 768px) {
+  .app-header {
+    padding-inline: 12px;
+  }
+
+  .app-header-subtitle {
+    display: none;
+  }
+
   .dialogue-stream {
     padding: 8px;
     max-height: 58vh;
@@ -292,7 +413,7 @@ body {
     padding: 6px;
   }
 
-  .dialogue-message {
-    max-width: 100%;
+  .process-timeline-wrap {
+    max-height: 48vh;
   }
 }

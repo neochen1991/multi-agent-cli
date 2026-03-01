@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { Layout } from 'antd';
 import AppHeader from '@/components/common/Header';
 import AppSider from '@/components/common/Sider';
@@ -14,25 +14,29 @@ const { Content, Footer } = Layout;
 const App: React.FC = () => {
   return (
     <BrowserRouter>
-      <Layout style={{ minHeight: '100vh' }}>
+      <Layout className="app-shell">
         <AppHeader />
-        <Layout>
+        <Layout hasSider className="app-main-layout">
           <AppSider />
-          <Content style={{ padding: '24px', background: '#f0f2f5' }}>
-            <Routes>
-              <Route path="/" element={<HomePage />} />
-              <Route path="/incident" element={<IncidentPage />} />
-              <Route path="/incident/:incidentId" element={<IncidentPage />} />
-              <Route path="/history" element={<HistoryPage />} />
-              <Route path="/assets" element={<AssetsPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </Content>
+          <Layout className="app-content-shell">
+            <Content className="app-content">
+              <div className="page-container">
+                <Routes>
+                  <Route path="/" element={<HomePage />} />
+                  <Route path="/incident" element={<IncidentPage />} />
+                  <Route path="/incident/:incidentId" element={<IncidentPage />} />
+                  <Route path="/history" element={<HistoryPage />} />
+                  <Route path="/assets" element={<AssetsPage />} />
+                  <Route path="/settings" element={<SettingsPage />} />
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Routes>
+              </div>
+            </Content>
+            <Footer className="app-footer">
+              SRE Debate Platform ©{new Date().getFullYear()} · 多 Agent 生产问题根因分析平台
+            </Footer>
+          </Layout>
         </Layout>
-        <Footer style={{ textAlign: 'center' }}>
-          SRE Debate Platform ©{new Date().getFullYear()} - 多模型辩论式 SRE 智能体平台
-        </Footer>
       </Layout>
     </BrowserRouter>
   );

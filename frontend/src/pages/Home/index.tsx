@@ -5,14 +5,14 @@ import {
   AlertOutlined,
   CheckCircleOutlined,
   ClockCircleOutlined,
-  RobotOutlined,
+  PlayCircleOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { incidentApi, type Incident } from '@/services/api';
 import { formatBeijingDateTime } from '@/utils/dateTime';
 
-const { Title, Paragraph, Text } = Typography;
+const { Paragraph, Text, Title } = Typography;
 
 const BEIJING_DAY_FORMATTER = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Shanghai',
@@ -20,8 +20,6 @@ const BEIJING_DAY_FORMATTER = new Intl.DateTimeFormat('en-CA', {
   month: '2-digit',
   day: '2-digit',
 });
-
-const AGENT_MODEL_NAME = 'kimi-k2.5';
 
 const statusColor: Record<string, string> = {
   pending: 'default',
@@ -36,6 +34,20 @@ const statusColor: Record<string, string> = {
   cancelled: 'default',
   closed: 'default',
 };
+
+const AGENT_ROLES: Array<{ name: string; desc: string; color: string }> = [
+  { name: 'ProblemAnalysisAgent', desc: '主Agent，负责任务分发、过程协调与最终结论收敛。', color: 'blue' },
+  { name: 'LogAgent', desc: '日志模式识别与异常链路定位。', color: 'geekblue' },
+  { name: 'DomainAgent', desc: '领域与聚合根映射，责任田归属判断。', color: 'cyan' },
+  { name: 'CodeAgent', desc: '代码路径与调用链分析，定位高风险实现。', color: 'orange' },
+  { name: 'MetricsAgent', desc: '指标突变、容量瓶颈与资源异常分析。', color: 'green' },
+  { name: 'ChangeAgent', desc: '变更窗口关联，识别故障与发布耦合。', color: 'gold' },
+  { name: 'RunbookAgent', desc: '案例库检索与处置SOP建议。', color: 'lime' },
+  { name: 'CriticAgent', desc: '反例审查，挑战当前假设和证据不足点。', color: 'magenta' },
+  { name: 'RebuttalAgent', desc: '针对质疑补充证据并完成反驳。', color: 'purple' },
+  { name: 'JudgeAgent', desc: '综合多方观点给出裁决与置信度。', color: 'volcano' },
+  { name: 'VerificationAgent', desc: '输出验证计划与回归检查项。', color: 'processing' },
+];
 
 type DashboardStats = {
   todayAnalyses: number;
@@ -115,7 +127,7 @@ const HomePage: React.FC = () => {
         closureRate,
         totalIncidents,
       });
-      setRecentIncidents(recent.slice(0, 8));
+      setRecentIncidents(recent.slice(0, 10));
     } catch (e: any) {
       message.error(e?.response?.data?.detail || e?.message || '首页数据加载失败');
     } finally {
@@ -129,7 +141,7 @@ const HomePage: React.FC = () => {
 
   const recentColumns: ColumnsType<Incident> = useMemo(
     () => [
-      { title: 'Incident ID', dataIndex: 'id', key: 'id', width: 130 },
+      { title: 'Incident ID', dataIndex: 'id', key: 'id', width: 150 },
       { title: '标题', dataIndex: 'title', key: 'title' },
       {
         title: '状态',
@@ -142,13 +154,13 @@ const HomePage: React.FC = () => {
         title: '创建时间',
         dataIndex: 'created_at',
         key: 'created_at',
-        width: 240,
+        width: 250,
         render: (value: string) => formatBeijingDateTime(value),
       },
       {
         title: '操作',
         key: 'action',
-        width: 130,
+        width: 140,
         render: (_, record) => (
           <Button size="small" type="link" onClick={() => navigate(`/incident/${record.id}`)}>
             查看详情
@@ -161,106 +173,70 @@ const HomePage: React.FC = () => {
 
   return (
     <div className="home-page">
-      <Card style={{ marginBottom: 24 }}>
-        <Space direction="vertical" size="large" style={{ width: '100%' }}>
-          <Title level={2} style={{ margin: 0 }}>
-            <RobotOutlined style={{ marginRight: 12, color: '#1677ff' }} />
-            生产问题根因分析平台
+      <Card className="module-card home-hero-card">
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Tag color="processing" style={{ width: 'fit-content' }}>
+            生产环境智能排障
+          </Tag>
+          <Title level={3} style={{ margin: 0 }}>
+            多 Agent 协作式根因分析平台
           </Title>
           <Paragraph style={{ marginBottom: 0 }}>
-            基于 LangGraph 多 Agent 协同辩论，融合日志、代码、责任田资产，输出可执行根因结论与修复建议。
+            通过主 Agent 调度日志、代码、领域、指标与案例专家并行分析，沉淀可复核的证据链与可执行结论。
           </Paragraph>
-          <Space>
-            <Button type="primary" size="large" onClick={() => navigate('/incident')}>
+          <Space wrap>
+            <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => navigate('/incident')}>
               开始故障分析
             </Button>
-            <Button size="large" onClick={() => navigate('/history')}>
-              查看历史记录
-            </Button>
-            <Button size="large" onClick={() => navigate('/assets')}>
-              资产定位
-            </Button>
-            <Button size="large" onClick={() => void loadDashboard()} loading={statsLoading}>
-              刷新首页数据
+            <Button onClick={() => navigate('/history')}>历史记录</Button>
+            <Button onClick={() => navigate('/assets')}>资产定位</Button>
+            <Button onClick={() => void loadDashboard()} loading={statsLoading}>
+              刷新数据
             </Button>
           </Space>
-          <Text type="secondary">{`总故障数：${stats.totalIncidents}（实时接口统计）`}</Text>
+          <Text type="secondary">数据基于北京时间实时统计，当前总故障：{stats.totalIncidents}</Text>
         </Space>
       </Card>
 
-      <Row gutter={16} style={{ marginBottom: 24 }}>
-        <Col span={6}>
-          <Card hoverable loading={statsLoading} onClick={() => navigate('/history')}>
+      <Row gutter={[12, 12]} style={{ marginTop: 16 }}>
+        <Col xs={12} md={6}>
+          <Card className="module-card compact-card" loading={statsLoading}>
             <Statistic title="今日分析" value={stats.todayAnalyses} prefix={<AlertOutlined />} valueStyle={{ color: '#1677ff' }} />
           </Card>
         </Col>
-        <Col span={6}>
-          <Card hoverable loading={statsLoading} onClick={() => navigate('/history')}>
+        <Col xs={12} md={6}>
+          <Card className="module-card compact-card" loading={statsLoading}>
             <Statistic title="已解决" value={stats.resolvedCount} prefix={<CheckCircleOutlined />} valueStyle={{ color: '#52c41a' }} />
           </Card>
         </Col>
-        <Col span={6}>
-          <Card hoverable loading={statsLoading} onClick={() => navigate('/history')}>
+        <Col xs={12} md={6}>
+          <Card className="module-card compact-card" loading={statsLoading}>
             <Statistic title="平均耗时" value={stats.avgResolveMinutes} suffix="分钟" prefix={<ClockCircleOutlined />} />
           </Card>
         </Col>
-        <Col span={6}>
-          <Card hoverable loading={statsLoading} onClick={() => navigate('/history')}>
+        <Col xs={12} md={6}>
+          <Card className="module-card compact-card" loading={statsLoading}>
             <Statistic title="闭环率" value={stats.closureRate} suffix="%" precision={1} prefix={<ThunderboltOutlined />} />
           </Card>
         </Col>
       </Row>
 
-      <Row gutter={16}>
-        <Col span={8}>
-          <Card title="资产映射定位" hoverable onClick={() => navigate('/assets')}>
-            <Paragraph style={{ marginBottom: 0 }}>
-              基于接口与错误日志定位领域、聚合根、代码路径与数据库表，快速命中责任田。
-            </Paragraph>
-          </Card>
-        </Col>
-        <Col span={8}>
-          <Card title="多 Agent 辩论分析" hoverable onClick={() => navigate('/incident')}>
-            <Paragraph style={{ marginBottom: 0 }}>
-              主Agent调度 Log/Domain/Code/Critic/Rebuttal/Judge 多专家多轮协同，持续收敛根因。
-            </Paragraph>
-          </Card>
-        </Col>
-        <Col span={8}>
-          <Card title="报告与复盘沉淀" hoverable onClick={() => navigate('/history')}>
-            <Paragraph style={{ marginBottom: 0 }}>
-              输出结构化结论、影响评估与修复建议，并可在历史中回看每次分析过程。
-            </Paragraph>
-          </Card>
-        </Col>
-      </Row>
-
-      <Card title="专家角色分工（点击可进入分析）" style={{ marginTop: 24 }}>
-        <Row gutter={[16, 16]}>
-          {[
-            { name: 'ProblemAnalysisAgent', desc: '主Agent，任务分发与最终裁决协调', bg: '#f0f5ff', border: '#adc6ff' },
-            { name: 'LogAgent', desc: '日志结构化分析专家', bg: '#f6ffed', border: '#b7eb8f' },
-            { name: 'DomainAgent', desc: '领域映射与责任田专家', bg: '#e6f7ff', border: '#91d5ff' },
-            { name: 'CodeAgent', desc: '代码与调用链分析专家', bg: '#fff7e6', border: '#ffd591' },
-            { name: 'MetricsAgent', desc: '指标窗口与容量异常专家', bg: '#f6ffed', border: '#95de64' },
-            { name: 'ChangeAgent', desc: '变更窗口与提交关联专家', bg: '#fffbe6', border: '#ffe58f' },
-            { name: 'RunbookAgent', desc: '案例库检索与SOP专家', bg: '#e6fffb', border: '#87e8de' },
-            { name: 'CriticAgent', desc: '反例质疑与漏洞发现专家', bg: '#fff1f0', border: '#ffa39e' },
-            { name: 'RebuttalAgent', desc: '证据补强与反驳专家', bg: '#f9f0ff', border: '#d3adf7' },
-            { name: 'JudgeAgent', desc: '收敛裁决与结论生成专家', bg: '#fff0f6', border: '#ffadd2' },
-            { name: 'VerificationAgent', desc: '裁决后验证计划专家', bg: '#f0f5ff', border: '#adc6ff' },
-          ].map((agent) => (
-            <Col span={8} key={agent.name}>
+      <Card className="module-card" title="Agent 角色分工" style={{ marginTop: 16 }}>
+        <Row gutter={[12, 12]}>
+          {AGENT_ROLES.map((agent) => (
+            <Col xs={24} sm={12} md={8} lg={6} key={agent.name}>
               <Card
-                hoverable
                 size="small"
-                style={{ background: agent.bg, borderColor: agent.border }}
+                hoverable
+                className="compact-card"
                 onClick={() => navigate('/incident')}
               >
-                <Space direction="vertical" size={2}>
-                  <Text strong>{agent.name}</Text>
-                  <Tag color="blue">{AGENT_MODEL_NAME}</Tag>
-                  <Paragraph style={{ marginBottom: 0 }}>{agent.desc}</Paragraph>
+                <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                  <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                    <Text strong>{agent.name}</Text>
+                    <Tag color={agent.color}>kimi-k2.5</Tag>
+                  </Space>
+                  <Text type="secondary">{agent.desc}</Text>
                 </Space>
               </Card>
             </Col>
@@ -268,7 +244,7 @@ const HomePage: React.FC = () => {
         </Row>
       </Card>
 
-      <Card title="最近故障（实时）" style={{ marginTop: 24 }}>
+      <Card className="module-card" title="最近故障" style={{ marginTop: 16 }}>
         <Table
           rowKey="id"
           columns={recentColumns}

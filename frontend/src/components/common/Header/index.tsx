@@ -1,39 +1,34 @@
 import React from 'react';
-import { Layout, Typography, Space } from 'antd';
-import { RobotOutlined, GithubOutlined } from '@ant-design/icons';
+import { Layout, Space, Tag } from 'antd';
+import { GithubOutlined, RobotOutlined } from '@ant-design/icons';
 
 const { Header: AntHeader } = Layout;
-const { Title, Text } = Typography;
 
 const AppHeader: React.FC = () => {
   return (
-    <AntHeader
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        background: '#001529',
-        padding: '0 24px',
-      }}
-    >
-      <Space>
-        <RobotOutlined style={{ fontSize: '28px', color: '#1677ff' }} />
-        <Title level={4} style={{ margin: 0, color: '#fff' }}>
-          SRE Debate Platform
-        </Title>
-        <Text type="secondary" style={{ color: 'rgba(255,255,255,0.65)' }}>
-          多模型辩论式 SRE 智能体平台
-        </Text>
+    <AntHeader className="app-header">
+      <Space size={12} className="app-header-brand">
+        <span className="app-header-logo" aria-hidden="true">
+          <RobotOutlined />
+        </span>
+        <div className="app-header-title-wrap">
+          <div className="app-header-title">生产问题根因分析智能体</div>
+          <div className="app-header-subtitle">LangGraph Multi-Agent Runtime</div>
+        </div>
       </Space>
-      
-      <Space>
+
+      <Space size={12} className="app-header-actions">
+        <Tag color="processing" style={{ margin: 0 }}>
+          kimi-k2.5
+        </Tag>
         <a
           href="https://github.com"
           target="_blank"
           rel="noopener noreferrer"
-          style={{ color: 'rgba(255,255,255,0.65)' }}
+          className="app-header-github"
+          aria-label="GitHub"
         >
-          <GithubOutlined style={{ fontSize: '20px' }} />
+          <GithubOutlined />
         </a>
       </Space>
     </AntHeader>
