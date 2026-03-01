@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_14",
+  "title": "order mq backlog",
+  "symptom": "mq backlog > 2M",
+  "log_excerpt": "2026-02-214T14:01:38+08:00 ERROR sample incident 14",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 14",
+  "expected_root_cause": "消息消费者停滞导致积压",
+  "expected_domain": "订单",
+  "expected_aggregate": "Order"
+}

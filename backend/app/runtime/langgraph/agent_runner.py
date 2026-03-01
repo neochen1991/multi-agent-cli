@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from app.runtime.langgraph.execution import call_agent
+from app.runtime.langgraph.execution import FatalLLMError, call_agent
 from app.runtime.langgraph.state import AgentSpec, DebateTurn
 
 
@@ -32,6 +32,8 @@ class AgentRunner:
                 loop_round=loop_round,
                 history_cards_context=history_cards_context,
             )
+        except FatalLLMError:
+            raise
         except Exception as exc:  # pragma: no cover - fallback path
             error_text = str(exc).strip() or exc.__class__.__name__
             return await self._orchestrator._create_fallback_turn(

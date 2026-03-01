@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_3",
+  "title": "payment timeout upstream",
+  "symptom": "/payments timeout 30s",
+  "log_excerpt": "2026-02-23T14:01:38+08:00 ERROR sample incident 3",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 3",
+  "expected_root_cause": "上游风控服务超时导致支付接口超时",
+  "expected_domain": "支付",
+  "expected_aggregate": "Payment"
+}

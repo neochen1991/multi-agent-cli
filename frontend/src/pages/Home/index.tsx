@@ -242,9 +242,13 @@ const HomePage: React.FC = () => {
             { name: 'LogAgent', desc: '日志结构化分析专家', bg: '#f6ffed', border: '#b7eb8f' },
             { name: 'DomainAgent', desc: '领域映射与责任田专家', bg: '#e6f7ff', border: '#91d5ff' },
             { name: 'CodeAgent', desc: '代码与调用链分析专家', bg: '#fff7e6', border: '#ffd591' },
+            { name: 'MetricsAgent', desc: '指标窗口与容量异常专家', bg: '#f6ffed', border: '#95de64' },
+            { name: 'ChangeAgent', desc: '变更窗口与提交关联专家', bg: '#fffbe6', border: '#ffe58f' },
+            { name: 'RunbookAgent', desc: '案例库检索与SOP专家', bg: '#e6fffb', border: '#87e8de' },
             { name: 'CriticAgent', desc: '反例质疑与漏洞发现专家', bg: '#fff1f0', border: '#ffa39e' },
             { name: 'RebuttalAgent', desc: '证据补强与反驳专家', bg: '#f9f0ff', border: '#d3adf7' },
             { name: 'JudgeAgent', desc: '收敛裁决与结论生成专家', bg: '#fff0f6', border: '#ffadd2' },
+            { name: 'VerificationAgent', desc: '裁决后验证计划专家', bg: '#f0f5ff', border: '#adc6ff' },
           ].map((agent) => (
             <Col span={8} key={agent.name}>
               <Card

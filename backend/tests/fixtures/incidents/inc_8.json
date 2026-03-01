@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_8",
+  "title": "shipment callback retry storm",
+  "symptom": "callback retry storm",
+  "log_excerpt": "2026-02-28T14:01:38+08:00 ERROR sample incident 8",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 8",
+  "expected_root_cause": "回调签名校验失败触发无限重试",
+  "expected_domain": "履约",
+  "expected_aggregate": "Shipment"
+}

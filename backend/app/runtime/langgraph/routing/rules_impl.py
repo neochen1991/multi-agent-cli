@@ -72,6 +72,14 @@ class ConsensusRule(RoutingRule):
 
     def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
         if ctx.judge_confidence >= self._threshold:
+            if "VerificationAgent" not in ctx.seen_agents:
+                return RoutingDecision(
+                    next_step=step_for_agent("VerificationAgent"),
+                    should_stop=False,
+                    stop_reason="",
+                    reason="Judge 置信度达标，但尚未生成验证计划",
+                    metadata={"confidence": ctx.judge_confidence, "threshold": self._threshold},
+                )
             return RoutingDecision(
                 next_step="",
                 should_stop=True,

@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_9",
+  "title": "refund db timeout",
+  "symptom": "/refund 502 + SQL timeout",
+  "log_excerpt": "2026-02-29T14:01:38+08:00 ERROR sample incident 9",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 9",
+  "expected_root_cause": "退款事务长时间占用连接导致超时",
+  "expected_domain": "售后",
+  "expected_aggregate": "Refund"
+}

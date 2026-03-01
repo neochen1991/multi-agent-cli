@@ -1,22 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Alert,
   Avatar,
   Button,
   Card,
-  Collapse,
-  Descriptions,
   Empty,
   Input,
   Select,
   Space,
   Steps,
   Tag,
-  Timeline,
   Typography,
   message,
 } from 'antd';
-import { PlayCircleOutlined } from '@ant-design/icons';
 import { useParams, useSearchParams } from 'react-router-dom';
 import {
   buildDebateWsUrl,
@@ -28,6 +23,9 @@ import {
   type Report,
 } from '@/services/api';
 import { formatBeijingDateTime, formatBeijingTime } from '@/utils/dateTime';
+import AssetMappingPanel from '@/components/incident/AssetMappingPanel';
+import DebateProcessPanel from '@/components/incident/DebateProcessPanel';
+import DebateResultPanel from '@/components/incident/DebateResultPanel';
 
 const { TextArea } = Input;
 const { Paragraph, Text } = Typography;
@@ -89,6 +87,7 @@ const IncidentPage: React.FC = () => {
   const assetMappingReadyRef = useRef(false);
   const streamTimersRef = useRef<Record<string, number>>({});
   const seenEventIdsRef = useRef<Set<string>>(new Set());
+  const seenEventFingerprintsRef = useRef<Set<string>>(new Set());
 
   const steps = useMemo(
     () => [
@@ -103,11 +102,24 @@ const IncidentPage: React.FC = () => {
   const appendEvent = (kind: string, text: string, data?: unknown) => {
     const dataRecord = asRecord(data);
     const eventId = String(dataRecord.event_id || '').trim();
+    const fingerprint = [
+      kind,
+      String(dataRecord.phase || ''),
+      String(dataRecord.agent_name || dataRecord.agent || ''),
+      String(dataRecord.round_number || ''),
+      String(dataRecord.loop_round || ''),
+      String(dataRecord.timestamp || ''),
+      String(text || ''),
+    ].join('|');
     if (eventId) {
       if (seenEventIdsRef.current.has(eventId)) {
         return;
       }
       seenEventIdsRef.current.add(eventId);
+    } else if (fingerprint && seenEventFingerprintsRef.current.has(fingerprint)) {
+      return;
+    } else if (fingerprint) {
+      seenEventFingerprintsRef.current.add(fingerprint);
     }
     const eventTsRaw = String(dataRecord.timestamp || '').trim();
     const displayTime =
@@ -115,7 +127,7 @@ const IncidentPage: React.FC = () => {
         ? formatBeijingDateTime(eventTsRaw)
         : formatBeijingDateTime(new Date());
     const record: EventRecord = {
-      id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+      id: eventId || `${Date.now()}_${Math.random().toString(16).slice(2)}`,
       timeText: displayTime,
       kind,
       text,
@@ -228,6 +240,45 @@ const IncidentPage: React.FC = () => {
         .filter(Boolean)
         .join('\n');
     }
+    if (toolName === 'git_change_window') {
+      const repoPath = String(preview.repo_path || '-');
+      const changes = Array.isArray(preview.changes) ? preview.changes : [];
+      const top = changes
+        .map((item) => asRecord(item))
+        .map(
+          (item) =>
+            `${String(item.commit || '-')}: ${String(item.subject || '-')}${
+              item.time ? ` (${String(item.time)})` : ''
+            }`,
+        )
+        .slice(0, truncate ? 3 : 10);
+      return [
+        `代码仓目录：${repoPath}`,
+        `变更条数：${changes.length}`,
+        top.length ? `变更示例：${top.join('；')}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    }
+    if (toolName === 'metrics_snapshot_analyzer') {
+      const signals = Array.isArray(preview.signals) ? preview.signals : [];
+      const top = signals
+        .map((item) => asRecord(item))
+        .map((item) => `${String(item.label || item.metric || '-')}: ${String(item.value || '-')}`)
+        .slice(0, truncate ? 6 : 16);
+      return [`指标信号数：${signals.length}`, top.length ? `异常信号：${top.join('；')}` : ''].filter(Boolean).join('\n');
+    }
+    if (toolName === 'runbook_case_library') {
+      const query = String(preview.query || '-');
+      const items = Array.isArray(preview.items) ? preview.items : [];
+      const top = items
+        .map((item) => asRecord(item))
+        .map((item) => `${String(item.id || '-')}: ${String(item.title || item.description || '-')}`)
+        .slice(0, truncate ? 4 : 12);
+      return [`检索词：${query}`, `命中案例：${items.length}`, top.length ? `案例摘要：${top.join('；')}` : '']
+        .filter(Boolean)
+        .join('\n');
+    }
     const lines = Object.entries(preview)
       .slice(0, 6)
       .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : toDisplayText(value)}`);
@@ -251,7 +302,9 @@ const IncidentPage: React.FC = () => {
 
   const extractSessionError = (detail: DebateDetail | null): string => {
     const context = (detail?.context || {}) as Record<string, unknown>;
+    const code = String(context.last_error_code || '').trim();
     const direct = String(context.last_error || '').trim();
+    const retryHint = String(context.last_error_retry_hint || '').trim();
     if (direct) return direct;
     const eventLog = context.event_log;
     if (!Array.isArray(eventLog)) return '';
@@ -259,8 +312,11 @@ const IncidentPage: React.FC = () => {
       const row = asRecord(eventLog[i]);
       const event = asRecord(row.event);
       if (String(event.type || '') === 'session_failed') {
-        const err = String(event.error || '').trim();
-        if (err) return err;
+        const err = String(event.error_message || event.error || '').trim();
+        if (err) {
+          const suffix = retryHint ? `；重试建议：${retryHint}` : '';
+          return `${code ? `[${code}] ` : ''}${err}${suffix}`;
+        }
       }
     }
     return '';
@@ -321,9 +377,9 @@ const IncidentPage: React.FC = () => {
   };
 
   const extractReadableTextFromObject = (value: Record<string, unknown>): string => {
-    const chat = firstTextValue(value, ['chat_message', 'message', 'summary']);
-    const conclusion = firstTextValue(value, ['conclusion', 'root_cause', 'judgment']);
-    const analysis = firstTextValue(value, ['analysis', 'reason', 'detail']);
+    const chat = extractChatMessageText(firstTextValue(value, ['chat_message', 'message', 'summary']));
+    const conclusion = extractChatMessageText(firstTextValue(value, ['conclusion', 'root_cause', 'judgment']));
+    const analysis = extractChatMessageText(firstTextValue(value, ['analysis', 'reason', 'detail']));
     const confidenceRaw = value.confidence;
     const confidence =
       typeof confidenceRaw === 'number' ? `置信度 ${(Number(confidenceRaw) * 100).toFixed(1)}%` : '';
@@ -407,6 +463,14 @@ const IncidentPage: React.FC = () => {
     String(value || '')
       .toLowerCase()
       .replace(/[^\u4e00-\u9fa5a-z0-9]/gi, '');
+
+  const isEffectiveConclusionText = (value: string): boolean => {
+    const text = String(value || '').trim();
+    if (!text) return false;
+    const lowered = text.toLowerCase();
+    const blocked = ['需要进一步分析', 'insufficient', 'unknown', '无法确定', '待补充信息'];
+    return !blocked.some((token) => lowered.includes(token));
+  };
 
   const isNearDuplicateText = (leftText: string, rightText: string): boolean => {
     const left = normalizeForCompare(leftText);
@@ -532,6 +596,9 @@ const IncidentPage: React.FC = () => {
         local_log_reader: '日志文件读取工具',
         domain_excel_lookup: '责任田文档查询工具',
         git_repo_search: '代码仓检索工具',
+        git_change_window: '变更窗口分析工具',
+        metrics_snapshot_analyzer: '监控指标分析工具',
+        runbook_case_library: '案例库检索工具',
       };
       const statusLabelMap: Record<string, string> = {
         ok: '成功',
@@ -585,7 +652,7 @@ const IncidentPage: React.FC = () => {
       );
     } else if (
       (kind === 'autogen_call_completed' || kind === 'llm_call_completed') &&
-      ['analysis', 'critique', 'rebuttal', 'judgment'].includes(phase)
+      ['analysis', 'critique', 'rebuttal', 'judgment', 'verification'].includes(phase)
     ) {
       // 辩论阶段优先展示 agent_round，避免 completed 与 round 双重重复
       return null;
@@ -741,11 +808,15 @@ const IncidentPage: React.FC = () => {
       case 'agent_round_skipped':
         return `Agent轮次已降级 [${phase || '-'}] ${agent || ''} ${String(data?.reason || '')}`.trim();
       case 'session_failed':
-        return `会话失败 ${error}`.trim();
+        return `会话失败 ${String(data?.error_code || '')} ${error || String(data?.error_message || '')} ${String(data?.retry_hint || '')}`.trim();
       case 'ws_ack':
         return `控制指令确认 ${String(data?.message || '')}`.trim();
       case 'ws_control':
         return `控制指令 ${String(data?.action || '-')}`.trim();
+      case 'retry_requested':
+        return `重试请求 ${String(data?.retry_failed_only ? '仅失败Agent' : '全量')}`.trim();
+      case 'error':
+        return `会话错误 ${String(data?.error_code || '')} ${String(data?.message || '')}`.trim();
       default:
         return `事件: ${kind}`;
     }
@@ -775,7 +846,8 @@ const IncidentPage: React.FC = () => {
       phase.includes('coordination') ||
       phase.includes('critique') ||
       phase.includes('rebuttal') ||
-      phase.includes('judgment')
+      phase.includes('judgment') ||
+      phase.includes('verification')
     );
   };
 
@@ -833,8 +905,9 @@ const IncidentPage: React.FC = () => {
             const event = (row.event || {}) as Record<string, unknown>;
             const ts = typeof row.timestamp === 'string' ? row.timestamp : '';
             const kind = typeof event.type === 'string' ? event.type : 'event';
+            const eventId = typeof event.event_id === 'string' ? event.event_id : '';
             return {
-              id: `persisted_${idx}_${ts || kind}`,
+              id: eventId || `persisted_${idx}_${ts || kind}`,
               timeText: ts ? formatBeijingTime(ts) : '--:--:--',
               kind,
               text: formatEventText(kind, event),
@@ -848,6 +921,16 @@ const IncidentPage: React.FC = () => {
         const event = (row.event || {}) as Record<string, unknown>;
         const eventId = typeof event.event_id === 'string' ? event.event_id : '';
         if (eventId) seenEventIdsRef.current.add(eventId);
+        const fingerprint = [
+          String(event.type || ''),
+          String(event.phase || ''),
+          String(event.agent_name || event.agent || ''),
+          String(event.round_number || ''),
+          String(event.loop_round || ''),
+          String(event.timestamp || ''),
+          formatEventText(String(event.type || 'event'), event),
+        ].join('|');
+        if (fingerprint) seenEventFingerprintsRef.current.add(fingerprint);
       });
     }
     return detail;
@@ -870,6 +953,7 @@ const IncidentPage: React.FC = () => {
       });
       const session = await debateApi.createSession(incident.id, { maxRounds: debateMaxRounds });
       seenEventIdsRef.current.clear();
+      seenEventFingerprintsRef.current.clear();
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
@@ -896,6 +980,7 @@ const IncidentPage: React.FC = () => {
     try {
       const session = await debateApi.createSession(incidentId, { maxRounds: debateMaxRounds });
       seenEventIdsRef.current.clear();
+      seenEventFingerprintsRef.current.clear();
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
@@ -1144,6 +1229,27 @@ const IncidentPage: React.FC = () => {
     void startRealtimeDebate();
   };
 
+  const retryFailedAgents = async () => {
+    if (!sessionId) return;
+    setRunning(true);
+    appendEvent('retry_requested', '已请求仅重试失败Agent', {
+      type: 'retry_requested',
+      session_id: sessionId,
+      retry_failed_only: true,
+    });
+    try {
+      const result = await debateApi.execute(sessionId, { retryFailedOnly: true });
+      setDebateResult(result);
+      await loadSessionArtifacts(sessionId);
+      advanceStep(3);
+      message.success('失败Agent重试完成');
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || e?.message || '失败Agent重试失败');
+    } finally {
+      setRunning(false);
+    }
+  };
+
   useEffect(() => {
     const iid = routeIncidentId || searchParams.get('incident_id');
     const preferredView = (searchParams.get('view') || '').toLowerCase();
@@ -1153,6 +1259,7 @@ const IncidentPage: React.FC = () => {
       return;
     }
     seenEventIdsRef.current.clear();
+    seenEventFingerprintsRef.current.clear();
     setEventRecords([]);
     setStreamedMessageText({});
     setExpandedDialogueIds({});
@@ -1482,6 +1589,16 @@ const IncidentPage: React.FC = () => {
     ),
   }));
 
+  const timelineItems = useMemo(
+    () =>
+      filteredDebateEvents.map((row) => ({
+        children: `${row.timeText} [${row.kind}] ${row.text}${
+          String(asRecord(row.data).trace_id || '') ? ` trace=${String(asRecord(row.data).trace_id || '')}` : ''
+        }`,
+      })),
+    [filteredDebateEvents],
+  );
+
   const mappingItems = useMemo(() => {
     return mappingEvents
       .slice()
@@ -1549,6 +1666,9 @@ const IncidentPage: React.FC = () => {
       }
     }
     if (debateResult?.root_cause) {
+      if (!isEffectiveConclusionText(debateResult.root_cause)) {
+        return null;
+      }
       return {
         text: debateResult.root_cause,
         timeText: formatBeijingDateTime(debateResult.created_at),
@@ -1591,6 +1711,70 @@ const IncidentPage: React.FC = () => {
     }
     return sections;
   }, [reportResult]);
+
+  const debateSummaryCards = useMemo(() => {
+    if (!debateResult) return [];
+    const cards: Array<{ title: string; body: string }> = [];
+    const rootCause = String(debateResult.root_cause || '').trim();
+    if (rootCause) {
+      cards.push({ title: '根因结论', body: rootCause });
+    }
+    const evidenceItems = Array.isArray(debateResult.evidence_chain) ? debateResult.evidence_chain : [];
+    if (evidenceItems.length > 0) {
+      const lines = evidenceItems.slice(0, 8).map((item, index) => {
+        const evidence = asRecord(item);
+        const evidenceId = firstTextValue(evidence, ['evidence_id']);
+        const source = firstTextValue(evidence, ['source']) || '-';
+        const desc = firstTextValue(evidence, ['description']) || '-';
+        const ref = firstTextValue(evidence, ['source_ref', 'location']);
+        return `${index + 1}. ${evidenceId ? `[${evidenceId}] ` : ''}${desc}（来源：${source}${ref ? `，引用：${ref}` : ''}）`;
+      });
+      cards.push({ title: '证据链', body: lines.join('\n') });
+    }
+    const impact = asRecord(debateResult.impact_analysis || {});
+    if (Object.keys(impact).length > 0) {
+      cards.push({
+        title: '影响评估',
+        body: [
+          `受影响服务：${Array.isArray(impact.affected_services) ? impact.affected_services.join('、') || '-' : '-'}`,
+          `业务影响：${firstTextValue(impact, ['business_impact']) || '-'}`,
+        ].join('\n'),
+      });
+    }
+    const fix = asRecord(debateResult.fix_recommendation || {});
+    if (Object.keys(fix).length > 0) {
+      const stepTexts = Array.isArray(fix.steps)
+        ? fix.steps
+            .slice(0, 6)
+            .map((step) => {
+              const row = asRecord(step);
+              return firstTextValue(row, ['summary', 'action', 'step']) || toDisplayText(step);
+            })
+            .filter(Boolean)
+        : [];
+      cards.push({
+        title: '修复建议',
+        body: [
+          firstTextValue(fix, ['summary']),
+          stepTexts.length ? `步骤：\n${stepTexts.map((step, idx) => `${idx + 1}. ${step}`).join('\n')}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      });
+    }
+    const verificationItems = Array.isArray(debateResult.verification_plan) ? debateResult.verification_plan : [];
+    if (verificationItems.length > 0) {
+      const lines = verificationItems.slice(0, 8).map((item, index) => {
+        const row = asRecord(item);
+        const objective = firstTextValue(row, ['objective']) || '-';
+        const dimension = firstTextValue(row, ['dimension']) || '-';
+        const criteria = firstTextValue(row, ['pass_criteria']) || '-';
+        return `${index + 1}. [${dimension}] ${objective}\n通过标准：${criteria}`;
+      });
+      cards.push({ title: '验证计划', body: lines.join('\n') });
+    }
+    return cards;
+  }, [debateResult]);
 
   const regenerateReport = async () => {
     if (!incidentId) return;
@@ -1715,149 +1899,39 @@ const IncidentPage: React.FC = () => {
           </Card>
         )}
 
-        {activeStep === 1 && (
-          <Space direction="vertical" size="large" style={{ width: '100%' }}>
-            <Card title="责任田映射结果">
-              {mappingItems.length === 0 ? (
-                <Empty description={mappingEmptyHint} image={Empty.PRESENTED_IMAGE_SIMPLE} />
-              ) : (
-                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                  {mappingItems.map((item) => (
-                    <Card key={item.id} size="small">
-                      <Descriptions column={2} size="small">
-                        <Descriptions.Item label="时间">{item.timeText}</Descriptions.Item>
-                        <Descriptions.Item label="匹配状态">
-                          <Tag color={item.matched === '命中' ? 'success' : 'warning'}>{item.matched}</Tag>
-                        </Descriptions.Item>
-                        <Descriptions.Item label="领域">{item.domain}</Descriptions.Item>
-                        <Descriptions.Item label="聚合根">{item.aggregate}</Descriptions.Item>
-                        <Descriptions.Item label="责任团队">{item.ownerTeam}</Descriptions.Item>
-                        <Descriptions.Item label="责任人">{item.owner}</Descriptions.Item>
-                        <Descriptions.Item label="置信度">{item.confidence}</Descriptions.Item>
-                        <Descriptions.Item label="匹配原因">{item.reason}</Descriptions.Item>
-                      </Descriptions>
-                    </Card>
-                  ))}
-                </Space>
-              )}
-            </Card>
-          </Space>
-        )}
+        {activeStep === 1 && <AssetMappingPanel mappingItems={mappingItems} mappingEmptyHint={mappingEmptyHint} />}
 
         {activeStep === 2 && (
-          <Space direction="vertical" size="large" style={{ width: '100%' }}>
-            <Card title="会话信息">
-              <Descriptions column={2}>
-                <Descriptions.Item label="Incident ID">{incidentId || '-'}</Descriptions.Item>
-                <Descriptions.Item label="Session ID">{sessionId || '-'}</Descriptions.Item>
-                <Descriptions.Item label="实时状态">
-                  {running ? <Tag color="processing">运行中</Tag> : <Tag>待启动/已完成</Tag>}
-                </Descriptions.Item>
-                <Descriptions.Item label="辩论轮数">{debateMaxRounds}</Descriptions.Item>
-              </Descriptions>
-              <Button
-                type="primary"
-                icon={<PlayCircleOutlined />}
-                loading={running}
-                onClick={() => void startRealtimeDebate()}
-              >
-                启动实时辩论
-              </Button>
-              <Space style={{ marginLeft: 12 }}>
-                <Button danger onClick={() => void sendWsControl('cancel')}>
-                  取消分析
-                </Button>
-                <Button onClick={() => void sendWsControl('resume')}>恢复分析</Button>
-              </Space>
-            </Card>
-
-            <Card title="辩论事件明细（流式对话）">
-              {renderEventFilters()}
-              {renderDialogueStream()}
-            </Card>
-
-            <Card title="辩论轮次过程（可展开查看每轮输入输出）">
-              {roundCollapseItems.length === 0 ? (
-                <Text type="secondary">暂无轮次数据</Text>
-              ) : (
-                <Collapse items={roundCollapseItems} />
-              )}
-            </Card>
-
-            <Card title="辩论过程记录">
-              {filteredDebateEvents.length === 0 ? (
-                <Text type="secondary">尚无过程记录</Text>
-              ) : (
-                <Timeline
-                  items={filteredDebateEvents.map((row) => ({
-                    children: `${row.timeText} [${row.kind}] ${row.text}${String((asRecord(row.data).trace_id || '')) ? ` trace=${String(asRecord(row.data).trace_id || '')}` : ''}`,
-                  }))}
-                />
-              )}
-            </Card>
-          </Space>
+          <DebateProcessPanel
+            incidentId={incidentId}
+            sessionId={sessionId}
+            running={running}
+            loading={loading}
+            debateMaxRounds={debateMaxRounds}
+            onStartRealtimeDebate={startRealtimeDebate}
+            onCancel={() => sendWsControl('cancel')}
+            onResume={() => sendWsControl('resume')}
+            onRetryFailed={retryFailedAgents}
+            eventFiltersNode={renderEventFilters()}
+            dialogueNode={renderDialogueStream()}
+            roundCollapseItems={roundCollapseItems}
+            timelineItems={timelineItems}
+          />
         )}
 
         {activeStep === 3 && (
-          <Space direction="vertical" size="large" style={{ width: '100%' }}>
-            <Card title="主Agent结论">
-              {mainAgentConclusion ? (
-                <Space direction="vertical" size="small" style={{ width: '100%' }}>
-                  <Tag color="processing">ProblemAnalysisAgent</Tag>
-                  <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
-                    {mainAgentConclusion.text}
-                  </Paragraph>
-                  <Text type="secondary">结论时间：{mainAgentConclusion.timeText}</Text>
-                </Space>
-              ) : sessionDetail?.status === 'failed' ? (
-                <Alert
-                  type="error"
-                  showIcon
-                  message={`辩论失败：${extractSessionError(sessionDetail) || '请查看辩论过程中的错误详情'}`}
-                />
-              ) : (
-                <Alert type="info" showIcon message="主Agent结论尚未生成，请先完成辩论过程" />
-              )}
-            </Card>
-            <Card
-              title="报告结果"
-              extra={
-                <Button loading={reportLoading} onClick={regenerateReport} disabled={!incidentId}>
-                  重新生成报告
-                </Button>
-              }
-            >
-              {reportResult ? (
-                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                  <Descriptions size="small" column={2}>
-                    <Descriptions.Item label="报告ID">{reportResult.report_id}</Descriptions.Item>
-                    <Descriptions.Item label="生成时间">
-                      {formatBeijingDateTime(reportResult.generated_at)}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="格式">{reportResult.format}</Descriptions.Item>
-                    <Descriptions.Item label="会话ID">
-                      {reportResult.debate_session_id || sessionId || '-'}
-                    </Descriptions.Item>
-                  </Descriptions>
-                  {reportSections.length === 0 ? (
-                    <Alert type="info" showIcon message="报告内容为空，请点击“重新生成报告”" />
-                  ) : (
-                    <Space direction="vertical" size="small" style={{ width: '100%' }}>
-                      {reportSections.map((section, index) => (
-                        <Card key={`${section.title}_${index}`} size="small" title={section.title}>
-                          <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
-                            {section.body}
-                          </Paragraph>
-                        </Card>
-                      ))}
-                    </Space>
-                  )}
-                </Space>
-              ) : (
-                <Alert type="info" showIcon message="暂未生成报告，请先完成辩论或点击“重新生成报告”" />
-              )}
-            </Card>
-          </Space>
+          <DebateResultPanel
+            mainAgentConclusion={mainAgentConclusion}
+            sessionStatus={String(sessionDetail?.status || '').toLowerCase()}
+            sessionError={extractSessionError(sessionDetail)}
+            debateSummaryCards={debateSummaryCards}
+            reportResult={reportResult}
+            reportSections={reportSections}
+            reportLoading={reportLoading}
+            incidentId={incidentId}
+            sessionId={sessionId}
+            onRegenerateReport={regenerateReport}
+          />
         )}
       </div>
     </div>

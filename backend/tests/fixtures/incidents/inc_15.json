@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_15",
+  "title": "user profile stale read",
+  "symptom": "profile stale data",
+  "log_excerpt": "2026-02-215T14:01:38+08:00 ERROR sample incident 15",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 15",
+  "expected_root_cause": "读写分离延迟导致读旧数据",
+  "expected_domain": "用户",
+  "expected_aggregate": "Profile"
+}

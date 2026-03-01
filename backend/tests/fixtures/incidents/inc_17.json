@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_17",
+  "title": "pricing miscalc",
+  "symptom": "price mismatch complaints",
+  "log_excerpt": "2026-02-217T14:01:38+08:00 ERROR sample incident 17",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 17",
+  "expected_root_cause": "浮点精度与舍入策略不一致",
+  "expected_domain": "定价",
+  "expected_aggregate": "PriceRule"
+}

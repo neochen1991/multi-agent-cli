@@ -47,6 +47,7 @@ from app.runtime.langgraph.message_ops import (
 from app.runtime.langgraph.prompt_builder import PromptBuilder
 from app.runtime.langgraph.phase_executor import PhaseExecutor
 from app.runtime.langgraph.routing_strategy import HybridRouter
+from app.runtime.langgraph.services.state_transition_service import StateTransitionService
 from app.runtime.langgraph.mailbox import (
     clone_mailbox,
     compact_mailbox,
@@ -89,7 +90,7 @@ class LangGraphRuntimeOrchestrator:
     """LangGraph-backed orchestrator with persisted checkpoints."""
 
     MAX_HISTORY_ITEMS = 2
-    PARALLEL_ANALYSIS_AGENTS = ("LogAgent", "DomainAgent", "CodeAgent")
+    PARALLEL_ANALYSIS_AGENTS = ("LogAgent", "DomainAgent", "CodeAgent", "MetricsAgent", "ChangeAgent", "RunbookAgent")
     COLLABORATION_PEER_LIMIT = 2
     STREAM_CHUNK_SIZE = 160
     STREAM_MAX_CHUNKS = 16
@@ -122,6 +123,18 @@ class LangGraphRuntimeOrchestrator:
             derive_conversation_state_with_context=self._derive_conversation_state_with_context,
         )
         self._phase_executor = PhaseExecutor(self)
+        self._state_transition_service = StateTransitionService(
+            dedupe_new_messages=self._dedupe_new_messages,
+            message_deltas_from_cards=self._message_deltas_from_cards,
+            derive_conversation_state=self._derive_conversation_state_with_context,
+            messages_to_cards=lambda msgs: self._messages_to_cards(msgs, limit=20),
+            merge_round_and_message_cards=lambda round_cards, message_cards: merge_round_and_message_cards_ops(
+                round_cards,
+                message_cards,
+                limit=20,
+            ),
+            structured_snapshot=structured_state_snapshot,
+        )
 
         logger.info(
             "langgraph_runtime_orchestrator_initialized",
@@ -536,33 +549,7 @@ class LangGraphRuntimeOrchestrator:
         state: _DebateExecState,
         result: Optional[Dict[str, Any]],
     ) -> _DebateExecState:
-        prev_history_cards = list(state.get("history_cards") or [])
-        next_history_cards = list((result or {}).get("history_cards") or state.get("history_cards") or [])
-        new_cards = next_history_cards[len(prev_history_cards):]
-        # Count only actual new agent evidence turns as discussion progress.
-        step_delta = len(new_cards)
-        explicit_messages = list((result or {}).get("messages") or [])
-        derived_messages = self._message_deltas_from_cards(new_cards) if not explicit_messages else []
-        new_messages = explicit_messages or derived_messages
-        deduped_messages = self._dedupe_new_messages(
-            existing_messages=list(state.get("messages") or []),
-            new_messages=new_messages,
-        )
-        merged_messages = list(state.get("messages") or []) + list(deduped_messages or [])
-        convo_state = self._derive_conversation_state_with_context(
-            next_history_cards,
-            messages=merged_messages,
-            existing_agent_outputs=dict(state.get("agent_outputs") or {}),
-        )
-        next_state = {
-            **(result or {}),
-            "next_step": "",
-            "discussion_step_count": int(state.get("discussion_step_count") or 0) + step_delta,
-            **({"messages": deduped_messages} if deduped_messages else {}),
-            **convo_state,
-        }
-        merged_preview = {**dict(state), **next_state}
-        return {**next_state, **structured_state_snapshot(merged_preview)}
+        return self._state_transition_service.apply_step_result(state, result)
 
     async def _graph_round_start(self, state: _DebateExecState) -> _DebateExecState:
         current_round = int(state.get("current_round") or 0) + 1
@@ -910,9 +897,13 @@ class LangGraphRuntimeOrchestrator:
             "LogAgent": "分析错误日志、502 与 CPU 异常的直接证据链",
             "DomainAgent": "根据接口 URL 映射领域/聚合根/责任田并确认负责团队",
             "CodeAgent": "定位可能代码瓶颈、连接池/线程池/慢SQL风险点",
+            "MetricsAgent": "提取 CPU/线程/连接池/错误率指标异常窗口，给出关键时间点与阈值",
+            "ChangeAgent": "分析故障时间窗前后的发布/提交变更，给出可疑变更候选",
+            "RunbookAgent": "检索相似故障案例与SOP，给出可执行处置步骤和差异点",
             "CriticAgent": "质疑前述结论中的证据缺口和假设跳跃",
             "RebuttalAgent": "针对质疑补充证据并收敛执行建议",
             "JudgeAgent": "综合所有结论给出最终根因裁决与处置建议",
+            "VerificationAgent": "基于最终裁决生成功能/性能/回归/回滚验证计划",
         }
         if fill_defaults:
             for target, task in defaults.items():
@@ -1404,7 +1395,7 @@ class LangGraphRuntimeOrchestrator:
                     phase=turn.phase,
                     summary=str(output.get("analysis") or "")[:200],
                     conclusion=str(output.get("conclusion") or "")[:220],
-                    evidence_chain=[str(item) for item in (output.get("evidence_chain") or [])[:3]],
+                    evidence_chain=self._evidence_texts(output.get("evidence_chain"), limit=3),
                     confidence=float(turn.confidence or 0.0),
                     raw_output=output,
                 )
@@ -1441,7 +1432,7 @@ class LangGraphRuntimeOrchestrator:
             phase=turn.phase,
             summary=str(turn.output_content.get("analysis") or "")[:200],
             conclusion=str(turn.output_content.get("conclusion") or "")[:220],
-            evidence_chain=[str(item) for item in (turn.output_content.get("evidence_chain") or [])[:3]],
+            evidence_chain=self._evidence_texts(turn.output_content.get("evidence_chain"), limit=3),
             confidence=float(turn.confidence or 0.0),
             raw_output=turn.output_content,
         )
@@ -1465,6 +1456,21 @@ class LangGraphRuntimeOrchestrator:
 
     def _agent_sequence(self) -> List[AgentSpec]:
         return build_agent_sequence(enable_critique=bool(settings.DEBATE_ENABLE_CRITIQUE))
+
+    def _evidence_texts(self, raw_items: Any, *, limit: int = 3) -> List[str]:
+        if not isinstance(raw_items, list):
+            return []
+        texts: List[str] = []
+        for item in raw_items[: max(1, limit)]:
+            if isinstance(item, dict):
+                description = str(item.get("description") or item.get("evidence") or item.get("summary") or "").strip()
+                if description:
+                    texts.append(description[:220])
+                continue
+            text = str(item or "").strip()
+            if text:
+                texts.append(text[:220])
+        return texts
 
     def _build_agent_prompt(
         self,
@@ -1739,7 +1745,7 @@ class LangGraphRuntimeOrchestrator:
         used = bool(tool_ctx.get("used"))
         if enabled and used and status == "ok":
             return spec
-        if spec.name in {"LogAgent", "DomainAgent", "CodeAgent"} and tuple(spec.tools or ()):
+        if spec.name in {"LogAgent", "DomainAgent", "CodeAgent", "MetricsAgent", "ChangeAgent", "RunbookAgent"} and tuple(spec.tools or ()):
             return replace(spec, tools=())
         return spec
 
@@ -1910,6 +1916,9 @@ class LangGraphRuntimeOrchestrator:
             "CodeAgent": "code_or_resource",
             "LogAgent": "runtime_log",
             "DomainAgent": "domain_mapping",
+            "MetricsAgent": "metrics_signal",
+            "ChangeAgent": "change_correlation",
+            "RunbookAgent": "runbook_reference",
             "CriticAgent": "peer_review",
             "RebuttalAgent": "peer_review",
         }
@@ -1990,6 +1999,10 @@ class LangGraphRuntimeOrchestrator:
         executed_rounds: int,
     ) -> Dict[str, Any]:
         judge_turn = next((turn for turn in reversed(self.turns) if turn.agent_name == "JudgeAgent"), None)
+        verification_turn = next(
+            (turn for turn in reversed(self.turns) if turn.agent_name == "VerificationAgent"),
+            None,
+        )
 
         if judge_turn:
             output = judge_turn.output_content
@@ -2029,6 +2042,17 @@ class LangGraphRuntimeOrchestrator:
             action_items = []
             responsible_team = {"team": "待确认", "owner": "待确认"}
 
+        verification_plan = []
+        if verification_turn and isinstance(verification_turn.output_content, dict):
+            raw_plan = verification_turn.output_content.get("verification_plan")
+            if isinstance(raw_plan, list):
+                verification_plan = [item for item in raw_plan if isinstance(item, dict)]
+        if isinstance(final_judgment, dict):
+            if verification_plan:
+                final_judgment["verification_plan"] = verification_plan
+            elif isinstance(final_judgment.get("verification_plan"), list):
+                verification_plan = [item for item in final_judgment.get("verification_plan") if isinstance(item, dict)]
+
         root_cause = final_judgment.get("root_cause") if isinstance(final_judgment, dict) else {}
         root_summary = ""
         if isinstance(root_cause, dict):
@@ -2058,6 +2082,7 @@ class LangGraphRuntimeOrchestrator:
             "consensus_reached": consensus_reached,
             "executed_rounds": max(1, executed_rounds),
             "final_judgment": final_judgment,
+            "verification_plan": verification_plan,
             "decision_rationale": decision_rationale,
             "action_items": action_items,
             "responsible_team": responsible_team,

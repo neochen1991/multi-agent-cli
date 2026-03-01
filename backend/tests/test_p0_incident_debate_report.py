@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from app.main import app
-from app.models.debate import DebateResult
+from app.models.debate import DebateResult, EvidenceItem
 from app.repositories.debate_repository import InMemoryDebateRepository
 from app.repositories.incident_repository import InMemoryIncidentRepository
 from app.repositories.report_repository import InMemoryReportRepository
@@ -113,7 +113,24 @@ def test_report_endpoints_work_with_in_memory_storage(monkeypatch):
         session_id=session_id,
         incident_id=incident_id,
         root_cause="Null pointer in create order",
+        root_cause_category="runtime",
         confidence=0.91,
+        evidence_chain=[
+            EvidenceItem(
+                type="log",
+                description="gateway 502 timeout after 30s",
+                source="log",
+                location=None,
+                strength="strong",
+            ),
+            EvidenceItem(
+                type="code",
+                description="OrderAppService transaction too long",
+                source="code",
+                location=None,
+                strength="medium",
+            ),
+        ],
     )
     asyncio.run(debate_service._repository.save_result(result))
 
@@ -379,8 +396,8 @@ def test_execute_debate_accepts_coordination_phase_in_history(monkeypatch):
     assert detail_resp.status_code == 200
     rounds = detail_resp.json().get("rounds") or []
     assert rounds
-    # coordination phase should be normalized to analysis in persisted session model.
-    assert rounds[0]["phase"] == "analysis"
+    # coordination phase is now a first-class persisted phase.
+    assert rounds[0]["phase"] == "coordination"
 
 
 def test_interface_locate_endpoint_maps_to_domain_aggregate():

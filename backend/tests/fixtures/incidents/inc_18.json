@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_18",
+  "title": "comment service 502",
+  "symptom": "/comments 502 intermittent",
+  "log_excerpt": "2026-02-218T14:01:38+08:00 ERROR sample incident 18",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 18",
+  "expected_root_cause": "连接池参数过小+慢SQL",
+  "expected_domain": "内容",
+  "expected_aggregate": "Comment"
+}

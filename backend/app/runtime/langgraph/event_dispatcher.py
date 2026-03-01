@@ -22,6 +22,7 @@ class EventDispatcher:
         self._trace_id = str(trace_id or "")
         self._session_id = str(session_id or "")
         self._callback = callback
+        self._event_sequence = 0
 
     def bind(
         self,
@@ -33,18 +34,24 @@ class EventDispatcher:
         if trace_id is not None:
             self._trace_id = str(trace_id or "")
         if session_id is not None:
-            self._session_id = str(session_id or "")
+            next_session = str(session_id or "")
+            if next_session != self._session_id:
+                self._event_sequence = 0
+            self._session_id = next_session
         if callback is not None:
             self._callback = callback
 
     async def emit(self, event: Dict[str, Any]) -> None:
+        self._event_sequence += 1
+        outbound = dict(event or {})
+        outbound.setdefault("event_sequence", self._event_sequence)
+        if self._session_id and "session_id" not in outbound:
+            outbound["session_id"] = self._session_id
         payload = enrich_event(
-            event,
+            outbound,
             trace_id=self._trace_id or None,
-            default_phase=str(event.get("phase") or ""),
+            default_phase=str(outbound.get("phase") or ""),
         )
-        if self._session_id and "session_id" not in payload:
-            payload["session_id"] = self._session_id
         await runtime_session_store.append_event(
             self._session_id or "unknown",
             payload,

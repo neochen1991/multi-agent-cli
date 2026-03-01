@@ -23,6 +23,7 @@ import structlog
 from app.config import settings
 from app.models.tooling import AgentToolingConfig
 from app.services.tooling_service import tooling_service
+from app.tools.case_library import CaseLibraryTool
 
 logger = structlog.get_logger()
 
@@ -76,6 +77,9 @@ class ToolContextResult:
 
 
 class AgentToolContextService:
+    def __init__(self) -> None:
+        self._case_library = CaseLibraryTool()
+
     async def build_context(
         self,
         *,
@@ -90,9 +94,21 @@ class AgentToolContextService:
             result = await self._build_code_context(
                 cfg, compact_context, incident_context, assigned_command, command_gate
             )
+        elif agent_name == "ChangeAgent":
+            result = await self._build_change_context(
+                cfg, compact_context, incident_context, assigned_command, command_gate
+            )
         elif agent_name == "LogAgent":
             result = await self._build_log_context(
                 cfg, compact_context, incident_context, assigned_command, command_gate
+            )
+        elif agent_name == "MetricsAgent":
+            result = await self._build_metrics_context(
+                compact_context, incident_context, assigned_command, command_gate
+            )
+        elif agent_name == "RunbookAgent":
+            result = await self._build_runbook_context(
+                compact_context, incident_context, assigned_command, command_gate
             )
         elif agent_name == "DomainAgent":
             result = await self._build_domain_context(
@@ -496,6 +512,280 @@ class AgentToolContextService:
                 ],
             )
 
+    async def _build_metrics_context(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+        command_gate: Dict[str, Any],
+    ) -> ToolContextResult:
+        audit_log: List[Dict[str, Any]] = [
+            self._audit(
+                tool_name="metrics_snapshot_analyzer",
+                action="command_gate",
+                status="ok" if command_gate.get("allow_tool") else "skipped",
+                detail={
+                    "reason": str(command_gate.get("reason") or ""),
+                    "has_command": bool(command_gate.get("has_command")),
+                    "decision_source": str(command_gate.get("decision_source") or ""),
+                    "command_preview": self._command_preview(assigned_command),
+                },
+            )
+        ]
+        if not bool(command_gate.get("allow_tool")):
+            return ToolContextResult(
+                name="metrics_snapshot_analyzer",
+                enabled=True,
+                used=False,
+                status="skipped_by_command",
+                summary=f"主Agent命令未要求 MetricsAgent 分析指标：{str(command_gate.get('reason') or '未授权工具调用')}",
+                data={"command_preview": self._command_preview(assigned_command)},
+                command_gate=command_gate,
+                audit_log=audit_log,
+            )
+        signals = self._collect_metrics_signals(compact_context, incident_context)
+        audit_log.append(
+            self._audit(
+                tool_name="metrics_snapshot_analyzer",
+                action="metrics_extract",
+                status="ok" if signals else "unavailable",
+                detail={
+                    "signal_count": len(signals),
+                    "sources": ["compact_context", "incident_context", "log_content"],
+                },
+            )
+        )
+        if not signals:
+            return ToolContextResult(
+                name="metrics_snapshot_analyzer",
+                enabled=True,
+                used=False,
+                status="unavailable",
+                summary="未发现可解析的监控指标快照，使用默认分析逻辑。",
+                data={},
+                command_gate=command_gate,
+                audit_log=audit_log,
+            )
+        return ToolContextResult(
+            name="metrics_snapshot_analyzer",
+            enabled=True,
+            used=True,
+            status="ok",
+            summary=f"提取到 {len(signals)} 条监控异常信号。",
+            data={"signals": signals[:20]},
+            command_gate=command_gate,
+            audit_log=audit_log,
+        )
+
+    async def _build_change_context(
+        self,
+        cfg: AgentToolingConfig,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+        command_gate: Dict[str, Any],
+    ) -> ToolContextResult:
+        tool_cfg = cfg.code_repo
+        audit_log: List[Dict[str, Any]] = [
+            self._audit(
+                tool_name="git_change_window",
+                action="command_gate",
+                status="ok" if command_gate.get("allow_tool") else "skipped",
+                detail={
+                    "reason": str(command_gate.get("reason") or ""),
+                    "has_command": bool(command_gate.get("has_command")),
+                    "decision_source": str(command_gate.get("decision_source") or ""),
+                    "command_preview": self._command_preview(assigned_command),
+                },
+            )
+        ]
+        if not tool_cfg.enabled:
+            return ToolContextResult(
+                name="git_change_window",
+                enabled=False,
+                used=False,
+                status="disabled",
+                summary="ChangeAgent 变更工具开关已关闭，使用默认分析逻辑。",
+                data={},
+                command_gate=command_gate,
+                audit_log=[
+                    *audit_log,
+                    self._audit(
+                        tool_name="git_change_window",
+                        action="config_check",
+                        status="disabled",
+                        detail={"enabled": False},
+                    ),
+                ],
+            )
+        if not bool(command_gate.get("allow_tool")):
+            return ToolContextResult(
+                name="git_change_window",
+                enabled=True,
+                used=False,
+                status="skipped_by_command",
+                summary=f"主Agent命令未要求 ChangeAgent 拉取变更窗口：{str(command_gate.get('reason') or '未授权工具调用')}",
+                data={"command_preview": self._command_preview(assigned_command)},
+                command_gate=command_gate,
+                audit_log=audit_log,
+            )
+        try:
+            repo_path = await asyncio.to_thread(
+                self._resolve_repo_path,
+                tool_cfg.repo_url,
+                tool_cfg.access_token,
+                tool_cfg.branch,
+                tool_cfg.local_repo_path,
+                audit_log,
+            )
+            if not repo_path:
+                return ToolContextResult(
+                    name="git_change_window",
+                    enabled=True,
+                    used=False,
+                    status="unavailable",
+                    summary="未配置可用仓库地址/本地路径，无法拉取变更窗口。",
+                    data={},
+                    command_gate=command_gate,
+                    audit_log=audit_log,
+                )
+            changes = await asyncio.to_thread(
+                self._collect_recent_git_changes,
+                repo_path,
+                int(getattr(tool_cfg, "max_hits", 20) or 20),
+                audit_log,
+            )
+            if not changes:
+                return ToolContextResult(
+                    name="git_change_window",
+                    enabled=True,
+                    used=False,
+                    status="unavailable",
+                    summary="未获取到有效变更记录，已回退默认分析逻辑。",
+                    data={"repo_path": repo_path, "changes": []},
+                    command_gate=command_gate,
+                    audit_log=audit_log,
+                )
+            return ToolContextResult(
+                name="git_change_window",
+                enabled=True,
+                used=True,
+                status="ok",
+                summary=f"已提取最近 {len(changes)} 条代码变更。",
+                data={"repo_path": repo_path, "changes": changes},
+                command_gate=command_gate,
+                audit_log=audit_log,
+            )
+        except Exception as exc:
+            error_text = str(exc).strip() or exc.__class__.__name__
+            return ToolContextResult(
+                name="git_change_window",
+                enabled=True,
+                used=False,
+                status="error",
+                summary=f"变更窗口提取失败：{error_text}，已回退默认分析。",
+                data={"error": error_text},
+                command_gate=command_gate,
+                audit_log=[
+                    *audit_log,
+                    self._audit(
+                        tool_name="git_change_window",
+                        action="tool_execute",
+                        status="error",
+                        detail={"error": error_text},
+                    ),
+                ],
+            )
+
+    async def _build_runbook_context(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+        command_gate: Dict[str, Any],
+    ) -> ToolContextResult:
+        audit_log: List[Dict[str, Any]] = [
+            self._audit(
+                tool_name="runbook_case_library",
+                action="command_gate",
+                status="ok" if command_gate.get("allow_tool") else "skipped",
+                detail={
+                    "reason": str(command_gate.get("reason") or ""),
+                    "has_command": bool(command_gate.get("has_command")),
+                    "decision_source": str(command_gate.get("decision_source") or ""),
+                    "command_preview": self._command_preview(assigned_command),
+                },
+            )
+        ]
+        if not bool(command_gate.get("allow_tool")):
+            return ToolContextResult(
+                name="runbook_case_library",
+                enabled=True,
+                used=False,
+                status="skipped_by_command",
+                summary=f"主Agent命令未要求 RunbookAgent 检索案例：{str(command_gate.get('reason') or '未授权工具调用')}",
+                data={"command_preview": self._command_preview(assigned_command)},
+                command_gate=command_gate,
+                audit_log=audit_log,
+            )
+        keywords = self._extract_keywords(compact_context, incident_context, assigned_command)
+        query = " ".join(keywords[:6]).strip()
+        result = await self._case_library.execute(action="search", query=query)
+        if not result.success:
+            error_text = str(result.error or "unknown error")
+            return ToolContextResult(
+                name="runbook_case_library",
+                enabled=True,
+                used=False,
+                status="error",
+                summary=f"案例库查询失败：{error_text}",
+                data={"error": error_text, "query": query},
+                command_gate=command_gate,
+                audit_log=[
+                    *audit_log,
+                    self._audit(
+                        tool_name="runbook_case_library",
+                        action="case_search",
+                        status="error",
+                        detail={"error": error_text, "query": query},
+                    ),
+                ],
+            )
+        items = []
+        payload = result.data if isinstance(result.data, dict) else {}
+        raw_items = payload.get("items") if isinstance(payload, dict) else []
+        if isinstance(raw_items, list):
+            items = [item for item in raw_items if isinstance(item, dict)]
+        audit_log.append(
+            self._audit(
+                tool_name="runbook_case_library",
+                action="case_search",
+                status="ok",
+                detail={"query": query, "match_count": len(items)},
+            )
+        )
+        if not items:
+            return ToolContextResult(
+                name="runbook_case_library",
+                enabled=True,
+                used=False,
+                status="unavailable",
+                summary="案例库无匹配结果，使用默认分析逻辑。",
+                data={"query": query},
+                command_gate=command_gate,
+                audit_log=audit_log,
+            )
+        return ToolContextResult(
+            name="runbook_case_library",
+            enabled=True,
+            used=True,
+            status="ok",
+            summary=f"案例库命中 {len(items)} 条相似故障。",
+            data={"query": query, "items": items[:8]},
+            command_gate=command_gate,
+            audit_log=audit_log,
+        )
+
     def _resolve_repo_path(
         self,
         repo_url: str,
@@ -576,7 +866,7 @@ class AgentToolContextService:
                     timeout_plan=GIT_FETCH_TIMEOUTS,
                 )
                 self._run_git(
-                    ["git", "checkout", safe_branch],
+                    ["git", "checkout", "-B", safe_branch, "FETCH_HEAD"],
                     cwd=repo_path,
                     audit_log=audit_log,
                     action="git_checkout",
@@ -584,7 +874,7 @@ class AgentToolContextService:
                     timeout_seconds=GIT_LOCAL_TIMEOUT,
                 )
                 self._run_git(
-                    ["git", "reset", "--hard", f"origin/{safe_branch}"],
+                    ["git", "reset", "--hard", "FETCH_HEAD"],
                     cwd=repo_path,
                     audit_log=audit_log,
                     action="git_reset",
@@ -805,6 +1095,128 @@ class AgentToolContextService:
         netloc = f"oauth2:{tk}@{parts.netloc}"
         return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
+    def _collect_recent_git_changes(
+        self,
+        repo_path: str,
+        max_items: int,
+        audit_log: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        cmd = [
+            "git",
+            "--no-pager",
+            "log",
+            f"-n{max(1, min(int(max_items or 20), 80))}",
+            "--pretty=format:%H\t%ad\t%an\t%s",
+            "--date=iso",
+        ]
+        try:
+            completed = subprocess.run(
+                cmd,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=GIT_LOCAL_TIMEOUT,
+                check=True,
+                env=self._git_env(),
+            )
+            output = completed.stdout or ""
+        except subprocess.CalledProcessError as exc:
+            err = str(exc.stderr or exc.stdout or "").strip()
+            err_lower = err.lower()
+            no_commit_markers = (
+                "does not have any commits yet",
+                "your current branch",
+                "no commits yet",
+                "bad revision",
+            )
+            if any(marker in err_lower for marker in no_commit_markers):
+                audit_log.append(
+                    self._audit(
+                        tool_name="git_change_window",
+                        action="git_log_changes",
+                        status="unavailable",
+                        detail={
+                            "repo_path": str(repo_path),
+                            "reason": "仓库暂无可用提交记录",
+                            "stderr": err[:300],
+                        },
+                    )
+                )
+                return []
+            raise RuntimeError(err or "git log failed") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"git log timeout({GIT_LOCAL_TIMEOUT}s): {str(exc)[:200]}") from exc
+        audit_log.append(
+            self._audit(
+                tool_name="git_change_window",
+                action="git_log_changes",
+                status="ok",
+                detail={"repo_path": str(repo_path), "lines": len(output.splitlines())},
+            )
+        )
+        changes: List[Dict[str, Any]] = []
+        for line in output.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 4:
+                continue
+            commit, commit_time, author, subject = parts[0], parts[1], parts[2], parts[3]
+            changes.append(
+                {
+                    "commit": commit[:12],
+                    "time": commit_time,
+                    "author": author,
+                    "subject": subject[:240],
+                }
+            )
+        return changes
+
+    def _collect_metrics_signals(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        signals: List[Dict[str, Any]] = []
+        text_sources = [
+            str(compact_context.get("log_excerpt") or ""),
+            str(incident_context.get("log_content") or ""),
+            str(incident_context.get("description") or ""),
+        ]
+        metric_patterns = [
+            ("cpu", r"cpu[^0-9]*([0-9]+(?:\.[0-9]+)?%?)", "CPU"),
+            ("threads", r"(?:线程|threads?)[^0-9]*([0-9]+)", "线程"),
+            ("hikari_pending", r"hikari[^,\n]*pending[^0-9]*([0-9]+)", "Hikari Pending"),
+            ("db_conn", r"(?:db|database)[^,\n]*([0-9]+/[0-9]+)", "DB连接"),
+            ("error_rate", r"(?:5xx|error(?:_rate)?)[^0-9]*([0-9]+(?:\.[0-9]+)?%?)", "错误率"),
+        ]
+        for source_text in text_sources:
+            if not source_text:
+                continue
+            for metric_key, pattern, label in metric_patterns:
+                for match in re.finditer(pattern, source_text, flags=re.IGNORECASE):
+                    value = str(match.group(1) or "").strip()
+                    if not value:
+                        continue
+                    start = max(0, match.start() - 50)
+                    end = min(len(source_text), match.end() + 50)
+                    snippet = source_text[start:end].strip()
+                    signals.append(
+                        {
+                            "metric": metric_key,
+                            "label": label,
+                            "value": value,
+                            "snippet": snippet[:280],
+                        }
+                    )
+        dedup: List[Dict[str, Any]] = []
+        seen = set()
+        for item in signals:
+            key = f"{item.get('metric')}|{item.get('value')}|{item.get('snippet')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup.append(item)
+        return dedup[:40]
+
     def _decide_tool_invocation(
         self,
         *,
@@ -848,7 +1260,28 @@ class AgentToolContextService:
                 "decision_source": "command_text_negative",
             }
 
-        enable_terms = ("读取日志", "查询日志", "检索代码", "搜索仓库", "查责任田", "excel", "csv", "git", "repo")
+        enable_terms = (
+            "读取日志",
+            "查询日志",
+            "检索代码",
+            "搜索仓库",
+            "查责任田",
+            "excel",
+            "csv",
+            "git",
+            "repo",
+            "指标",
+            "监控",
+            "cpu",
+            "线程",
+            "连接池",
+            "变更",
+            "发布",
+            "commit",
+            "runbook",
+            "案例库",
+            "sop",
+        )
         if any(term in merged for term in enable_terms):
             return {
                 "agent_name": agent_name,

@@ -193,7 +193,13 @@ async def create_debate_session(
     summary="执行辩论流程",
     description="执行完整的辩论流程并返回结果"
 )
-async def execute_debate(session_id: str):
+async def execute_debate(
+    session_id: str,
+    retry_failed_only: bool = Query(
+        default=False,
+        description="是否仅重试失败的 Agent（当前为兼容参数，默认 false）",
+    ),
+):
     """执行辩论流程"""
     session = await debate_service.get_session(session_id)
     if not session:
@@ -209,7 +215,10 @@ async def execute_debate(session_id: str):
             return _build_result_response(result)
     
     try:
-        result = await debate_service.execute_debate(session_id)
+        result = await debate_service.execute_debate(
+            session_id,
+            retry_failed_only=retry_failed_only,
+        )
         
         # 更新故障状态和结果
         await incident_service.update_incident(
@@ -237,7 +246,13 @@ async def execute_debate(session_id: str):
     summary="异步执行辩论流程",
     description="提交异步辩论任务，返回 task_id",
 )
-async def execute_debate_async(session_id: str):
+async def execute_debate_async(
+    session_id: str,
+    retry_failed_only: bool = Query(
+        default=False,
+        description="是否仅重试失败的 Agent（当前为兼容参数，默认 false）",
+    ),
+):
     session = await debate_service.get_session(session_id)
     if not session:
         raise HTTPException(
@@ -246,7 +261,10 @@ async def execute_debate_async(session_id: str):
         )
 
     async def _run():
-        result = await debate_service.execute_debate(session_id)
+        result = await debate_service.execute_debate(
+            session_id,
+            retry_failed_only=retry_failed_only,
+        )
         await incident_service.update_incident(
             session.incident_id,
             IncidentUpdate(

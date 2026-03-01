@@ -37,6 +37,10 @@ class RetryableAgentTimeoutError(RuntimeError):
     """Retry marker for timeout-like transient failures."""
 
 
+class FatalLLMError(RuntimeError):
+    """Non-recoverable LLM error that should fail the session immediately."""
+
+
 async def emit_stream_deltas(
     orchestrator: Any,
     *,
@@ -89,28 +93,6 @@ def run_agent_once(orchestrator: Any, spec: AgentSpec, prompt: str, max_tokens: 
         max_tokens=max(128, int(max_tokens or 256)),
         model_kwargs={"extra_body": {"thinking": {"type": "disabled"}}},
     )
-    # Prefer AgentFactory (tool-enabled ReAct path) when configured and tools exist.
-    factory_error = ""
-    if settings.AGENT_USE_FACTORY and spec.name in {"LogAgent", "DomainAgent", "CodeAgent"} and tuple(spec.tools or ()):
-        factory = orchestrator._get_agent_factory()
-        if factory is not None:
-            try:
-                agent = factory.create_agent(
-                    spec.name,
-                    llm=llm,
-                    tools=list(spec.tools),
-                    system_prompt=spec.system_prompt or "",
-                )
-                response = agent.invoke({"messages": [HumanMessage(content=prompt)]})
-                extracted = _extract_factory_text(response, agent_name=spec.name)
-                if extracted.strip():
-                    return AgentInvokeResult(
-                        content=extracted,
-                        invoke_mode="factory",
-                    )
-            except Exception as exc:
-                # Fallback to direct invoke path below.
-                factory_error = str(exc).strip() or exc.__class__.__name__
     reply = llm.invoke(
         [
             SystemMessage(content=spec.system_prompt or "你是严谨的 SRE 分析助手。"),
@@ -120,22 +102,8 @@ def run_agent_once(orchestrator: Any, spec: AgentSpec, prompt: str, max_tokens: 
     return AgentInvokeResult(
         content=LLMClient._extract_reply_text(reply, agent_name=spec.name),
         invoke_mode="direct",
-        factory_error=factory_error,
+        factory_error="",
     )
-
-
-def _extract_factory_text(response: Any, *, agent_name: str) -> str:
-    # create_react_agent 常见返回: {"messages": [...]}
-    if isinstance(response, dict):
-        messages = response.get("messages")
-        if isinstance(messages, list):
-            for item in reversed(messages):
-                if not isinstance(item, BaseMessage):
-                    continue
-                text = LLMClient._extract_reply_text(item, agent_name=agent_name)
-                if text:
-                    return text
-    return LLMClient._extract_reply_text(response, agent_name=agent_name)
 
 
 def run_agent_with_structured_output(
@@ -231,26 +199,43 @@ async def call_agent(
     agent_max_tokens = orchestrator._agent_max_tokens(spec.name)
     attempt_prompt = prompt
     attempt_max_tokens = agent_max_tokens
+    timeout_plan = orchestrator._agent_timeout_plan(spec.name)
+    max_attempts = max(1, len(timeout_plan))
+    event_common = {
+        "phase": spec.phase,
+        "agent_name": spec.name,
+        "session_id": orchestrator.session_id,
+        "model": model_name,
+        "loop_round": loop_round,
+        "round_number": round_number,
+    }
 
     await orchestrator._emit_event(
         {
             "type": "llm_call_started",
-            "phase": spec.phase,
-            "agent_name": spec.name,
-            "model": model_name,
-            "session_id": orchestrator.session_id,
-            "loop_round": loop_round,
-            "round_number": round_number,
+            **event_common,
             "prompt_preview": prompt[:1200],
+            "prompt_length": len(prompt),
+            "max_tokens": agent_max_tokens,
+            "timeout_plan": timeout_plan,
+            "max_attempts": max_attempts,
+        }
+    )
+    await orchestrator._emit_event(
+        {
+            "type": "llm_request_started",
+            **event_common,
+            "prompt_preview": prompt[:1200],
+            "prompt_length": len(prompt),
+            "max_tokens": agent_max_tokens,
+            "timeout_plan": timeout_plan,
+            "max_attempts": max_attempts,
         }
     )
     await orchestrator._emit_event(
         {
             "type": "llm_http_request",
-            "phase": spec.phase,
-            "agent_name": spec.name,
-            "session_id": orchestrator.session_id,
-            "model": model_name,
+            **event_common,
             "endpoint": endpoint,
             "request_payload": {
                 "model": model_name,
@@ -261,8 +246,6 @@ async def call_agent(
             },
         }
     )
-
-    timeout_plan = orchestrator._agent_timeout_plan(spec.name)
     logger.info(
         "runtime_agent_llm_scheduled",
         session_id=orchestrator.session_id,
@@ -274,8 +257,6 @@ async def call_agent(
         max_tokens=attempt_max_tokens,
         prompt_length=len(attempt_prompt),
     )
-
-    max_attempts = max(1, len(timeout_plan))
     retrying = AsyncRetrying(
         stop=stop_after_attempt(max_attempts),
         wait=wait_exponential(multiplier=0.2, min=0.2, max=2.0),
@@ -453,13 +434,25 @@ async def call_agent(
                     await orchestrator._emit_event(
                         {
                             "type": "llm_call_completed",
-                            "phase": spec.phase,
-                            "agent_name": spec.name,
-                            "model": model_name,
-                            "session_id": orchestrator.session_id,
+                            **event_common,
                             "response_preview": raw_content[:1200],
+                            "response_length": len(raw_content),
                             "latency_ms": latency_ms,
                             "invoke_mode": invoke_mode,
+                            "attempt": attempt_idx,
+                            "max_attempts": max_attempts,
+                        }
+                    )
+                    await orchestrator._emit_event(
+                        {
+                            "type": "llm_request_completed",
+                            **event_common,
+                            "response_preview": raw_content[:1200],
+                            "response_length": len(raw_content),
+                            "latency_ms": latency_ms,
+                            "invoke_mode": invoke_mode,
+                            "attempt": attempt_idx,
+                            "max_attempts": max_attempts,
                         }
                     )
                     logger.info(
@@ -482,6 +475,42 @@ async def call_agent(
                     is_timeout = isinstance(exc, asyncio.TimeoutError) or "timeout" in error_text.lower()
                     if settings.LLM_FAILFAST_ON_RATE_LIMIT and orchestrator._is_rate_limited_error(error_text):
                         error_text = f"LLM_RATE_LIMITED: {error_text}"
+                    lowered_error = error_text.lower()
+                    fatal_markers = (
+                        "invalidsubscription",
+                        "invalid subscription",
+                        "invalidapikey",
+                        "invalid api key",
+                        "authentication",
+                        "unauthorized",
+                        "llm_rate_limited",
+                    )
+                    if any(marker in lowered_error for marker in fatal_markers):
+                        logger.error(
+                            "runtime_agent_llm_fatal",
+                            session_id=orchestrator.session_id,
+                            agent_name=spec.name,
+                            phase=spec.phase,
+                            loop_round=loop_round,
+                            round_number=round_number,
+                            attempt=attempt_idx,
+                            max_attempts=max_attempts,
+                            latency_ms=latency_ms,
+                            error=error_text,
+                        )
+                        await orchestrator._emit_event(
+                            {
+                                "type": "llm_call_failed",
+                                **event_common,
+                                "error": error_text,
+                                "latency_ms": latency_ms,
+                                "timeout_seconds": attempt_timeout,
+                                "attempt": attempt_idx,
+                                "max_attempts": max_attempts,
+                                "fatal": True,
+                            }
+                        )
+                        raise FatalLLMError(f"{spec.name} 调用不可恢复失败: {error_text}") from exc
                     retryable = attempt_idx < max_attempts and is_timeout
                     if retryable:
                         logger.warning(
@@ -571,12 +600,25 @@ async def call_agent(
                     await orchestrator._emit_event(
                         {
                             "type": "llm_call_timeout" if is_timeout else "llm_call_failed",
-                            "phase": spec.phase,
-                            "agent_name": spec.name,
-                            "model": model_name,
-                            "session_id": orchestrator.session_id,
+                            **event_common,
                             "error": error_text,
                             "latency_ms": latency_ms,
+                            "timeout_seconds": attempt_timeout,
+                            "attempt": attempt_idx,
+                            "max_attempts": max_attempts,
+                            "prompt_preview": attempt_prompt[:1200],
+                        }
+                    )
+                    await orchestrator._emit_event(
+                        {
+                            "type": "llm_request_failed",
+                            **event_common,
+                            "error": error_text,
+                            "failure_type": "timeout" if is_timeout else "error",
+                            "latency_ms": latency_ms,
+                            "timeout_seconds": attempt_timeout,
+                            "attempt": attempt_idx,
+                            "max_attempts": max_attempts,
                             "prompt_preview": attempt_prompt[:1200],
                         }
                     )

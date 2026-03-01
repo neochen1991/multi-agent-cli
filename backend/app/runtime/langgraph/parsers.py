@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from hashlib import sha1
 from typing import Any, Dict, List, Optional
 
 from app.core.json_utils import extract_json_dict
@@ -173,10 +174,7 @@ def normalize_normal_output(parsed: Dict[str, Any], raw_content: str) -> Dict[st
     chat_message = str(parsed.get("chat_message") or "").strip()
     analysis = str(parsed.get("analysis") or "").strip()
     conclusion = str(parsed.get("conclusion") or analysis or "").strip()
-    evidence = parsed.get("evidence_chain")
-    if not isinstance(evidence, list):
-        evidence = []
-    evidence = [str(item).strip() for item in evidence if str(item).strip()][:3]
+    evidence = _normalize_evidence_items(parsed.get("evidence_chain"), source_hint="analysis", max_items=5)
 
     confidence = parsed.get("confidence")
     try:
@@ -217,6 +215,55 @@ def normalize_normal_output(parsed: Dict[str, Any], raw_content: str) -> Dict[st
         "confidence": confidence_value,
         "raw_text": raw_content[:1200],
     }
+
+
+def normalize_verification_output(parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
+    base = normalize_normal_output(parsed, raw_content)
+    raw_plan = parsed.get("verification_plan")
+    plan: List[Dict[str, Any]] = []
+    if isinstance(raw_plan, list):
+        for idx, item in enumerate(raw_plan[:8], start=1):
+            if isinstance(item, dict):
+                plan.append(
+                    {
+                        "id": str(item.get("id") or f"ver_{idx}"),
+                        "dimension": str(item.get("dimension") or "functional"),
+                        "objective": str(item.get("objective") or "")[:220],
+                        "steps": [str(step).strip()[:240] for step in (item.get("steps") or []) if str(step).strip()][:6],
+                        "pass_criteria": str(item.get("pass_criteria") or "")[:220],
+                        "owner": str(item.get("owner") or "待确认"),
+                        "priority": str(item.get("priority") or "p1"),
+                    }
+                )
+            else:
+                text = str(item or "").strip()
+                if text:
+                    plan.append(
+                        {
+                            "id": f"ver_{idx}",
+                            "dimension": "functional",
+                            "objective": text[:220],
+                            "steps": [text[:220]],
+                            "pass_criteria": "目标达成且无新增错误",
+                            "owner": "待确认",
+                            "priority": "p1",
+                        }
+                    )
+    if not plan:
+        conclusion = str(base.get("conclusion") or "完成修复后执行功能与性能回归验证")[:220]
+        plan = [
+            {
+                "id": "ver_1",
+                "dimension": "functional",
+                "objective": conclusion,
+                "steps": [conclusion],
+                "pass_criteria": "核心接口成功率恢复",
+                "owner": "待确认",
+                "priority": "p0",
+            }
+        ]
+    base["verification_plan"] = plan
+    return base
 
 
 def normalize_commander_output(parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
@@ -311,25 +358,33 @@ def normalize_judge_output(
     if not isinstance(evidence_chain, list):
         evidence_chain = []
     evidence_items: List[Dict[str, Any]] = []
-    for item in evidence_chain[:6]:
+    for index, item in enumerate(evidence_chain[:6], start=1):
         if isinstance(item, dict):
+            description_text = str(
+                item.get("description") or item.get("evidence") or item.get("summary") or ""
+            ).strip()
+            source_text = str(item.get("source") or "langgraph")
+            source_ref_text = str(item.get("source_ref") or item.get("location") or "")
             evidence_items.append(
                 {
+                    "evidence_id": str(item.get("evidence_id") or _evidence_id(description_text, source_ref_text, source_text, index)),
                     "type": str(item.get("type") or "analysis"),
-                    "description": str(
-                        item.get("description") or item.get("evidence") or item.get("summary") or ""
-                    ),
-                    "source": str(item.get("source") or "langgraph"),
+                    "description": description_text,
+                    "source": source_text,
+                    "source_ref": source_ref_text,
                     "location": item.get("location"),
                     "strength": str(item.get("strength") or "medium"),
                 }
             )
         else:
+            description_text = str(item).strip()
             evidence_items.append(
                 {
+                    "evidence_id": _evidence_id(description_text, "", "langgraph", index),
                     "type": "analysis",
-                    "description": str(item),
+                    "description": description_text,
                     "source": "langgraph",
+                    "source_ref": "",
                     "location": None,
                     "strength": "medium",
                 }
@@ -413,8 +468,57 @@ def normalize_agent_output(agent_name: str, raw_content: str, *, judge_fallback_
     if agent_name == "JudgeAgent":
         parsed = parse_judge_payload(raw_content)
         return normalize_judge_output(parsed, raw_content, fallback_summary=judge_fallback_summary)
+    if agent_name == "VerificationAgent":
+        parsed = extract_mixed_json_dict(raw_content)
+        return normalize_verification_output(parsed, raw_content)
     if agent_name == "ProblemAnalysisAgent":
         parsed = extract_mixed_json_dict(raw_content)
         return normalize_commander_output(parsed, raw_content)
     parsed = extract_mixed_json_dict(raw_content)
     return normalize_normal_output(parsed, raw_content)
+
+
+def _normalize_evidence_items(raw_evidence: Any, *, source_hint: str, max_items: int = 5) -> List[Dict[str, Any]]:
+    if not isinstance(raw_evidence, list):
+        raw_evidence = []
+    items: List[Dict[str, Any]] = []
+    for index, item in enumerate(raw_evidence[:max_items], start=1):
+        if isinstance(item, dict):
+            description = str(item.get("description") or item.get("evidence") or item.get("summary") or "").strip()
+            if not description:
+                continue
+            source = str(item.get("source") or source_hint or "analysis")
+            source_ref = str(item.get("source_ref") or item.get("location") or "")
+            items.append(
+                {
+                    "evidence_id": str(item.get("evidence_id") or _evidence_id(description, source_ref, source, index)),
+                    "type": str(item.get("type") or source_hint or "analysis"),
+                    "description": description[:300],
+                    "source": source,
+                    "source_ref": source_ref[:300],
+                    "location": item.get("location"),
+                    "strength": str(item.get("strength") or "medium"),
+                }
+            )
+            continue
+        text = str(item or "").strip()
+        if not text:
+            continue
+        items.append(
+            {
+                "evidence_id": _evidence_id(text, "", source_hint or "analysis", index),
+                "type": source_hint or "analysis",
+                "description": text[:300],
+                "source": source_hint or "analysis",
+                "source_ref": "",
+                "location": None,
+                "strength": "medium",
+            }
+        )
+    return items
+
+
+def _evidence_id(description: str, source_ref: str, source: str, index: int) -> str:
+    raw = "|".join([str(description or "").strip(), str(source_ref or "").strip(), str(source or "").strip(), str(index)])
+    digest = sha1(raw.encode("utf-8")).hexdigest()[:12]
+    return f"evd_{digest}"

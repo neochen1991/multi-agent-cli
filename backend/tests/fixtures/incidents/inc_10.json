@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_10",
+  "title": "gateway tls handshake fail",
+  "symptom": "TLS handshake failures",
+  "log_excerpt": "2026-02-210T14:01:38+08:00 ERROR sample incident 10",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 10",
+  "expected_root_cause": "证书过期引发TLS握手失败",
+  "expected_domain": "网关",
+  "expected_aggregate": "Gateway"
+}

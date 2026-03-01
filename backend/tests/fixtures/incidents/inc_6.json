@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_6",
+  "title": "search latency spike",
+  "symptom": "/search p99 5s",
+  "log_excerpt": "2026-02-26T14:01:38+08:00 ERROR sample incident 6",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 6",
+  "expected_root_cause": "索引分片热点导致查询延迟飙升",
+  "expected_domain": "搜索",
+  "expected_aggregate": "Query"
+}

@@ -20,6 +20,7 @@ def _card(agent_name: str, confidence: float = 0.6) -> AgentEvidence:
 
 class _FakeOrchestrator:
     consensus_threshold = 0.75
+    PARALLEL_ANALYSIS_AGENTS = ("LogAgent", "DomainAgent", "CodeAgent", "MetricsAgent", "ChangeAgent", "RunbookAgent")
 
     def _route_guardrail(self, *, state, round_cards, route_decision):
         _ = state, round_cards
@@ -45,6 +46,15 @@ class _FakeOrchestrator:
 
     def _compact_round_context(self, context):
         return context
+
+    def _round_agent_counts(self, round_cards):
+        counts = {}
+        for card in round_cards:
+            name = str(getattr(card, "agent_name", "") or "").strip()
+            if not name:
+                continue
+            counts[name] = counts.get(name, 0) + 1
+        return counts
 
 
 @pytest.mark.asyncio
@@ -87,3 +97,34 @@ async def test_hybrid_router_consensus_shortcut():
     )
     assert result.mode == "langgraph_supervisor_consensus_shortcut"
     assert result.decision["should_stop"] is True
+
+
+@pytest.mark.asyncio
+async def test_hybrid_router_converges_to_judge_after_critique_cycle():
+    router = HybridRouter()
+    orch = _FakeOrchestrator()
+    round_cards = [
+        _card("LogAgent"),
+        _card("DomainAgent"),
+        _card("CodeAgent"),
+        _card("MetricsAgent"),
+        _card("ChangeAgent"),
+        _card("RunbookAgent"),
+        _card("CriticAgent"),
+        _card("RebuttalAgent"),
+    ]
+    result = await router.decide(
+        orchestrator=orch,
+        state={},
+        history_cards=list(round_cards),
+        round_cards=round_cards,
+        dialogue_items=[],
+        loop_round=1,
+        discussion_step_count=8,
+        max_discussion_steps=12,
+        preseed_step="",
+        supervisor_stop_requested=False,
+        supervisor_stop_reason="",
+    )
+    assert result.mode == "langgraph_supervisor_post_critique_converge"
+    assert result.decision["next_step"] == "speak:JudgeAgent"

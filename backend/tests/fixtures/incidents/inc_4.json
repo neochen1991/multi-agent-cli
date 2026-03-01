@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_4",
+  "title": "inventory deadlock",
+  "symptom": "/inventory 500 deadlock",
+  "log_excerpt": "2026-02-24T14:01:38+08:00 ERROR sample incident 4",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 4",
+  "expected_root_cause": "库存扣减并发更新触发死锁",
+  "expected_domain": "库存",
+  "expected_aggregate": "Inventory"
+}

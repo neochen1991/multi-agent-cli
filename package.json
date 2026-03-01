@@ -19,6 +19,7 @@
     "stop:all": "bash ./scripts/stop-all.sh",
     "stop:all:force": "bash ./scripts/stop-all.sh --force-ports",
     "smoke:e2e": "node ./scripts/smoke-e2e.mjs",
+    "smoke:e2e:scenario": "SMOKE_SCENARIO=order-502-db-lock node ./scripts/smoke-e2e.mjs",
     "store:migrate": "python3 ./scripts/local-store-migrate.py",
     "store:clean": "bash ./scripts/local-store-clean.sh"
   },

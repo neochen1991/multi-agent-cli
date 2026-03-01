@@ -253,9 +253,13 @@ class GraphBuilder:
             "LogAgent": "log_agent_node",
             "DomainAgent": "domain_agent_node",
             "CodeAgent": "code_agent_node",
+            "MetricsAgent": "metrics_agent_node",
+            "ChangeAgent": "change_agent_node",
+            "RunbookAgent": "runbook_agent_node",
             "CriticAgent": "critic_agent_node",
             "RebuttalAgent": "rebuttal_agent_node",
             "JudgeAgent": "judge_agent_node",
+            "VerificationAgent": "verification_agent_node",
         }
         if agent_name in predefined:
             return predefined[agent_name]

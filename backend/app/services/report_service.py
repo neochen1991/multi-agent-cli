@@ -74,6 +74,8 @@ class ReportService:
                 f"Debate result for incident {incident_id} not found. "
                 "Execute debate first."
             )
+        if not self._has_effective_debate_result(debate_result):
+            raise ValueError("缺少有效大模型结论，已拒绝生成报告。请先完成有效辩论结论后重试。")
 
         session = await debate_service.get_session(incident.debate_session_id)
         assets = session.context.get("assets", {}) if session else {}
@@ -136,6 +138,8 @@ class ReportService:
             final_judgment["impact_analysis"] = result.impact_analysis.model_dump(mode="json")
         if result.risk_assessment:
             final_judgment["risk_assessment"] = result.risk_assessment.model_dump(mode="json")
+        if result.verification_plan:
+            final_judgment["verification_plan"] = list(result.verification_plan)
 
         return {
             "final_judgment": final_judgment,
@@ -150,6 +154,50 @@ class ReportService:
                 round_.model_dump(mode="json") for round_ in result.debate_history
             ],
         }
+
+    @staticmethod
+    def _has_effective_debate_result(result: DebateResult) -> bool:
+        summary = str(result.root_cause or "").strip()
+        if not summary:
+            return False
+        lowered = summary.lower()
+        blocked_fragments = {
+            "需要进一步分析",
+            "insufficient",
+            "unknown",
+            "无法确定",
+            "待补充信息",
+        }
+        if any(fragment in lowered for fragment in blocked_fragments):
+            return False
+        if float(result.confidence or 0.0) <= 0.0:
+            return False
+        if not result.evidence_chain:
+            return False
+        source_tokens = set()
+        description_tokens = []
+        for item in result.evidence_chain:
+            type_text = str(getattr(item, "type", "") or "").lower()
+            source_text = str(getattr(item, "source", "") or "").lower()
+            source_tokens.add(type_text)
+            source_tokens.add(source_text)
+            description_tokens.append(str(getattr(item, "description", "") or "").lower())
+        has_log = any("log" in token for token in source_tokens)
+        has_other = any(
+            marker in token
+            for token in source_tokens
+            for marker in ("code", "domain", "metrics", "change", "runbook")
+        )
+        if not has_log:
+            has_log = any("日志" in text or "log" in text for text in description_tokens)
+        if not has_other:
+            has_other = any(
+                any(marker in text for marker in ("代码", "领域", "指标", "变更", "runbook", "code", "domain", "metric", "change"))
+                for text in description_tokens
+            )
+        if not (has_log and has_other):
+            return False
+        return True
 
 
 report_service = ReportService()

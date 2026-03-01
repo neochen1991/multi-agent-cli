@@ -202,6 +202,10 @@ class HybridRouter:
         supervisor_stop_reason: str,
     ) -> StrategyResult:
         """Make a routing decision using the hybrid strategy."""
+        round_counts = orchestrator._round_agent_counts(round_cards)
+        seen_agents = {str(card.agent_name or "").strip() for card in round_cards if str(card.agent_name or "").strip()}
+        judge_started = int(round_counts.get("JudgeAgent", 0)) >= 1
+
         # Stage 1: Use preseed step for first step
         if preseed_step and discussion_step_count == 0:
             decision = orchestrator._route_guardrail(
@@ -238,7 +242,72 @@ class HybridRouter:
                 mode="langgraph_supervisor_consensus_shortcut",
             )
 
-        # Stage 3: Check budget limits
+        # Stage 3: Deterministic converge path after analysis coverage.
+        # Once all analysis agents have spoken, route directly to critique/rebuttal/judge
+        # to avoid repeated coordinator calls under slow model responses.
+        analysis_done = all(
+            str(agent_name).strip() in seen_agents
+            for agent_name in list(orchestrator.PARALLEL_ANALYSIS_AGENTS)
+        )
+        critique_enabled = True
+        if analysis_done and not judge_started:
+            critic_done = int(round_counts.get("CriticAgent", 0)) >= 1
+            rebuttal_done = int(round_counts.get("RebuttalAgent", 0)) >= 1
+            if critique_enabled and not critic_done:
+                decision = orchestrator._route_guardrail(
+                    state=state,
+                    round_cards=round_cards,
+                    route_decision={
+                        "next_step": "speak:CriticAgent",
+                        "should_stop": False,
+                        "stop_reason": "",
+                        "reason": "分析阶段完成，进入质疑环节",
+                    },
+                )
+                return StrategyResult(
+                    decision=decision,
+                    mode="langgraph_supervisor_post_analysis_critic",
+                )
+            if critique_enabled and critic_done and not rebuttal_done:
+                decision = orchestrator._route_guardrail(
+                    state=state,
+                    round_cards=round_cards,
+                    route_decision={
+                        "next_step": "speak:RebuttalAgent",
+                        "should_stop": False,
+                        "stop_reason": "",
+                        "reason": "质疑已完成，进入反驳补证",
+                    },
+                )
+                return StrategyResult(
+                    decision=decision,
+                    mode="langgraph_supervisor_post_critic_rebuttal",
+                )
+
+        # Stage 4: Fast convergence after critique/rebuttal cycle.
+        # If both CriticAgent and RebuttalAgent have completed once in this round,
+        # avoid repeated commander loops and force JudgeAgent to收敛.
+        critique_completed = (
+            int(round_counts.get("CriticAgent", 0)) >= 1
+            and int(round_counts.get("RebuttalAgent", 0)) >= 1
+        )
+        if critique_completed and not judge_started:
+            decision = orchestrator._route_guardrail(
+                state=state,
+                round_cards=round_cards,
+                route_decision={
+                    "next_step": "speak:JudgeAgent",
+                    "should_stop": False,
+                    "stop_reason": "",
+                    "reason": "批判与反驳已完成，切换 JudgeAgent 收敛结论",
+                },
+            )
+            return StrategyResult(
+                decision=decision,
+                mode="langgraph_supervisor_post_critique_converge",
+            )
+
+        # Stage 5: Check budget limits
         if discussion_step_count >= max_discussion_steps:
             rb = await self._rule.decide(
                 orchestrator=orchestrator,
@@ -257,7 +326,7 @@ class HybridRouter:
             rb.mode = "langgraph_supervisor_budget_guard"
             return rb
 
-        # Stage 4: Try LLM-based dynamic routing
+        # Stage 6: Try LLM-based dynamic routing
         try:
             return await self._dynamic.decide(
                 orchestrator=orchestrator,
@@ -278,7 +347,7 @@ class HybridRouter:
                 error=str(e),
                 session_id=getattr(orchestrator, "session_id", None),
             )
-            # Stage 5: Fall back to rule-based routing
+            # Stage 7: Fall back to rule-based routing
             rb = await self._rule.decide(
                 orchestrator=orchestrator,
                 state=state,

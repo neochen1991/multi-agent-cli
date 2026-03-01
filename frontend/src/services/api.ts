@@ -69,6 +69,23 @@ export interface DebateResult {
   root_cause: string;
   root_cause_category?: string;
   confidence: number;
+  evidence_chain?: Array<{
+    evidence_id?: string;
+    type: string;
+    description: string;
+    source: string;
+    source_ref?: string;
+    location?: string;
+    strength?: string;
+  }>;
+  fix_recommendation?: {
+    summary?: string;
+    steps?: Array<Record<string, unknown>>;
+    code_changes_required?: boolean;
+    rollback_recommended?: boolean;
+    testing_requirements?: string[];
+  };
+  verification_plan?: Array<Record<string, unknown>>;
   impact_analysis?: {
     affected_services: string[];
     business_impact?: string;
@@ -221,8 +238,12 @@ export const debateApi = {
     const { data } = await api.post('/debates/', null, { params });
     return data;
   },
-  async execute(sessionId: string): Promise<DebateResult> {
-    const { data } = await api.post<DebateResult>(`/debates/${sessionId}/execute`);
+  async execute(sessionId: string, options?: { retryFailedOnly?: boolean }): Promise<DebateResult> {
+    const params =
+      typeof options?.retryFailedOnly === 'boolean'
+        ? { retry_failed_only: options.retryFailedOnly }
+        : undefined;
+    const { data } = await api.post<DebateResult>(`/debates/${sessionId}/execute`, null, { params });
     return data;
   },
   async get(sessionId: string): Promise<DebateDetail> {
@@ -233,8 +254,15 @@ export const debateApi = {
     const { data } = await api.get<DebateResult>(`/debates/${sessionId}/result`);
     return data;
   },
-  async executeAsync(sessionId: string): Promise<{ task_id: string; status: string }> {
-    const { data } = await api.post(`/debates/${sessionId}/execute-async`);
+  async executeAsync(
+    sessionId: string,
+    options?: { retryFailedOnly?: boolean },
+  ): Promise<{ task_id: string; status: string }> {
+    const params =
+      typeof options?.retryFailedOnly === 'boolean'
+        ? { retry_failed_only: options.retryFailedOnly }
+        : undefined;
+    const { data } = await api.post(`/debates/${sessionId}/execute-async`, null, { params });
     return data;
   },
   async cancel(sessionId: string): Promise<{ session_id: string; cancelled: boolean }> {

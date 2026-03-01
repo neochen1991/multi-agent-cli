@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_13",
+  "title": "cache avalanche",
+  "symptom": "redis qps spike db overload",
+  "log_excerpt": "2026-02-213T14:01:38+08:00 ERROR sample incident 13",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 13",
+  "expected_root_cause": "热点缓存同一时刻过期引发雪崩",
+  "expected_domain": "平台",
+  "expected_aggregate": "Cache"
+}

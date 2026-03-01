@@ -28,10 +28,12 @@ class DebateStatus(str, Enum):
 
 class DebatePhase(str, Enum):
     """辩论阶段"""
+    COORDINATION = "coordination"  # 主Agent协调
     ANALYSIS = "analysis"        # 独立分析
     CRITIQUE = "critique"        # 交叉质疑
     REBUTTAL = "rebuttal"        # 反驳修正
     JUDGMENT = "judgment"        # 最终裁决
+    VERIFICATION = "verification"  # 验证计划
 
 
 class AgentRole(str, Enum):
@@ -116,9 +118,11 @@ class DebateSession(BaseModel):
 
 class EvidenceItem(BaseModel):
     """证据项"""
+    evidence_id: Optional[str] = Field(None, description="证据ID")
     type: str = Field(..., description="证据类型")
     description: str = Field(..., description="证据描述")
     source: str = Field(..., description="证据来源")
+    source_ref: Optional[str] = Field(None, description="证据引用（文件/日志定位）")
     location: Optional[str] = Field(None, description="代码位置")
     strength: str = Field(default="medium", description="证据强度: strong/medium/weak")
 
@@ -175,6 +179,9 @@ class DebateResult(BaseModel):
     
     # 行动项
     action_items: List[Dict[str, Any]] = Field(default_factory=list, description="行动项")
+
+    # 验证计划
+    verification_plan: List[Dict[str, Any]] = Field(default_factory=list, description="验证计划")
     
     # 异议记录
     dissenting_opinions: List[Dict[str, Any]] = Field(default_factory=list, description="异议意见")

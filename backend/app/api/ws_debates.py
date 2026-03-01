@@ -147,6 +147,13 @@ async def _run_debate_with_events(session_id: str):
         await runtime_task_registry.mark_done(session_id, status="failed", error=str(e))
         logger.error("ws_debate_task_failed", session_id=session_id, error=str(e))
         latest = await debate_service.get_session(session_id)
+        error_code = ""
+        recoverable = False
+        retry_hint = ""
+        if latest and isinstance(latest.context, dict):
+            error_code = str(latest.context.get("last_error_code") or "")
+            recoverable = bool(latest.context.get("last_error_recoverable") or False)
+            retry_hint = str(latest.context.get("last_error_retry_hint") or "")
         if latest:
             task_state = await runtime_task_registry.get(session_id)
             await ws_manager.broadcast(
@@ -163,7 +170,16 @@ async def _run_debate_with_events(session_id: str):
                     },
                 },
             )
-        await ws_manager.broadcast(session_id, {"type": "error", "message": str(e)})
+        await ws_manager.broadcast(
+            session_id,
+            {
+                "type": "error",
+                "message": str(e),
+                "error_code": error_code,
+                "recoverable": recoverable,
+                "retry_hint": retry_hint,
+            },
+        )
 
 
 @router.websocket("/ws/debates/{session_id}")

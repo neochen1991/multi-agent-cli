@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_1",
+  "title": "orders 502 cpu high db lock",
+  "symptom": "/orders 502, CPU>300%, 连接池打满",
+  "log_excerpt": "2026-02-21T14:01:38+08:00 ERROR sample incident 1",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 1",
+  "expected_root_cause": "数据库连接池耗尽并伴随锁等待",
+  "expected_domain": "订单",
+  "expected_aggregate": "Order"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_19",
+  "title": "upload 413",
+  "symptom": "/upload 413 payload too large",
+  "log_excerpt": "2026-02-219T14:01:38+08:00 ERROR sample incident 19",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 19",
+  "expected_root_cause": "网关上传大小限制过低",
+  "expected_domain": "文件",
+  "expected_aggregate": "Upload"
+}

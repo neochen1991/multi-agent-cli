@@ -65,18 +65,26 @@ def supervisor_step_to_node(next_step: str) -> str:
         return "analysis_collaboration_node"
     if step.startswith("speak:"):
         agent_name = agent_from_step(step)
-        return {
+        if not agent_name:
+            return "round_evaluate"
+        alias = {
             "LogAgent": "log_agent_node",
             "DomainAgent": "domain_agent_node",
             "CodeAgent": "code_agent_node",
+            "MetricsAgent": "metrics_agent_node",
+            "ChangeAgent": "change_agent_node",
+            "RunbookAgent": "runbook_agent_node",
             "CriticAgent": "critic_agent_node",
             "RebuttalAgent": "rebuttal_agent_node",
             "JudgeAgent": "judge_agent_node",
-        }.get(agent_name, "round_evaluate")
+            "VerificationAgent": "verification_agent_node",
+        }
+        return alias.get(agent_name, f"{agent_name.replace('Agent', '').lower()}_agent_node")
     return {
         "critic": "critic_agent_node",
         "rebuttal": "rebuttal_agent_node",
         "judge": "judge_agent_node",
+        "verification": "verification_agent_node",
     }.get(step, "round_evaluate")
 
 
@@ -214,6 +222,17 @@ def fallback_supervisor_route(
             "stop_reason": "",
         }
 
+    verification_available = True
+    verification_done = "VerificationAgent" in seen_set
+
+    if judge_conf >= consensus_threshold and verification_available and not verification_done:
+        return {
+            "next_step": step_for_agent("VerificationAgent"),
+            "reason": "裁决已形成，补充验证计划后再结束",
+            "should_stop": False,
+            "stop_reason": "",
+        }
+
     if judge_conf >= consensus_threshold:
         return {
             "next_step": "",
@@ -226,6 +245,14 @@ def fallback_supervisor_route(
         return {
             "next_step": step_for_agent("JudgeAgent"),
             "reason": "达到讨论步数预算，要求 JudgeAgent 最终裁决",
+            "should_stop": False,
+            "stop_reason": "",
+        }
+
+    if (judge_card is not None or judge_output) and not verification_done:
+        return {
+            "next_step": step_for_agent("VerificationAgent"),
+            "reason": "裁决后补充验证计划",
             "should_stop": False,
             "stop_reason": "",
         }
@@ -268,9 +295,13 @@ def route_from_commander_output(
             "logagent": "LogAgent",
             "domainagent": "DomainAgent",
             "codeagent": "CodeAgent",
+            "metricsagent": "MetricsAgent",
+            "changeagent": "ChangeAgent",
+            "runbookagent": "RunbookAgent",
             "criticagent": "CriticAgent",
             "rebuttalagent": "RebuttalAgent",
             "judgeagent": "JudgeAgent",
+            "verificationagent": "VerificationAgent",
         }
         return alias.get(compact, "")
 
@@ -301,11 +332,19 @@ def route_from_commander_output(
         judge_card = recent_judge_card(round_cards)
         judge_output = _agent_output_from_state(state, "JudgeAgent")
         judge_available = bool(judge_card) or bool(judge_output)
+        verification_done = bool(recent_agent_card(round_cards, "VerificationAgent")) or bool(
+            _agent_output_from_state(state, "VerificationAgent")
+        )
         if not judge_available:
             next_step = step_for_agent("JudgeAgent")
             should_stop = False
             if not stop_reason:
                 stop_reason = "主Agent请求停止，但尚无裁决，先触发 JudgeAgent 汇总"
+        elif "VerificationAgent" in allowed_agent_set and not verification_done:
+            next_step = step_for_agent("VerificationAgent")
+            should_stop = False
+            if not stop_reason:
+                stop_reason = "主Agent请求停止，但缺少验证计划，先触发 VerificationAgent"
         else:
             source = (
                 judge_card.raw_output

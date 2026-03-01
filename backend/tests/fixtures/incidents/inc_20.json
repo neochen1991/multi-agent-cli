@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_20",
+  "title": "audit log dropped",
+  "symptom": "audit events missing",
+  "log_excerpt": "2026-02-220T14:01:38+08:00 ERROR sample incident 20",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 20",
+  "expected_root_cause": "日志异步队列溢出导致丢失",
+  "expected_domain": "审计",
+  "expected_aggregate": "AuditEvent"
+}

@@ -31,6 +31,7 @@ from app.services.asset_service import asset_service
 from app.services.report_generation_service import report_generation_service
 from app.config import settings
 from app.core.event_schema import enrich_event, new_trace_id
+from app.core.observability import metrics_store
 from app.repositories.debate_repository import (
     DebateRepository,
     InMemoryDebateRepository,
@@ -93,6 +94,45 @@ class DebateService:
             if settings.LOCAL_STORE_BACKEND == "file"
             else InMemoryDebateRepository()
         )
+
+    @staticmethod
+    def _next_event_sequence(session: DebateSession) -> int:
+        current = int((session.context or {}).get("_event_sequence") or 0)
+        next_value = current + 1
+        session.context["_event_sequence"] = next_value
+        return next_value
+
+    @staticmethod
+    def _classify_error(error_text: str) -> Dict[str, Any]:
+        text = str(error_text or "").strip()
+        lowered = text.lower()
+        if "未获得有效大模型结论" in text:
+            return {
+                "error_code": "NO_EFFECTIVE_LLM_CONCLUSION",
+                "error_message": text,
+                "recoverable": True,
+                "retry_hint": "补充更完整的日志、堆栈和监控现象后重试分析",
+            }
+        if "timeout" in lowered or "超时" in text:
+            return {
+                "error_code": "AGENT_TIMEOUT",
+                "error_message": text,
+                "recoverable": True,
+                "retry_hint": "可先降低辩论轮次或缩短输入日志后重试",
+            }
+        if "rate_limit" in lowered or "429" in lowered:
+            return {
+                "error_code": "LLM_RATE_LIMITED",
+                "error_message": text,
+                "recoverable": True,
+                "retry_hint": "稍后重试，或降低并发配置",
+            }
+        return {
+            "error_code": "INTERNAL_RUNTIME_ERROR",
+            "error_message": text or "unknown error",
+            "recoverable": False,
+            "retry_hint": "请查看后端日志定位异常后重试",
+        }
     
     async def create_session(
         self,
@@ -119,6 +159,7 @@ class DebateService:
             "log_content": incident.log_content,
             "exception_stack": incident.exception_stack,
             "parsed_data": incident.parsed_data,
+            "_event_sequence": 0,
         }
         if debate_config:
             session_context["debate_config"] = debate_config
@@ -149,6 +190,7 @@ class DebateService:
         self,
         session_id: str,
         event_callback=None,
+        retry_failed_only: bool = False,
     ) -> DebateResult:
         """
         执行完整的辩论流程
@@ -164,6 +206,10 @@ class DebateService:
         Returns:
             辩论结果
         """
+        execute_started_at = datetime.utcnow()
+        had_retry = False
+        timeout_failure = False
+        invalid_conclusion_failure = False
         session = await self._repository.get_session(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
@@ -177,6 +223,7 @@ class DebateService:
         trace_id = str(session.context.get("trace_id") or "").strip() or new_trace_id("deb")
         session.context["trace_id"] = trace_id
         session.context["is_cancel_requested"] = False
+        session.context["retry_failed_only"] = bool(retry_failed_only)
         await self._transition_status(
             session,
             DebateStatus.RUNNING,
@@ -195,7 +242,11 @@ class DebateService:
         event_log: List[Dict[str, Any]] = []
 
         async def _emit_and_record(event: Dict[str, Any]) -> None:
-            payload = enrich_event(event, trace_id=trace_id)
+            sequence = self._next_event_sequence(session)
+            outbound = dict(event or {})
+            outbound.setdefault("event_sequence", sequence)
+            outbound.setdefault("session_id", session_id)
+            payload = enrich_event(outbound, trace_id=trace_id)
             event_log.append(
                 {
                     "timestamp": datetime.utcnow().isoformat(),
@@ -216,6 +267,7 @@ class DebateService:
                 "session_id": session_id,
                 "status": session.status.value,
                 "phase": DebatePhase.ANALYSIS.value,
+                "retry_failed_only": bool(retry_failed_only),
             }
         )
         
@@ -289,8 +341,12 @@ class DebateService:
                 except Exception as exc:
                     attempt += 1
                     error_text = str(exc).strip() or exc.__class__.__name__
+                    lowered_error = error_text.lower()
+                    if "timeout" in lowered_error:
+                        timeout_failure = True
                     no_effective_conclusion = "未获得有效大模型结论" in error_text
                     if no_effective_conclusion and settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION:
+                        invalid_conclusion_failure = True
                         await _emit_and_record(
                             {
                                 "type": "debate_failed_no_effective_llm_conclusion",
@@ -332,6 +388,7 @@ class DebateService:
                         phase="debating",
                         trace_id=trace_id,
                     )
+                    had_retry = True
                     await _emit_and_record(
                         {
                             "type": "debate_retry_scheduled",
@@ -445,6 +502,17 @@ class DebateService:
                 session_id=session_id,
                 confidence=result.confidence
             )
+            latency_ms = max(
+                0,
+                int((datetime.utcnow() - execute_started_at).total_seconds() * 1000),
+            )
+            metrics_store.record_debate_result(
+                status="completed",
+                latency_ms=latency_ms,
+                retried=had_retry,
+                timeout=False,
+                invalid_conclusion=False,
+            )
             
             return result
         except asyncio.CancelledError:
@@ -468,8 +536,20 @@ class DebateService:
             )
             session.context["event_log"] = event_log
             await self._repository.save_session(session)
+            latency_ms = max(
+                0,
+                int((datetime.utcnow() - execute_started_at).total_seconds() * 1000),
+            )
+            metrics_store.record_debate_result(
+                status="cancelled",
+                latency_ms=latency_ms,
+                retried=had_retry,
+                timeout=False,
+                invalid_conclusion=False,
+            )
             raise
         except Exception as e:
+            error_info = self._classify_error(str(e))
             await self._transition_status(
                 session,
                 DebateStatus.FAILED,
@@ -479,8 +559,17 @@ class DebateService:
                 force=True,
             )
             session.current_phase = None
-            session.context["last_error"] = str(e)
-            logger.error("debate_failed", session_id=session_id, error=str(e))
+            session.context["last_error"] = str(error_info["error_message"])
+            session.context["last_error_code"] = str(error_info["error_code"])
+            session.context["last_error_recoverable"] = bool(error_info["recoverable"])
+            session.context["last_error_retry_hint"] = str(error_info["retry_hint"])
+            logger.error(
+                "debate_failed",
+                session_id=session_id,
+                error=str(error_info["error_message"]),
+                error_code=str(error_info["error_code"]),
+                recoverable=bool(error_info["recoverable"]),
+            )
             await _emit_and_record(
                 {
                     "type": "phase_changed",
@@ -493,11 +582,28 @@ class DebateService:
                     "type": "session_failed",
                     "session_id": session_id,
                     "status": session.status.value,
-                    "error": str(e),
+                    "error": str(error_info["error_message"]),
+                    "error_code": str(error_info["error_code"]),
+                    "error_message": str(error_info["error_message"]),
+                    "recoverable": bool(error_info["recoverable"]),
+                    "retry_hint": str(error_info["retry_hint"]),
                 }
             )
             session.context["event_log"] = event_log
             await self._repository.save_session(session)
+            latency_ms = max(
+                0,
+                int((datetime.utcnow() - execute_started_at).total_seconds() * 1000),
+            )
+            error_message_lower = str(error_info["error_message"]).lower()
+            metrics_store.record_debate_result(
+                status="failed",
+                latency_ms=latency_ms,
+                retried=had_retry,
+                timeout=timeout_failure or ("timeout" in error_message_lower),
+                invalid_conclusion=invalid_conclusion_failure
+                or ("无有效大模型结论" in str(error_info["error_message"])),
+            )
             raise
 
     @staticmethod
@@ -512,8 +618,8 @@ class DebateService:
         mapping = {
             "analysis": DebatePhase.ANALYSIS,
             "analyzing": DebatePhase.ANALYSIS,
-            "coordination": DebatePhase.ANALYSIS,
-            "orchestration": DebatePhase.ANALYSIS,
+            "coordination": DebatePhase.COORDINATION,
+            "orchestration": DebatePhase.COORDINATION,
             "debating": DebatePhase.ANALYSIS,
             "running": DebatePhase.ANALYSIS,
             "critique": DebatePhase.CRITIQUE,
@@ -523,6 +629,8 @@ class DebateService:
             "judgment": DebatePhase.JUDGMENT,
             "judge": DebatePhase.JUDGMENT,
             "judging": DebatePhase.JUDGMENT,
+            "verification": DebatePhase.VERIFICATION,
+            "verify": DebatePhase.VERIFICATION,
         }
         if text in mapping:
             return mapping[text]
@@ -542,6 +650,7 @@ class DebateService:
         session.status = DebateStatus.CANCELLED
         session.updated_at = datetime.utcnow()
         trace_id = str(session.context.get("trace_id") or "").strip() or new_trace_id("deb")
+        sequence = self._next_event_sequence(session)
         event = enrich_event(
             {
                 "type": "session_cancelled",
@@ -549,6 +658,7 @@ class DebateService:
                 "status": session.status.value,
                 "reason": reason,
                 "phase": "cancelled",
+                "event_sequence": sequence,
             },
             trace_id=trace_id,
         )
@@ -699,6 +809,55 @@ class DebateService:
 
         return result, getattr(orchestrator, "session_id", None)
 
+    @staticmethod
+    def _is_placeholder_conclusion(text: str) -> bool:
+        summary = str(text or "").strip()
+        if not summary:
+            return True
+        lowered = summary.lower()
+        blocked_fragments = (
+            "需要进一步分析",
+            "further analysis",
+            "llm 服务繁忙",
+            "降级为规则分析",
+            "调用超时，已降级继续",
+            "调用异常，已降级继续",
+            "未生成有效结论",
+            "请重试分析流程",
+            "待评估",
+            "待确认",
+            "待分析",
+            "unknown",
+        )
+        return any(fragment in lowered for fragment in blocked_fragments)
+
+    @staticmethod
+    def _coerce_confidence(value: Any, default: float = 0.0) -> float:
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return max(0.0, min(1.0, float(default)))
+
+    @staticmethod
+    def _has_meaningful_evidence(raw_items: Any) -> bool:
+        if not isinstance(raw_items, list):
+            return False
+        for item in raw_items:
+            if isinstance(item, dict):
+                text = str(
+                    item.get("description")
+                    or item.get("evidence")
+                    or item.get("summary")
+                    or ""
+                ).strip()
+                if text:
+                    return True
+            else:
+                text = str(item or "").strip()
+                if text:
+                    return True
+        return False
+
     def _has_effective_llm_conclusion(self, debate_result: Dict[str, Any]) -> bool:
         if not isinstance(debate_result, dict):
             return False
@@ -706,18 +865,45 @@ class DebateService:
         if not isinstance(final_judgment, dict):
             return False
         root_cause = final_judgment.get("root_cause")
-        root_cause = root_cause if isinstance(root_cause, dict) else {}
-        summary = str(root_cause.get("summary") or "").strip()
-        if not summary:
-            return False
-        lowered_summary = summary.lower()
-        if "需要进一步分析" in summary or "further analysis" in lowered_summary:
-            return False
-        if summary in {"待评估", "待确认", "unknown", "待分析"}:
+        if isinstance(root_cause, str):
+            root_summary = root_cause
+            root_confidence = 0.0
+        elif isinstance(root_cause, dict):
+            root_summary = str(root_cause.get("summary") or "").strip()
+            root_confidence = self._coerce_confidence(root_cause.get("confidence"), default=0.0)
+        else:
+            root_summary = ""
+            root_confidence = 0.0
+
+        if self._is_placeholder_conclusion(root_summary):
             return False
 
+        overall_confidence = self._coerce_confidence(debate_result.get("confidence"), default=0.0)
+        has_effective_evidence = self._has_meaningful_evidence(final_judgment.get("evidence_chain"))
+
         history = debate_result.get("debate_history")
-        if not isinstance(history, list) or not history:
+        if isinstance(history, list):
+            for row in reversed(history):
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("agent_name") or "") != "JudgeAgent":
+                    continue
+                output = row.get("output_content") if isinstance(row.get("output_content"), dict) else {}
+                judge_confidence = self._coerce_confidence(
+                    row.get("confidence") or output.get("confidence"),
+                    default=0.0,
+                )
+                if has_effective_evidence and max(root_confidence, overall_confidence, judge_confidence) >= 0.45:
+                    return True
+                break
+
+        if has_effective_evidence and max(root_confidence, overall_confidence) >= 0.45:
+            return True
+
+        if max(root_confidence, overall_confidence) < 0.45:
+            return False
+
+        if not isinstance(history, list):
             return False
 
         for row in history:
@@ -733,10 +919,10 @@ class DebateService:
                 continue
             if "调用超时，已降级继续" in conclusion or "调用异常，已降级继续" in conclusion:
                 continue
-            try:
-                confidence = float(row.get("confidence") or output.get("confidence") or 0.0)
-            except Exception:
-                confidence = 0.0
+            confidence = self._coerce_confidence(
+                row.get("confidence") or output.get("confidence"),
+                default=0.0,
+            )
             if confidence >= 0.55:
                 return True
         return False
@@ -857,12 +1043,15 @@ class DebateService:
         session.updated_at = datetime.utcnow()
         await self._repository.save_session(session)
         if event_callback:
+            sequence = self._next_event_sequence(session)
             await self._emit_event(
                 event_callback,
                 enrich_event(
                     {
                         "type": "status_changed",
                         "phase": phase or str(session.current_phase.value if session.current_phase else ""),
+                        "session_id": session.id,
+                        "event_sequence": sequence,
                         "from_status": current.value,
                         "status": next_status.value,
                     },
@@ -1091,9 +1280,11 @@ class DebateService:
                     strength = "medium"
                 evidence_chain.append(
                     EvidenceItem(
+                        evidence_id=str(e.get("evidence_id") or "") or None,
                         type=str(e.get("type") or "unknown"),
                         description=str(description),
                         source=str(e.get("source") or "ai_debate"),
+                        source_ref=str(e.get("source_ref") or "") or None,
                         location=e.get("location") or e.get("code_location"),
                         strength=strength,
                     )
@@ -1201,10 +1392,29 @@ class DebateService:
                     if text:
                         dissenting_opinions.append({"summary": text})
 
-        try:
-            confidence = float(flow_result.get("confidence", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            confidence = 0.0
+        verification_plan_raw = flow_result.get("verification_plan")
+        if not isinstance(verification_plan_raw, list):
+            verification_plan_raw = final_judgment.get("verification_plan")
+        verification_plan: List[Dict[str, Any]] = []
+        if isinstance(verification_plan_raw, list):
+            for item in verification_plan_raw:
+                if isinstance(item, dict):
+                    verification_plan.append(item)
+                else:
+                    text = str(item or "").strip()
+                    if text:
+                        verification_plan.append({"objective": text, "steps": [text]})
+
+        confidence = self._coerce_confidence(flow_result.get("confidence"), default=0.0)
+        if confidence <= 0.0 and isinstance(root_cause_raw, dict):
+            confidence = self._coerce_confidence(root_cause_raw.get("confidence"), default=0.0)
+        if confidence <= 0.0:
+            judge_turn = next(
+                (turn for turn in reversed(session.rounds) if turn.agent_name == "JudgeAgent"),
+                None,
+            )
+            if judge_turn:
+                confidence = self._coerce_confidence(judge_turn.confidence, default=0.0)
         confidence = max(0.0, min(1.0, confidence))
 
         return DebateResult(
@@ -1220,6 +1430,7 @@ class DebateService:
             responsible_team=responsible.get("team"),
             responsible_owner=responsible.get("owner"),
             action_items=action_items,
+            verification_plan=verification_plan,
             dissenting_opinions=dissenting_opinions,
             debate_history=session.rounds
         )

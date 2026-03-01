@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_5",
+  "title": "login 503 thread pool full",
+  "symptom": "/login 503, active threads spike",
+  "log_excerpt": "2026-02-25T14:01:38+08:00 ERROR sample incident 5",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 5",
+  "expected_root_cause": "认证服务线程池耗尽拒绝请求",
+  "expected_domain": "用户",
+  "expected_aggregate": "Auth"
+}

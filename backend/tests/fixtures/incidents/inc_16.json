@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_16",
+  "title": "invoice signing failure",
+  "symptom": "/invoice/sign 500",
+  "log_excerpt": "2026-02-216T14:01:38+08:00 ERROR sample incident 16",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 16",
+  "expected_root_cause": "签章服务证书链配置错误",
+  "expected_domain": "财务",
+  "expected_aggregate": "Invoice"
+}

@@ -127,6 +127,7 @@ class PhaseExecutor:
 
         success_count = 0
         error_count = 0
+        fan_in_items: List[Dict[str, Any]] = []
         for (spec, round_number, prompt, assigned_command, _), result in zip(parallel_inputs, parallel_results):
             if isinstance(result, Exception):
                 error_count += 1
@@ -149,6 +150,15 @@ class PhaseExecutor:
                 success_count += 1
                 turn = result
             await orchestrator._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
+            fan_in_items.append(
+                {
+                    "agent_name": spec.name,
+                    "phase": turn.phase,
+                    "confidence": float(turn.confidence or 0.0),
+                    "conclusion": str((turn.output_content or {}).get("conclusion") or "")[:220],
+                    "status": "error" if isinstance(result, Exception) else "ok",
+                }
+            )
             if assigned_command:
                 await orchestrator._emit_agent_command_feedback(
                     source=spec.name,
@@ -202,6 +212,15 @@ class PhaseExecutor:
                 "success_count": success_count,
                 "error_count": error_count,
                 "duration_seconds": parallel_duration,
+            }
+        )
+        await orchestrator._emit_event(
+            {
+                "type": "parallel_analysis_fan_in_completed",
+                "phase": "analysis",
+                "loop_round": loop_round,
+                "session_id": orchestrator.session_id,
+                "items": fan_in_items,
             }
         )
         if agent_mailbox is not None:

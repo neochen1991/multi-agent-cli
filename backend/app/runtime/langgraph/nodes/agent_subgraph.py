@@ -154,12 +154,20 @@ def build_parallel_route_function(
                     node_name = "domain_agent_node"
                 elif agent_name == "CodeAgent":
                     node_name = "code_agent_node"
+                elif agent_name == "MetricsAgent":
+                    node_name = "metrics_agent_node"
+                elif agent_name == "ChangeAgent":
+                    node_name = "change_agent_node"
+                elif agent_name == "RunbookAgent":
+                    node_name = "runbook_agent_node"
                 elif agent_name == "CriticAgent":
                     node_name = "critic_agent_node"
                 elif agent_name == "RebuttalAgent":
                     node_name = "rebuttal_agent_node"
                 elif agent_name == "JudgeAgent":
                     node_name = "judge_agent_node"
+                elif agent_name == "VerificationAgent":
+                    node_name = "verification_agent_node"
                 return node_name
 
         # If next_step is parallel analysis, use Send API for true parallelism
@@ -222,12 +230,20 @@ def create_parallel_agent_sends(
             node_name = "domain_agent_node"
         elif agent_name == "CodeAgent":
             node_name = "code_agent_node"
+        elif agent_name == "MetricsAgent":
+            node_name = "metrics_agent_node"
+        elif agent_name == "ChangeAgent":
+            node_name = "change_agent_node"
+        elif agent_name == "RunbookAgent":
+            node_name = "runbook_agent_node"
         elif agent_name == "CriticAgent":
             node_name = "critic_agent_node"
         elif agent_name == "RebuttalAgent":
             node_name = "rebuttal_agent_node"
         elif agent_name == "JudgeAgent":
             node_name = "judge_agent_node"
+        elif agent_name == "VerificationAgent":
+            node_name = "verification_agent_node"
 
         sends.append(Send(node_name, agent_state))
 

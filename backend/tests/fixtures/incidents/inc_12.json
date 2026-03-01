@@ -1,0 +1,10 @@
+{
+  "id": "fixture_inc_12",
+  "title": "sms provider 429",
+  "symptom": "/sms send 429",
+  "log_excerpt": "2026-02-212T14:01:38+08:00 ERROR sample incident 12",
+  "stacktrace": "java.lang.RuntimeException: simulated incident 12",
+  "expected_root_cause": "短信供应商限流返回429",
+  "expected_domain": "通知",
+  "expected_aggregate": "Sms"
+}

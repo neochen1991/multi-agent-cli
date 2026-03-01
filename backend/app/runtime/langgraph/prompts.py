@@ -16,12 +16,18 @@ def coordinator_command_schema() -> Dict[str, Any]:
         "analysis": "",
         "conclusion": "",
         "next_mode": "parallel_analysis|single|judge|stop",
-        "next_agent": "LogAgent|DomainAgent|CodeAgent|CriticAgent|RebuttalAgent|JudgeAgent",
+        "next_agent": (
+            "LogAgent|DomainAgent|CodeAgent|MetricsAgent|ChangeAgent|RunbookAgent|"
+            "CriticAgent|RebuttalAgent|JudgeAgent|VerificationAgent"
+        ),
         "should_stop": False,
         "stop_reason": "",
         "commands": [
             {
-                "target_agent": "LogAgent|DomainAgent|CodeAgent|CriticAgent|RebuttalAgent|JudgeAgent",
+                "target_agent": (
+                    "LogAgent|DomainAgent|CodeAgent|MetricsAgent|ChangeAgent|RunbookAgent|"
+                    "CriticAgent|RebuttalAgent|JudgeAgent|VerificationAgent"
+                ),
                 "task": "",
                 "focus": "",
                 "expected_output": "",
@@ -40,9 +46,11 @@ def judge_output_schema() -> Dict[str, Any]:
             "root_cause": {"summary": "", "category": "", "confidence": 0.0},
             "evidence_chain": [
                 {
+                    "evidence_id": "evd_xxx",
                     "type": "log|code|domain|metrics",
                     "description": "",
                     "source": "",
+                    "source_ref": "",
                     "location": "",
                     "strength": "strong|medium|weak",
                 }
@@ -64,6 +72,26 @@ def judge_output_schema() -> Dict[str, Any]:
         "decision_rationale": {"key_factors": [], "reasoning": ""},
         "action_items": [],
         "responsible_team": {"team": "", "owner": ""},
+        "confidence": 0.0,
+    }
+
+
+def verification_output_schema() -> Dict[str, Any]:
+    return {
+        "chat_message": "",
+        "analysis": "",
+        "conclusion": "",
+        "verification_plan": [
+            {
+                "id": "ver_1",
+                "dimension": "functional|performance|regression|rollback",
+                "objective": "",
+                "steps": [""],
+                "pass_criteria": "",
+                "owner": "",
+                "priority": "p0|p1|p2",
+            }
+        ],
         "confidence": 0.0,
     }
 
@@ -97,7 +125,8 @@ def build_problem_analysis_commander_prompt(
         f"你是问题分析主Agent。当前第 {loop_round}/{max_rounds} 轮。\n"
         "请先给出一段简短会议发言(chat_message)，然后给出对各专家Agent的命令清单(commands)。\n"
         "同时你需要决定下一步调度：next_mode/next_agent；如果你判断证据充分可以停止，设置 should_stop=true 并给出 stop_reason。\n"
-        "必须覆盖 LogAgent、DomainAgent、CodeAgent；若已存在历史结论，可补充 CriticAgent/RebuttalAgent/JudgeAgent 命令。\n"
+        "必须覆盖 LogAgent、DomainAgent、CodeAgent、MetricsAgent、ChangeAgent、RunbookAgent；"
+        "若已存在历史结论，可补充 CriticAgent/RebuttalAgent/JudgeAgent/VerificationAgent 命令。\n"
         "命令要具体到分析重点，不要泛泛而谈。\n\n"
         f"故障上下文:\n```json\n{to_json(context)}\n```\n\n"
         f"{dialogue_block}"
@@ -176,7 +205,13 @@ def build_agent_prompt(
             }
             for card in (history_cards or [])[-max_history_items:]
         ]
-    output_schema = judge_output_schema() if spec.name == "JudgeAgent" else _normal_output_schema()
+    output_schema = (
+        judge_output_schema()
+        if spec.name == "JudgeAgent"
+        else verification_output_schema()
+        if spec.name == "VerificationAgent"
+        else _normal_output_schema()
+    )
     output_constraints = (
         "action_items 最多 3 条，decision_rationale.reasoning 控制在 120 字内。\n\n"
         if spec.name == "JudgeAgent"
@@ -299,6 +334,25 @@ def build_peer_driven_prompt(
             f"输出格式：\n```json\n{to_json(judge_output_schema())}\n```"
         )
 
+    if spec.name == "VerificationAgent":
+        command_block = ""
+        if assigned_command:
+            command_block = (
+                f"\n主Agent命令：\n```json\n{to_json(assigned_command)}\n```\n"
+                "你需要先确认收到命令，再输出验证计划。\n"
+            )
+        return (
+            f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段={spec.phase}。\n"
+            "请严格基于 Judge 与各专家结论生成验证计划，覆盖功能、性能、回归、回滚四个维度。\n"
+            "chat_message 用自然语言简要说明验证策略，然后仅输出 JSON。\n\n"
+            f"{command_block}"
+            f"{dialogue_block}"
+            f"{inbox_block}"
+            f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
+            f"同伴结论：\n```json\n{to_json(peer_items)}\n```\n\n"
+            f"输出格式：\n```json\n{to_json(verification_output_schema())}\n```"
+        )
+
     command_block = ""
     if assigned_command:
         command_block = (
@@ -327,6 +381,14 @@ def _normal_output_schema() -> Dict[str, Any]:
         "chat_message": "",
         "analysis": "",
         "conclusion": "",
-        "evidence_chain": [""],
+        "evidence_chain": [
+            {
+                "evidence_id": "evd_xxx",
+                "type": "log|code|domain|metrics|change|runbook|analysis",
+                "description": "",
+                "source": "",
+                "source_ref": "",
+            }
+        ],
         "confidence": 0.0,
     }

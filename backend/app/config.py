@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     LLM_PROVIDER_ID: Optional[str] = None
     # OpenAI-compatible endpoint (LangGraph config_list)
     LLM_BASE_URL: str = Field(default="https://ark.cn-beijing.volces.com/api/coding")
-    LLM_API_KEY: str = Field(default="b0f69e9a-7708-4bf8-af61-7b7822947ce4")
+    LLM_API_KEY: str = Field(default="7b446c97-7172-4c90-a4ef-3f3ff5a8f894")
 
     # 辩论配置
     DEBATE_MAX_ROUNDS: int = 1

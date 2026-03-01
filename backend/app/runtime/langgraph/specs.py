@@ -54,6 +54,33 @@ _DEFAULT_SPECS: Dict[str, _SpecConfig] = {
         max_tokens=420,
         timeout=40,
     ),
+    "MetricsAgent": _SpecConfig(
+        name="MetricsAgent",
+        role="监控指标专家",
+        phase="analysis",
+        system_prompt="你是监控指标专家，聚焦 CPU/线程/连接池/错误率时序证据并识别异常窗口。",
+        tools=("metrics_snapshot",),
+        max_tokens=360,
+        timeout=35,
+    ),
+    "ChangeAgent": _SpecConfig(
+        name="ChangeAgent",
+        role="变更关联专家",
+        phase="analysis",
+        system_prompt="你是变更关联专家，分析最近发布、提交与故障时间窗的相关性。",
+        tools=("git_tool", "search_in_files"),
+        max_tokens=360,
+        timeout=40,
+    ),
+    "RunbookAgent": _SpecConfig(
+        name="RunbookAgent",
+        role="处置手册专家",
+        phase="analysis",
+        system_prompt="你是处置手册专家，从案例库检索相似故障并给出可执行 SOP。",
+        tools=("case_library", "read_file"),
+        max_tokens=360,
+        timeout=35,
+    ),
     "CriticAgent": _SpecConfig(
         name="CriticAgent",
         role="架构质疑专家",
@@ -80,6 +107,15 @@ _DEFAULT_SPECS: Dict[str, _SpecConfig] = {
         tools=(),
         max_tokens=900,
         timeout=60,
+    ),
+    "VerificationAgent": _SpecConfig(
+        name="VerificationAgent",
+        role="验证计划专家",
+        phase="verification",
+        system_prompt="你是验证计划专家，基于裁决结论输出功能/性能/回归/回滚验证计划。",
+        tools=(),
+        max_tokens=420,
+        timeout=35,
     ),
     "ProblemAnalysisAgent": _SpecConfig(
         name="ProblemAnalysisAgent",
@@ -153,7 +189,7 @@ def agent_sequence(*, enable_critique: bool) -> List[AgentSpec]:
     specs: List[AgentSpec] = []
 
     # 分析阶段 - 按顺序添加 LogAgent, DomainAgent, CodeAgent
-    analysis_order = ["LogAgent", "DomainAgent", "CodeAgent"]
+    analysis_order = ["LogAgent", "DomainAgent", "CodeAgent", "MetricsAgent", "ChangeAgent", "RunbookAgent"]
     for name in analysis_order:
         if name in specs_by_name:
             specs.append(specs_by_name[name])
@@ -168,5 +204,9 @@ def agent_sequence(*, enable_critique: bool) -> List[AgentSpec]:
     # 裁决阶段
     if "JudgeAgent" in specs_by_name:
         specs.append(specs_by_name["JudgeAgent"])
+
+    # 验证阶段
+    if "VerificationAgent" in specs_by_name:
+        specs.append(specs_by_name["VerificationAgent"])
 
     return specs
