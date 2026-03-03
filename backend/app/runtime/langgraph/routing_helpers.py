@@ -74,6 +74,7 @@ def supervisor_step_to_node(next_step: str) -> str:
             "MetricsAgent": "metrics_agent_node",
             "ChangeAgent": "change_agent_node",
             "RunbookAgent": "runbook_agent_node",
+            "RuleSuggestionAgent": "rule_suggestion_agent_node",
             "CriticAgent": "critic_agent_node",
             "RebuttalAgent": "rebuttal_agent_node",
             "JudgeAgent": "judge_agent_node",
@@ -257,7 +258,7 @@ def fallback_supervisor_route(
             "stop_reason": "",
         }
 
-    cycle = ["LogAgent", "CodeAgent", "DomainAgent"]
+    cycle = ["LogAgent", "CodeAgent", "DomainAgent", "RuleSuggestionAgent"]
     for candidate in cycle:
         if seen_agents and seen_agents[-1] == candidate:
             continue
@@ -298,6 +299,7 @@ def route_from_commander_output(
             "metricsagent": "MetricsAgent",
             "changeagent": "ChangeAgent",
             "runbookagent": "RunbookAgent",
+            "rulesuggestionagent": "RuleSuggestionAgent",
             "criticagent": "CriticAgent",
             "rebuttalagent": "RebuttalAgent",
             "judgeagent": "JudgeAgent",

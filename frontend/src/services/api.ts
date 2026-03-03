@@ -37,6 +37,26 @@ export interface Incident {
   resolved_at?: string;
 }
 
+export interface AutoInvestigateTask {
+  incident_id: string;
+  session_id: string;
+  task_id: string;
+  status: string;
+}
+
+export interface AlertIngestPayload {
+  alarm_id: string;
+  service_name: string;
+  title: string;
+  description?: string;
+  severity?: 'critical' | 'high' | 'medium' | 'low';
+  environment?: string;
+  log_content?: string;
+  exception_stack?: string;
+  trace_id?: string;
+  max_rounds?: number;
+}
+
 export interface DebateRound {
   round_number: number;
   phase: string;
@@ -69,6 +89,14 @@ export interface DebateResult {
   root_cause: string;
   root_cause_category?: string;
   confidence: number;
+  root_cause_candidates?: Array<{
+    rank: number;
+    summary: string;
+    source_agent?: string;
+    confidence: number;
+    confidence_interval?: number[];
+    evidence_refs?: string[];
+  }>;
   evidence_chain?: Array<{
     evidence_id?: string;
     type: string;
@@ -104,6 +132,24 @@ export interface Report {
   content: string;
   file_path?: string;
   generated_at: string;
+}
+
+export interface ReportVersion {
+  report_id: string;
+  incident_id: string;
+  debate_session_id?: string;
+  format: string;
+  generated_at: string;
+  content_preview: string;
+}
+
+export interface ReportDiff {
+  incident_id: string;
+  base_report_id?: string;
+  target_report_id?: string;
+  changed: boolean;
+  summary: string;
+  diff_lines: string[];
 }
 
 export interface AssetFusion {
@@ -182,11 +228,104 @@ export interface DomainExcelToolConfig {
   max_matches: number;
 }
 
+export interface TelemetrySourceConfig {
+  enabled: boolean;
+  endpoint: string;
+  api_token: string;
+  timeout_seconds: number;
+  verify_ssl: boolean;
+}
+
+export interface CMDBSourceConfig {
+  enabled: boolean;
+  endpoint: string;
+  api_token: string;
+  timeout_seconds: number;
+  verify_ssl: boolean;
+}
+
 export interface AgentToolingConfig {
   code_repo: CodeRepoToolConfig;
   log_file: LogFileToolConfig;
   domain_excel: DomainExcelToolConfig;
+  telemetry_source?: TelemetrySourceConfig;
+  cmdb_source?: CMDBSourceConfig;
   updated_at: string;
+}
+
+export interface BenchmarkSummary {
+  cases: number;
+  top1_rate: number;
+  avg_overlap_score: number;
+  avg_duration_ms: number;
+  failure_rate: number;
+  timeout_rate: number;
+  empty_conclusion_rate: number;
+}
+
+export interface BenchmarkRunResult {
+  generated_at: string;
+  fixtures: number;
+  summary: BenchmarkSummary;
+  cases: Array<Record<string, unknown>>;
+  baseline_file?: string;
+}
+
+export interface BaselineFile {
+  file: string;
+  generated_at: string;
+  summary: BenchmarkSummary;
+}
+
+export interface LineageRecord {
+  session_id: string;
+  seq: number;
+  kind: string;
+  timestamp: string;
+  phase: string;
+  agent_name: string;
+  event_type: string;
+  confidence: number;
+  duration_ms: number;
+  payload?: Record<string, unknown>;
+  input_summary?: Record<string, unknown>;
+  output_summary?: Record<string, unknown>;
+}
+
+export interface LineageResponse {
+  session_id: string;
+  records: number;
+  events: number;
+  tools: number;
+  agents: string[];
+  first_ts?: string;
+  last_ts?: string;
+  items: LineageRecord[];
+}
+
+export interface ReplayResponse {
+  session_id: string;
+  count: number;
+  rendered_steps: string[];
+  summary: Record<string, unknown>;
+  timeline: Array<Record<string, unknown>>;
+  key_decisions?: Array<Record<string, unknown>>;
+  evidence_refs?: string[];
+}
+
+export interface ToolRegistryItem {
+  tool_name: string;
+  category: string;
+  owner_agent: string;
+  enabled: boolean;
+  input_schema: Record<string, unknown>;
+  policy: Record<string, unknown>;
+}
+
+export interface ToolAuditResponse {
+  session_id: string;
+  count: number;
+  items: LineageRecord[];
 }
 
 export const authApi = {
@@ -222,6 +361,16 @@ export const incidentApi = {
   },
   async get(incidentId: string): Promise<Incident> {
     const { data } = await api.get<Incident>(`/incidents/${incidentId}`);
+    return data;
+  },
+  async autoInvestigate(incidentId: string, maxRounds = 1): Promise<AutoInvestigateTask> {
+    const { data } = await api.post<AutoInvestigateTask>(`/incidents/${incidentId}/auto-investigate`, null, {
+      params: { max_rounds: maxRounds },
+    });
+    return data;
+  },
+  async ingestAlert(payload: AlertIngestPayload): Promise<AutoInvestigateTask> {
+    const { data } = await api.post<AutoInvestigateTask>('/incidents/automation/alerts/ingest', payload);
     return data;
   },
 };
@@ -269,7 +418,7 @@ export const debateApi = {
     const { data } = await api.post(`/debates/${sessionId}/cancel`);
     return data;
   },
-  async getTask(taskId: string): Promise<{ task_id: string; status: string; result?: Record<string, unknown> }> {
+  async getTask(taskId: string): Promise<{ task_id: string; status: string; result?: Record<string, unknown>; error?: string }> {
     const { data } = await api.get(`/debates/tasks/${taskId}`);
     return data;
   },
@@ -286,6 +435,14 @@ export const reportApi = {
   },
   async share(incidentId: string): Promise<{ share_url: string; share_token: string }> {
     const { data } = await api.get(`/reports/${incidentId}/share`);
+    return data;
+  },
+  async compare(incidentId: string): Promise<ReportVersion[]> {
+    const { data } = await api.get<ReportVersion[]>(`/reports/${incidentId}/compare`);
+    return data;
+  },
+  async compareDiff(incidentId: string): Promise<ReportDiff> {
+    const { data } = await api.get<ReportDiff>(`/reports/${incidentId}/compare-diff`);
     return data;
   },
 };
@@ -311,6 +468,142 @@ export const settingsApi = {
   },
   async updateTooling(payload: AgentToolingConfig): Promise<AgentToolingConfig> {
     const { data } = await api.put<AgentToolingConfig>('/settings/tooling', payload);
+    return data;
+  },
+  async getToolRegistry(): Promise<ToolRegistryItem[]> {
+    const { data } = await api.get<ToolRegistryItem[]>('/settings/tooling/registry');
+    return data;
+  },
+  async getToolConnectors(): Promise<Array<Record<string, unknown>>> {
+    const { data } = await api.get<Array<Record<string, unknown>>>('/settings/tooling/connectors');
+    return data;
+  },
+  async getToolAudit(sessionId: string): Promise<ToolAuditResponse> {
+    const { data } = await api.get<ToolAuditResponse>(`/settings/tooling/audit/${sessionId}`);
+    return data;
+  },
+};
+
+export const benchmarkApi = {
+  async run(limit = 3, timeoutSeconds = 240): Promise<BenchmarkRunResult> {
+    const { data } = await api.post<BenchmarkRunResult>('/benchmark/run', null, {
+      params: { limit, timeout_seconds: timeoutSeconds },
+    });
+    return data;
+  },
+  async latest(): Promise<BaselineFile | null> {
+    const { data } = await api.get<BaselineFile | null>('/benchmark/latest');
+    return data;
+  },
+  async list(limit = 20): Promise<BaselineFile[]> {
+    const { data } = await api.get<BaselineFile[]>('/benchmark/baselines', { params: { limit } });
+    return data;
+  },
+};
+
+export const lineageApi = {
+  async get(sessionId: string, limit = 200): Promise<LineageResponse> {
+    const { data } = await api.get<LineageResponse>(`/debates/${sessionId}/lineage`, { params: { limit } });
+    return data;
+  },
+  async replay(sessionId: string, limit = 120): Promise<ReplayResponse> {
+    const { data } = await api.get<ReplayResponse>(`/debates/${sessionId}/replay`, { params: { limit } });
+    return data;
+  },
+};
+
+export const governanceApi = {
+  async systemCard(): Promise<Record<string, unknown>> {
+    const { data } = await api.get<Record<string, unknown>>('/governance/system-card');
+    return data;
+  },
+  async qualityTrend(limit = 20): Promise<{ items: Array<Record<string, unknown>> }> {
+    const { data } = await api.get<{ items: Array<Record<string, unknown>> }>('/governance/quality-trend', {
+      params: { limit },
+    });
+    return data;
+  },
+  async costEstimate(caseCount = 100): Promise<Record<string, unknown>> {
+    const { data } = await api.get<Record<string, unknown>>('/governance/cost-estimate', {
+      params: { case_count: caseCount },
+    });
+    return data;
+  },
+  async submitFeedback(payload: {
+    incident_id: string;
+    session_id: string;
+    verdict: 'adopt' | 'reject' | 'revise';
+    comment: string;
+    tags?: string[];
+  }): Promise<Record<string, unknown>> {
+    const { data } = await api.post<Record<string, unknown>>('/governance/feedback', payload);
+    return data;
+  },
+  async listFeedback(limit = 50): Promise<{ items: Array<Record<string, unknown>> }> {
+    const { data } = await api.get<{ items: Array<Record<string, unknown>> }>('/governance/feedback', {
+      params: { limit },
+    });
+    return data;
+  },
+  async feedbackLearningCandidates(limit = 200): Promise<Record<string, unknown>> {
+    const { data } = await api.get<Record<string, unknown>>('/governance/feedback/learning-candidates', {
+      params: { limit },
+    });
+    return data;
+  },
+  async abEvaluate(strategyA = 'baseline', strategyB = 'candidate'): Promise<Record<string, unknown>> {
+    const { data } = await api.post<Record<string, unknown>>('/governance/ab-evaluate', null, {
+      params: { strategy_a: strategyA, strategy_b: strategyB },
+    });
+    return data;
+  },
+  async listTenants(): Promise<{ items: Array<Record<string, unknown>> }> {
+    const { data } = await api.get<{ items: Array<Record<string, unknown>> }>('/governance/tenants');
+    return data;
+  },
+  async upsertTenant(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const { data } = await api.put<Record<string, unknown>>('/governance/tenants', payload);
+    return data;
+  },
+  async proposeRemediation(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const { data } = await api.post<Record<string, unknown>>('/governance/remediation/propose', payload);
+    return data;
+  },
+  async listRemediation(limit = 100): Promise<{ items: Array<Record<string, unknown>> }> {
+    const { data } = await api.get<{ items: Array<Record<string, unknown>> }>('/governance/remediation/actions', {
+      params: { limit },
+    });
+    return data;
+  },
+  async approveRemediation(actionId: string, approver: string, comment = ''): Promise<Record<string, unknown>> {
+    const { data } = await api.post<Record<string, unknown>>(`/governance/remediation/actions/${actionId}/approve`, {
+      approver,
+      comment,
+    });
+    return data;
+  },
+  async executeRemediation(actionId: string, operator: string, postSlo: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const { data } = await api.post<Record<string, unknown>>(`/governance/remediation/actions/${actionId}/execute`, {
+      operator,
+      post_slo: postSlo,
+    });
+    return data;
+  },
+  async rollbackRemediation(actionId: string, reason: string, execute = false): Promise<Record<string, unknown>> {
+    const { data } = await api.post<Record<string, unknown>>(`/governance/remediation/actions/${actionId}/rollback`, {
+      reason,
+      execute,
+    });
+    return data;
+  },
+  async listExternalSync(limit = 100): Promise<{ items: Array<Record<string, unknown>> }> {
+    const { data } = await api.get<{ items: Array<Record<string, unknown>> }>('/governance/external-sync', {
+      params: { limit },
+    });
+    return data;
+  },
+  async syncExternal(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const { data } = await api.post<Record<string, unknown>>('/governance/external-sync', payload);
     return data;
   },
 };

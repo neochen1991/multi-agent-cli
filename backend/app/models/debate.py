@@ -151,6 +151,16 @@ class RiskAssessment(BaseModel):
     mitigation_suggestions: List[str] = Field(default_factory=list, description="缓解建议")
 
 
+class RootCauseCandidate(BaseModel):
+    """根因候选"""
+    rank: int = Field(..., ge=1, description="候选排序")
+    summary: str = Field(..., description="候选根因摘要")
+    source_agent: Optional[str] = Field(None, description="来源 Agent")
+    confidence: float = Field(default=0.0, ge=0, le=1, description="候选置信度")
+    confidence_interval: List[float] = Field(default_factory=list, description="置信区间 [low, high]")
+    evidence_refs: List[str] = Field(default_factory=list, description="证据引用")
+
+
 class DebateResult(BaseModel):
     """辩论结果"""
     session_id: str = Field(..., description="会话ID")
@@ -160,6 +170,7 @@ class DebateResult(BaseModel):
     root_cause: str = Field(..., description="根因")
     root_cause_category: Optional[str] = Field(None, description="根因类别")
     confidence: float = Field(..., ge=0, le=1, description="置信度")
+    root_cause_candidates: List[RootCauseCandidate] = Field(default_factory=list, description="Top-K 根因候选")
     
     # 证据链
     evidence_chain: List[EvidenceItem] = Field(default_factory=list, description="证据链")

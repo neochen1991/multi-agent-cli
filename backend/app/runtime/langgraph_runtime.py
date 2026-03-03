@@ -48,6 +48,9 @@ from app.runtime.langgraph.prompt_builder import PromptBuilder
 from app.runtime.langgraph.phase_executor import PhaseExecutor
 from app.runtime.langgraph.routing_strategy import HybridRouter
 from app.runtime.langgraph.services.state_transition_service import StateTransitionService
+from app.runtime.langgraph.phase_manager import PhaseManager
+from app.runtime.langgraph.session_compaction import SessionCompaction
+from app.runtime.langgraph.doom_loop_guard import DoomLoopGuard
 from app.runtime.langgraph.mailbox import (
     clone_mailbox,
     compact_mailbox,
@@ -81,6 +84,7 @@ from app.runtime.langgraph.state import (
 )
 from app.runtime.messages import AgentEvidence, AgentMessage, FinalVerdict, RoundCheckpoint
 from app.runtime.session_store import runtime_session_store
+from app.runtime.trace_lineage import lineage_recorder
 from app.services.agent_tool_context_service import agent_tool_context_service
 
 logger = structlog.get_logger()
@@ -90,7 +94,15 @@ class LangGraphRuntimeOrchestrator:
     """LangGraph-backed orchestrator with persisted checkpoints."""
 
     MAX_HISTORY_ITEMS = 2
-    PARALLEL_ANALYSIS_AGENTS = ("LogAgent", "DomainAgent", "CodeAgent", "MetricsAgent", "ChangeAgent", "RunbookAgent")
+    PARALLEL_ANALYSIS_AGENTS = (
+        "LogAgent",
+        "DomainAgent",
+        "CodeAgent",
+        "MetricsAgent",
+        "ChangeAgent",
+        "RunbookAgent",
+        "RuleSuggestionAgent",
+    )
     COLLABORATION_PEER_LIMIT = 2
     STREAM_CHUNK_SIZE = 160
     STREAM_MAX_CHUNKS = 16
@@ -123,6 +135,9 @@ class LangGraphRuntimeOrchestrator:
             derive_conversation_state_with_context=self._derive_conversation_state_with_context,
         )
         self._phase_executor = PhaseExecutor(self)
+        self._phase_manager = PhaseManager()
+        self._session_compaction = SessionCompaction()
+        self._doom_loop_guard = DoomLoopGuard(threshold=3)
         self._state_transition_service = StateTransitionService(
             dedupe_new_messages=self._dedupe_new_messages,
             message_deltas_from_cards=self._message_deltas_from_cards,
@@ -188,6 +203,14 @@ class LangGraphRuntimeOrchestrator:
             session_id=str(self.session_id or ""),
             callback=event_callback,
         )
+        await lineage_recorder.append(
+            session_id=str(self.session_id),
+            trace_id=self.trace_id,
+            kind="session",
+            phase="coordination",
+            event_type="session_started",
+            payload={"context_keys": list((context or {}).keys())},
+        )
         context_summary = {
             "log_excerpt": str(context.get("log_content") or "")[:1400],
             "parsed_data": context.get("parsed_data") or {},
@@ -209,10 +232,30 @@ class LangGraphRuntimeOrchestrator:
                 },
                 config={"configurable": {"thread_id": str(self.session_id)}},
             )
-            return dict(result_state.get("final_payload") or {})
+            final_payload = dict(result_state.get("final_payload") or {})
+            await lineage_recorder.append(
+                session_id=str(self.session_id),
+                trace_id=self.trace_id,
+                kind="summary",
+                phase="judgment",
+                event_type="session_completed",
+                confidence=float(final_payload.get("confidence") or 0.0),
+                payload={
+                    "consensus_reached": bool(final_payload.get("consensus_reached") or False),
+                    "executed_rounds": int(final_payload.get("executed_rounds") or 0),
+                },
+            )
+            return final_payload
         except Exception:
             if self.session_id:
                 await runtime_session_store.fail(self.session_id)
+                await lineage_recorder.append(
+                    session_id=str(self.session_id),
+                    trace_id=self.trace_id,
+                    kind="summary",
+                    phase="failed",
+                    event_type="session_failed",
+                )
             raise
 
     async def _graph_init_session(self, state: _DebateExecState) -> _DebateExecState:
@@ -562,12 +605,20 @@ class LangGraphRuntimeOrchestrator:
             char_budget=520,
         )
         context_summary = state.get("context_summary") or {}
-        compact_context = self._compact_round_context(context_summary)
+        compact_context = self._session_compaction.compact_context(
+            self._compact_round_context(context_summary),
+            max_len=1400,
+        )
+        phase_meta = self._phase_manager.summarize(
+            current_round=current_round,
+            max_rounds=max(1, self.max_rounds),
+        )
         await self._emit_event(
             {
                 "type": "round_started",
                 "loop_round": current_round,
                 "max_rounds": self.max_rounds,
+                "phase": phase_meta.get("phase"),
                 "mode": "langgraph_runtime",
             }
         )

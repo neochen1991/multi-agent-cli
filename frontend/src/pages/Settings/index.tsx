@@ -18,8 +18,25 @@ const SettingsPage: React.FC = () => {
     settingsApi
       .getTooling()
       .then((res) => {
-        setTooling(res);
-        toolingForm.setFieldsValue(res);
+        const normalized: AgentToolingConfig = {
+          ...res,
+          telemetry_source: res.telemetry_source || {
+            enabled: false,
+            endpoint: '',
+            api_token: '',
+            timeout_seconds: 8,
+            verify_ssl: true,
+          },
+          cmdb_source: res.cmdb_source || {
+            enabled: false,
+            endpoint: '',
+            api_token: '',
+            timeout_seconds: 8,
+            verify_ssl: true,
+          },
+        };
+        setTooling(normalized);
+        toolingForm.setFieldsValue(normalized);
       })
       .catch((e: any) => {
         message.error(e?.response?.data?.detail || e.message || '加载工具配置失败');
@@ -171,6 +188,66 @@ const SettingsPage: React.FC = () => {
                 <Form.Item name={['domain_excel', 'max_matches']} label="最大命中行数">
                   <InputNumber min={1} max={200} style={{ width: 180 }} />
                 </Form.Item>
+              </Space>
+            </Card>
+
+            <Card size="small" title="远程数据源入口（默认关闭，不影响本地文件模式）" style={{ marginTop: 12 }}>
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Card size="small" title="Telemetry Source（遥测平台入口）">
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Form.Item
+                      name={['telemetry_source', 'enabled']}
+                      label="启用远程遥测入口（默认关闭）"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item name={['telemetry_source', 'endpoint']} label="遥测 API Endpoint">
+                      <Input placeholder="https://telemetry.example.com/api/v1/snapshot" />
+                    </Form.Item>
+                    <Form.Item name={['telemetry_source', 'api_token']} label="遥测 API Token">
+                      <Input.Password placeholder="可选，启用后填写" />
+                    </Form.Item>
+                    <Form.Item name={['telemetry_source', 'timeout_seconds']} label="超时（秒）">
+                      <InputNumber min={2} max={60} style={{ width: 180 }} />
+                    </Form.Item>
+                    <Form.Item
+                      name={['telemetry_source', 'verify_ssl']}
+                      label="校验证书"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                  </Space>
+                </Card>
+
+                <Card size="small" title="CMDB Source（资产平台入口）">
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Form.Item
+                      name={['cmdb_source', 'enabled']}
+                      label="启用远程 CMDB 入口（默认关闭）"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item name={['cmdb_source', 'endpoint']} label="CMDB API Endpoint">
+                      <Input placeholder="https://cmdb.example.com/api/v1/services" />
+                    </Form.Item>
+                    <Form.Item name={['cmdb_source', 'api_token']} label="CMDB API Token">
+                      <Input.Password placeholder="可选，启用后填写" />
+                    </Form.Item>
+                    <Form.Item name={['cmdb_source', 'timeout_seconds']} label="超时（秒）">
+                      <InputNumber min={2} max={60} style={{ width: 180 }} />
+                    </Form.Item>
+                    <Form.Item
+                      name={['cmdb_source', 'verify_ssl']}
+                      label="校验证书"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                  </Space>
+                </Card>
               </Space>
             </Card>
 

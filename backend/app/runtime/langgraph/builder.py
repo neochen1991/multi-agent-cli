@@ -256,6 +256,7 @@ class GraphBuilder:
             "MetricsAgent": "metrics_agent_node",
             "ChangeAgent": "change_agent_node",
             "RunbookAgent": "runbook_agent_node",
+            "RuleSuggestionAgent": "rule_suggestion_agent_node",
             "CriticAgent": "critic_agent_node",
             "RebuttalAgent": "rebuttal_agent_node",
             "JudgeAgent": "judge_agent_node",

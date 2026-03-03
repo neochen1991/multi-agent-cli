@@ -22,6 +22,7 @@ import structlog
 
 from app.config import settings
 from app.models.tooling import AgentToolingConfig
+from app.runtime.connectors import CMDBConnector, TelemetryConnector
 from app.services.tooling_service import tooling_service
 from app.tools.case_library import CaseLibraryTool
 
@@ -47,9 +48,9 @@ SOURCE_SUFFIXES = {
     ".md",
 }
 
-GIT_FETCH_TIMEOUTS = (45, 90)
-GIT_CLONE_TIMEOUTS = (90, 180)
-GIT_LOCAL_TIMEOUT = 30
+GIT_FETCH_TIMEOUTS = (15, 25)
+GIT_CLONE_TIMEOUTS = (30, 45)
+GIT_LOCAL_TIMEOUT = 20
 
 
 @dataclass
@@ -79,6 +80,8 @@ class ToolContextResult:
 class AgentToolContextService:
     def __init__(self) -> None:
         self._case_library = CaseLibraryTool()
+        self._telemetry_connector = TelemetryConnector()
+        self._cmdb_connector = CMDBConnector()
 
     async def build_context(
         self,
@@ -104,10 +107,16 @@ class AgentToolContextService:
             )
         elif agent_name == "MetricsAgent":
             result = await self._build_metrics_context(
+                cfg,
                 compact_context, incident_context, assigned_command, command_gate
             )
         elif agent_name == "RunbookAgent":
             result = await self._build_runbook_context(
+                compact_context, incident_context, assigned_command, command_gate
+            )
+        elif agent_name == "RuleSuggestionAgent":
+            result = await self._build_rule_suggestion_context(
+                cfg,
                 compact_context, incident_context, assigned_command, command_gate
             )
         elif agent_name == "DomainAgent":
@@ -466,6 +475,30 @@ class AgentToolContextService:
                 int(tool_cfg.max_matches),
                 keywords,
             )
+            cmdb_payload: Dict[str, Any] = {}
+            if bool(cfg.cmdb_source.enabled):
+                cmdb_result = await self._cmdb_connector.fetch(
+                    cfg.cmdb_source,
+                    {
+                        "service_name": str(incident_context.get("service_name") or ""),
+                        "keywords": keywords[:8],
+                    },
+                )
+                cmdb_status = str(cmdb_result.get("status") or "unknown")
+                audit_log.append(
+                    self._audit(
+                        tool_name="cmdb_connector",
+                        action="remote_fetch",
+                        status=cmdb_status,
+                        detail={
+                            "enabled": bool(cfg.cmdb_source.enabled),
+                            "endpoint": str(cfg.cmdb_source.endpoint or "")[:180],
+                            "message": str(cmdb_result.get("message") or "")[:180],
+                        },
+                    )
+                )
+                if cmdb_status == "ok" and isinstance(cmdb_result.get("data"), dict):
+                    cmdb_payload = dict(cmdb_result.get("data") or {})
             audit_log.append(
                 self._audit(
                     tool_name="domain_excel_lookup",
@@ -486,7 +519,16 @@ class AgentToolContextService:
                 used=True,
                 status="ok",
                 summary=f"责任田文档查询完成，命中 {len(result.get('matches') or [])} 行。",
-                data={"excel_path": str(path), "keywords": keywords, **result},
+                data={
+                    "excel_path": str(path),
+                    "keywords": keywords,
+                    **result,
+                    "remote_cmdb": {
+                        "enabled": bool(cfg.cmdb_source.enabled),
+                        "status": "ok" if cmdb_payload else "disabled_or_unavailable",
+                        "payload": cmdb_payload,
+                    },
+                },
                 command_gate=command_gate,
                 audit_log=audit_log,
             )
@@ -514,6 +556,7 @@ class AgentToolContextService:
 
     async def _build_metrics_context(
         self,
+        cfg: AgentToolingConfig,
         compact_context: Dict[str, Any],
         incident_context: Dict[str, Any],
         assigned_command: Optional[Dict[str, Any]],
@@ -543,7 +586,34 @@ class AgentToolContextService:
                 command_gate=command_gate,
                 audit_log=audit_log,
             )
-        signals = self._collect_metrics_signals(compact_context, incident_context)
+        remote_telemetry_payload: Dict[str, Any] = {}
+        if bool(cfg.telemetry_source.enabled):
+            telemetry_result = await self._telemetry_connector.fetch(
+                cfg.telemetry_source,
+                {
+                    "service_name": str(incident_context.get("service_name") or ""),
+                    "trace_id": str(incident_context.get("trace_id") or ""),
+                },
+            )
+            telemetry_status = str(telemetry_result.get("status") or "unknown")
+            audit_log.append(
+                self._audit(
+                    tool_name="telemetry_connector",
+                    action="remote_fetch",
+                    status=telemetry_status,
+                    detail={
+                        "enabled": bool(cfg.telemetry_source.enabled),
+                        "endpoint": str(cfg.telemetry_source.endpoint or "")[:180],
+                        "message": str(telemetry_result.get("message") or "")[:180],
+                    },
+                )
+            )
+            if telemetry_status == "ok" and isinstance(telemetry_result.get("data"), dict):
+                remote_telemetry_payload = dict(telemetry_result.get("data") or {})
+        metrics_context = dict(incident_context or {})
+        if remote_telemetry_payload:
+            metrics_context["remote_telemetry_payload"] = remote_telemetry_payload
+        signals = self._collect_metrics_signals(compact_context, metrics_context)
         audit_log.append(
             self._audit(
                 tool_name="metrics_snapshot_analyzer",
@@ -562,7 +632,12 @@ class AgentToolContextService:
                 used=False,
                 status="unavailable",
                 summary="未发现可解析的监控指标快照，使用默认分析逻辑。",
-                data={},
+                data={
+                    "remote_telemetry": {
+                        "enabled": bool(cfg.telemetry_source.enabled),
+                        "status": "ok" if remote_telemetry_payload else "disabled_or_unavailable",
+                    }
+                },
                 command_gate=command_gate,
                 audit_log=audit_log,
             )
@@ -572,7 +647,14 @@ class AgentToolContextService:
             used=True,
             status="ok",
             summary=f"提取到 {len(signals)} 条监控异常信号。",
-            data={"signals": signals[:20]},
+            data={
+                "signals": signals[:20],
+                "remote_telemetry": {
+                    "enabled": bool(cfg.telemetry_source.enabled),
+                    "status": "ok" if remote_telemetry_payload else "disabled_or_unavailable",
+                    "payload": remote_telemetry_payload,
+                },
+            },
             command_gate=command_gate,
             audit_log=audit_log,
         )
@@ -784,6 +866,48 @@ class AgentToolContextService:
             data={"query": query, "items": items[:8]},
             command_gate=command_gate,
             audit_log=audit_log,
+        )
+
+    async def _build_rule_suggestion_context(
+        self,
+        cfg: AgentToolingConfig,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+        command_gate: Dict[str, Any],
+    ) -> ToolContextResult:
+        metrics = await self._build_metrics_context(
+            cfg=cfg,
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
+            command_gate=command_gate,
+        )
+        runbook = await self._build_runbook_context(
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
+            command_gate=command_gate,
+        )
+        used = bool(metrics.used or runbook.used)
+        status = "ok" if used else ("skipped_by_command" if metrics.status == "skipped_by_command" else "unavailable")
+        return ToolContextResult(
+            name="rule_suggestion_toolkit",
+            enabled=True,
+            used=used,
+            status=status,
+            summary=(
+                "已汇总指标与案例库上下文，供规则建议Agent生成阈值与告警窗口。"
+                if used
+                else "未获得可用的指标/案例上下文，规则建议将基于当前会话推断。"
+            ),
+            data={
+                "metrics_signals": ((metrics.data or {}).get("signals") or [])[:20],
+                "runbook_items": ((runbook.data or {}).get("items") or [])[:8],
+                "query": (runbook.data or {}).get("query") or "",
+            },
+            command_gate=command_gate,
+            audit_log=[*(metrics.audit_log or []), *(runbook.audit_log or [])],
         )
 
     def _resolve_repo_path(
@@ -1180,6 +1304,7 @@ class AgentToolContextService:
             str(compact_context.get("log_excerpt") or ""),
             str(incident_context.get("log_content") or ""),
             str(incident_context.get("description") or ""),
+            str(incident_context.get("remote_telemetry_payload") or ""),
         ]
         metric_patterns = [
             ("cpu", r"cpu[^0-9]*([0-9]+(?:\.[0-9]+)?%?)", "CPU"),

@@ -50,7 +50,19 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:opentelemetry.io)",
       "WebFetch(domain:sdk.vercel.ai)",
-      "WebFetch(domain:ai-sdk.dev)"
+      "WebFetch(domain:ai-sdk.dev)",
+      "WebFetch(domain:zhuanlan.zhihu.com)",
+      "WebFetch(domain:www.infoq.cn)",
+      "WebFetch(domain:mp.weixin.qq.com)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:cloud.tencent.com)",
+      "Bash(claude mcp list 2>/dev/null || echo \"MCP command not available\")",
+      "Bash(claude mcp add puppeteer -s user -- npx -y @modelcontextprotocol/server-puppeteer)",
+      "Bash(claude mcp add fetch -s user -- npx -y @anthropic-ai/mcp-server-fetch)",
+      "Bash(claude mcp list)",
+      "Bash(cd /tmp && npx playwright install chromium 2>&1 | tail -3)",
+      "Bash(cd /tmp && node zhihu_article.mjs 2>&1)",
+      "WebFetch(domain:www.alibabacloud.com)"
     ]
   }
 }

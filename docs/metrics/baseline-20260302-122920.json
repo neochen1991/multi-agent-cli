@@ -1,0 +1,60 @@
+{
+  "generated_at": "2026-03-02T12:29:20.754847",
+  "fixtures": 3,
+  "summary": {
+    "cases": 3,
+    "top1_rate": 0.0,
+    "avg_overlap_score": 0.0,
+    "avg_duration_ms": 241351.59,
+    "failure_rate": 1.0,
+    "timeout_rate": 1.0,
+    "empty_conclusion_rate": 1.0
+  },
+  "cases": [
+    {
+      "fixture_id": "fixture_inc_1",
+      "incident_id": "inc_b1e76ecd",
+      "session_id": "deb_79f2ac21",
+      "expected_root_cause": "数据库连接池耗尽并伴随锁等待",
+      "expected_domain": "订单",
+      "expected_aggregate": "Order",
+      "predicted_root_cause": "",
+      "status": "timeout",
+      "error": "benchmark case timed out",
+      "duration_ms": 241348.67,
+      "confidence": 0.0,
+      "overlap_score": 0.0,
+      "top1_hit": false
+    },
+    {
+      "fixture_id": "fixture_inc_10",
+      "incident_id": "inc_fc30680e",
+      "session_id": "deb_8866e619",
+      "expected_root_cause": "证书过期引发TLS握手失败",
+      "expected_domain": "网关",
+      "expected_aggregate": "Gateway",
+      "predicted_root_cause": "",
+      "status": "timeout",
+      "error": "benchmark case timed out",
+      "duration_ms": 241317.91,
+      "confidence": 0.0,
+      "overlap_score": 0.0,
+      "top1_hit": false
+    },
+    {
+      "fixture_id": "fixture_inc_11",
+      "incident_id": "inc_f9a62363",
+      "session_id": "deb_bc250ffc",
+      "expected_root_cause": "报表批处理内存泄漏导致OOM",
+      "expected_domain": "报表",
+      "expected_aggregate": "ReportJob",
+      "predicted_root_cause": "",
+      "status": "timeout",
+      "error": "benchmark case timed out",
+      "duration_ms": 241388.18,
+      "confidence": 0.0,
+      "overlap_score": 0.0,
+      "top1_hit": false
+    }
+  ]
+}

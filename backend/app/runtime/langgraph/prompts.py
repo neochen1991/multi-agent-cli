@@ -17,7 +17,7 @@ def coordinator_command_schema() -> Dict[str, Any]:
         "conclusion": "",
         "next_mode": "parallel_analysis|single|judge|stop",
         "next_agent": (
-            "LogAgent|DomainAgent|CodeAgent|MetricsAgent|ChangeAgent|RunbookAgent|"
+            "LogAgent|DomainAgent|CodeAgent|MetricsAgent|ChangeAgent|RunbookAgent|RuleSuggestionAgent|"
             "CriticAgent|RebuttalAgent|JudgeAgent|VerificationAgent"
         ),
         "should_stop": False,
@@ -25,7 +25,7 @@ def coordinator_command_schema() -> Dict[str, Any]:
         "commands": [
             {
                 "target_agent": (
-                    "LogAgent|DomainAgent|CodeAgent|MetricsAgent|ChangeAgent|RunbookAgent|"
+                    "LogAgent|DomainAgent|CodeAgent|MetricsAgent|ChangeAgent|RunbookAgent|RuleSuggestionAgent|"
                     "CriticAgent|RebuttalAgent|JudgeAgent|VerificationAgent"
                 ),
                 "task": "",
@@ -125,7 +125,7 @@ def build_problem_analysis_commander_prompt(
         f"你是问题分析主Agent。当前第 {loop_round}/{max_rounds} 轮。\n"
         "请先给出一段简短会议发言(chat_message)，然后给出对各专家Agent的命令清单(commands)。\n"
         "同时你需要决定下一步调度：next_mode/next_agent；如果你判断证据充分可以停止，设置 should_stop=true 并给出 stop_reason。\n"
-        "必须覆盖 LogAgent、DomainAgent、CodeAgent、MetricsAgent、ChangeAgent、RunbookAgent；"
+        "必须覆盖 LogAgent、DomainAgent、CodeAgent、MetricsAgent、ChangeAgent、RunbookAgent、RuleSuggestionAgent；"
         "若已存在历史结论，可补充 CriticAgent/RebuttalAgent/JudgeAgent/VerificationAgent 命令。\n"
         "命令要具体到分析重点，不要泛泛而谈。\n\n"
         f"故障上下文:\n```json\n{to_json(context)}\n```\n\n"

@@ -3,6 +3,7 @@
 Incident API Endpoints
 """
 
+import asyncio
 from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
@@ -10,6 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.models.incident import (
     Incident,
     IncidentCreate as IncidentCreateModel,
@@ -19,6 +21,8 @@ from app.models.incident import (
     IncidentList,
 )
 from app.services.incident_service import incident_service
+from app.services.debate_service import debate_service
+from app.core.task_queue import task_queue
 
 router = APIRouter()
 
@@ -103,6 +107,26 @@ class IncidentDetailResponse(IncidentResponse):
     impact_analysis: Optional[dict] = None
     related_incidents: List[str] = []
     metadata: dict = {}
+
+
+class AutoInvestigateResponse(BaseModel):
+    incident_id: str
+    session_id: str
+    task_id: str
+    status: str
+
+
+class AlertIngestRequest(BaseModel):
+    alarm_id: str = Field(..., min_length=1, max_length=120)
+    service_name: str = Field(..., min_length=1, max_length=120)
+    title: str = Field(..., min_length=1, max_length=255)
+    description: str = Field(default="", max_length=4000)
+    severity: str = Field(default="high", pattern="^(critical|high|medium|low)$")
+    environment: str = Field(default="prod", max_length=64)
+    log_content: str = Field(default="", max_length=50000)
+    exception_stack: str = Field(default="", max_length=50000)
+    trace_id: str = Field(default="", max_length=120)
+    max_rounds: int = Field(default=1, ge=1, le=8)
 
 
 # ==================== API 端点 ====================
@@ -300,3 +324,154 @@ async def delete_incident(incident_id: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Incident {incident_id} not found"
         )
+
+
+@router.post(
+    "/{incident_id}/auto-investigate",
+    response_model=AutoInvestigateResponse,
+    summary="一键自动调查",
+    description="自动创建（或复用）辩论会话并异步执行分析",
+)
+async def auto_investigate_incident(
+    incident_id: str,
+    max_rounds: int = Query(1, ge=1, le=8, description="最大辩论轮次"),
+):
+    incident = await incident_service.get_incident(incident_id)
+    if not incident:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident {incident_id} not found",
+        )
+
+    session_id = str(incident.debate_session_id or "").strip()
+    if not session_id:
+        session = await debate_service.create_session(incident, max_rounds=max_rounds)
+        session_id = session.id
+        await incident_service.update_incident(
+            incident_id,
+            IncidentUpdate(
+                status=IncidentStatus.ANALYZING,
+                debate_session_id=session_id,
+            ),
+        )
+    else:
+        await incident_service.update_incident(
+            incident_id,
+            IncidentUpdate(
+                status=IncidentStatus.ANALYZING,
+                debate_session_id=session_id,
+            ),
+        )
+
+    async def _run():
+        try:
+            result = await asyncio.wait_for(
+                debate_service.execute_debate(session_id=session_id, retry_failed_only=False),
+                timeout=max(60, int(settings.DEBATE_TIMEOUT or 600)),
+            )
+            await incident_service.update_incident(
+                incident_id,
+                IncidentUpdate(
+                    status=IncidentStatus.RESOLVED,
+                    debate_session_id=session_id,
+                    root_cause=result.root_cause,
+                    fix_suggestion=(result.fix_recommendation.summary if result.fix_recommendation else None),
+                    impact_analysis=(result.impact_analysis.model_dump() if result.impact_analysis else None),
+                ),
+            )
+            return {
+                "incident_id": incident_id,
+                "session_id": session_id,
+                "confidence": float(result.confidence or 0.0),
+            }
+        except Exception as exc:
+            await incident_service.update_incident(
+                incident_id,
+                IncidentUpdate(
+                    status=IncidentStatus.CLOSED,
+                    debate_session_id=session_id,
+                    fix_suggestion=str(exc)[:260],
+                ),
+            )
+            raise
+
+    task_id = task_queue.submit(_run, timeout_seconds=max(60, int(settings.DEBATE_TIMEOUT or 600)))
+    return AutoInvestigateResponse(
+        incident_id=incident_id,
+        session_id=session_id,
+        task_id=task_id,
+        status="pending",
+    )
+
+
+@router.post(
+    "/automation/alerts/ingest",
+    response_model=AutoInvestigateResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="告警自动拉起调查",
+    description="告警接入后自动创建 incident 与调查会话，并异步执行分析流程",
+)
+async def ingest_alert(payload: AlertIngestRequest):
+    incident = await incident_service.create_incident(
+        IncidentCreateModel(
+            title=str(payload.title).strip()[:255],
+            description=str(payload.description).strip() or f"alarm_id={payload.alarm_id}",
+            source="monitor",
+            severity=IncidentSeverity(payload.severity),
+            log_content=str(payload.log_content or ""),
+            exception_stack=str(payload.exception_stack or ""),
+            trace_id=str(payload.trace_id or ""),
+            service_name=str(payload.service_name or ""),
+            environment=str(payload.environment or "prod"),
+            metadata={"alarm_id": payload.alarm_id},
+        )
+    )
+
+    session = await debate_service.create_session(incident, max_rounds=payload.max_rounds)
+    await incident_service.update_incident(
+        incident.id,
+        IncidentUpdate(
+            status=IncidentStatus.ANALYZING,
+            debate_session_id=session.id,
+        ),
+    )
+
+    async def _run():
+        try:
+            result = await asyncio.wait_for(
+                debate_service.execute_debate(session.id, retry_failed_only=False),
+                timeout=max(60, int(settings.DEBATE_TIMEOUT or 600)),
+            )
+            await incident_service.update_incident(
+                incident.id,
+                IncidentUpdate(
+                    status=IncidentStatus.RESOLVED,
+                    debate_session_id=session.id,
+                    root_cause=result.root_cause,
+                    fix_suggestion=(result.fix_recommendation.summary if result.fix_recommendation else None),
+                    impact_analysis=(result.impact_analysis.model_dump() if result.impact_analysis else None),
+                ),
+            )
+            return {
+                "incident_id": incident.id,
+                "session_id": session.id,
+                "confidence": float(result.confidence or 0.0),
+            }
+        except Exception as exc:
+            await incident_service.update_incident(
+                incident.id,
+                IncidentUpdate(
+                    status=IncidentStatus.CLOSED,
+                    debate_session_id=session.id,
+                    fix_suggestion=str(exc)[:260],
+                ),
+            )
+            raise
+
+    task_id = task_queue.submit(_run, timeout_seconds=max(60, int(settings.DEBATE_TIMEOUT or 600)))
+    return AutoInvestigateResponse(
+        incident_id=incident.id,
+        session_id=session.id,
+        task_id=task_id,
+        status="pending",
+    )

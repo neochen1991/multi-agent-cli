@@ -3,6 +3,11 @@ import { Layout, Menu } from 'antd';
 import {
   AlertOutlined,
   ApartmentOutlined,
+  DeploymentUnitOutlined,
+  ExperimentOutlined,
+  FireOutlined,
+  SafetyCertificateOutlined,
+  ToolOutlined,
   HistoryOutlined,
   HomeOutlined,
   SettingOutlined,
@@ -37,6 +42,31 @@ const AppSider: React.FC = () => {
         key: '/assets',
         icon: <ApartmentOutlined />,
         label: '资产图谱',
+      },
+      {
+        key: '/workbench',
+        icon: <DeploymentUnitOutlined />,
+        label: '调查工作台',
+      },
+      {
+        key: '/war-room',
+        icon: <FireOutlined />,
+        label: '战情页',
+      },
+      {
+        key: '/benchmark',
+        icon: <ExperimentOutlined />,
+        label: '评测中心',
+      },
+      {
+        key: '/governance',
+        icon: <SafetyCertificateOutlined />,
+        label: '治理中心',
+      },
+      {
+        key: '/tools',
+        icon: <ToolOutlined />,
+        label: '工具中心',
       },
       {
         key: '/settings',

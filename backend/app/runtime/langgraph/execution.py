@@ -20,6 +20,7 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt,
 from app.config import settings
 from app.core.llm_client import LLMClient
 from app.runtime.langgraph.parsers import normalize_agent_output
+from app.runtime.langgraph.output_truncation import truncate_payload, truncate_text
 from app.runtime.langgraph.state import AgentSpec, DebateTurn
 from app.runtime.langgraph.schemas import get_schema_for_agent
 
@@ -297,6 +298,7 @@ async def call_agent(
                             timeout=attempt_timeout,
                         )
                     raw_content = str(getattr(invoke_result, "content", "") or "")
+                    raw_content = truncate_text(raw_content, max_chars=9000)
                     invoke_mode = str(getattr(invoke_result, "invoke_mode", "") or "direct")
                     factory_error = str(getattr(invoke_result, "factory_error", "") or "")
                     if invoke_mode == "direct" and factory_error:
@@ -328,6 +330,7 @@ async def call_agent(
                         raw_content,
                         judge_fallback_summary=orchestrator.JUDGE_FALLBACK_SUMMARY,
                     )
+                    payload = truncate_payload(payload, max_chars=2600)
                     if spec.name == "JudgeAgent":
                         final_judgment = payload.get("final_judgment")
                         root_cause = (

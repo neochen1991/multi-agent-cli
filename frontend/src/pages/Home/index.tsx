@@ -9,7 +9,7 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { incidentApi, type Incident } from '@/services/api';
+import { debateApi, incidentApi, type Incident } from '@/services/api';
 import { formatBeijingDateTime } from '@/utils/dateTime';
 
 const { Paragraph, Text, Title } = Typography;
@@ -135,6 +135,33 @@ const HomePage: React.FC = () => {
     }
   };
 
+  const runAutoInvestigate = async (incident: Incident) => {
+    try {
+      message.loading({ content: `已提交自动调查：${incident.id}`, key: `auto-${incident.id}`, duration: 0 });
+      const started = await incidentApi.autoInvestigate(incident.id, 1);
+      let finalStatus = 'pending';
+      for (let i = 0; i < 40; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const task = await debateApi.getTask(started.task_id);
+        finalStatus = String(task.status || 'pending');
+        if (finalStatus === 'completed') {
+          break;
+        }
+        if (finalStatus === 'failed') {
+          throw new Error(String(task.error || '自动调查任务失败'));
+        }
+      }
+      message.success({ content: `自动调查完成：${incident.id}`, key: `auto-${incident.id}` });
+      await loadDashboard();
+      navigate(`/incident/${incident.id}`);
+    } catch (e: any) {
+      message.error({
+        content: e?.response?.data?.detail || e?.message || `自动调查失败：${incident.id}`,
+        key: `auto-${incident.id}`,
+      });
+    }
+  };
+
   useEffect(() => {
     void loadDashboard();
   }, []);
@@ -160,11 +187,16 @@ const HomePage: React.FC = () => {
       {
         title: '操作',
         key: 'action',
-        width: 140,
+        width: 220,
         render: (_, record) => (
-          <Button size="small" type="link" onClick={() => navigate(`/incident/${record.id}`)}>
-            查看详情
-          </Button>
+          <Space size={4}>
+            <Button size="small" type="link" onClick={() => navigate(`/incident/${record.id}`)}>
+              查看详情
+            </Button>
+            <Button size="small" type="link" onClick={() => void runAutoInvestigate(record)}>
+              一键自动调查
+            </Button>
+          </Space>
         ),
       },
     ],

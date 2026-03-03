@@ -81,6 +81,15 @@ _DEFAULT_SPECS: Dict[str, _SpecConfig] = {
         max_tokens=360,
         timeout=35,
     ),
+    "RuleSuggestionAgent": _SpecConfig(
+        name="RuleSuggestionAgent",
+        role="告警规则建议专家",
+        phase="analysis",
+        system_prompt="你是告警规则建议专家，基于当前故障证据给出可落地的阈值/窗口/触发条件建议。",
+        tools=("metrics_snapshot", "case_library"),
+        max_tokens=360,
+        timeout=35,
+    ),
     "CriticAgent": _SpecConfig(
         name="CriticAgent",
         role="架构质疑专家",
@@ -189,7 +198,15 @@ def agent_sequence(*, enable_critique: bool) -> List[AgentSpec]:
     specs: List[AgentSpec] = []
 
     # 分析阶段 - 按顺序添加 LogAgent, DomainAgent, CodeAgent
-    analysis_order = ["LogAgent", "DomainAgent", "CodeAgent", "MetricsAgent", "ChangeAgent", "RunbookAgent"]
+    analysis_order = [
+        "LogAgent",
+        "DomainAgent",
+        "CodeAgent",
+        "MetricsAgent",
+        "ChangeAgent",
+        "RunbookAgent",
+        "RuleSuggestionAgent",
+    ]
     for name in analysis_order:
         if name in specs_by_name:
             specs.append(specs_by_name[name])

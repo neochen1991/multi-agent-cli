@@ -5,7 +5,7 @@ API Router Aggregation
 
 from fastapi import APIRouter
 
-from app.api import incidents, assets, debates, reports, auth, settings as settings_api
+from app.api import incidents, assets, debates, reports, auth, settings as settings_api, benchmark, governance
 
 api_router = APIRouter()
 
@@ -44,4 +44,16 @@ api_router.include_router(
     settings_api.router,
     prefix="/settings",
     tags=["Settings"],
+)
+
+api_router.include_router(
+    benchmark.router,
+    prefix="/benchmark",
+    tags=["Benchmark"],
+)
+
+api_router.include_router(
+    governance.router,
+    prefix="/governance",
+    tags=["Governance"],
 )

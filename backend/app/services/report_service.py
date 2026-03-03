@@ -3,6 +3,7 @@
 Report Service
 """
 
+import difflib
 from datetime import datetime
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -31,6 +32,44 @@ class ReportService:
 
     async def get_report(self, incident_id: str) -> Optional[Dict[str, Any]]:
         return await self._repository.get_latest(incident_id)
+
+    async def list_reports(self, incident_id: str) -> list[Dict[str, Any]]:
+        return await self._repository.list_by_incident(incident_id)
+
+    async def compare_latest_reports(self, incident_id: str) -> Dict[str, Any]:
+        items = await self._repository.list_by_incident(incident_id)
+        if len(items) < 2:
+            return {
+                "incident_id": incident_id,
+                "base_report_id": None,
+                "target_report_id": None,
+                "changed": False,
+                "diff_lines": [],
+                "summary": "历史版本不足 2 份，无法生成差异对比。",
+            }
+        base = items[-2]
+        target = items[-1]
+        base_text = str(base.get("content") or "")
+        target_text = str(target.get("content") or "")
+        diff_lines = list(
+            difflib.unified_diff(
+                base_text.splitlines(),
+                target_text.splitlines(),
+                fromfile=str(base.get("report_id") or "base"),
+                tofile=str(target.get("report_id") or "target"),
+                lineterm="",
+            )
+        )
+        changed = base_text != target_text
+        summary = "检测到报告版本差异" if changed else "两个版本内容一致"
+        return {
+            "incident_id": incident_id,
+            "base_report_id": base.get("report_id"),
+            "target_report_id": target.get("report_id"),
+            "changed": changed,
+            "diff_lines": diff_lines[:500],
+            "summary": summary,
+        }
 
     async def save_generated_report(
         self,
@@ -144,6 +183,9 @@ class ReportService:
         return {
             "final_judgment": final_judgment,
             "confidence": result.confidence,
+            "root_cause_candidates": [
+                item.model_dump(mode="json") for item in (result.root_cause_candidates or [])
+            ],
             "action_items": result.action_items,
             "responsible_team": {
                 "team": result.responsible_team,

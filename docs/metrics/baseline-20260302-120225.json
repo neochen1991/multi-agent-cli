@@ -1,0 +1,30 @@
+{
+  "generated_at": "2026-03-02T12:02:25.608454",
+  "fixtures": 1,
+  "summary": {
+    "cases": 1,
+    "top1_rate": 0.0,
+    "avg_overlap_score": 0.0,
+    "avg_duration_ms": 32479.97,
+    "failure_rate": 1.0,
+    "timeout_rate": 1.0,
+    "empty_conclusion_rate": 1.0
+  },
+  "cases": [
+    {
+      "fixture_id": "fixture_inc_1",
+      "incident_id": "inc_dfe838ce",
+      "session_id": "deb_adbe23ba",
+      "expected_root_cause": "数据库连接池耗尽并伴随锁等待",
+      "expected_domain": "订单",
+      "expected_aggregate": "Order",
+      "predicted_root_cause": "",
+      "status": "timeout",
+      "error": "benchmark case timed out",
+      "duration_ms": 32479.97,
+      "confidence": 0.0,
+      "overlap_score": 0.0,
+      "top1_hit": false
+    }
+  ]
+}

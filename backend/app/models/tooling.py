@@ -31,9 +31,26 @@ class DomainExcelToolConfig(BaseModel):
     max_matches: int = Field(default=20, ge=1, le=200, description="最大命中行数")
 
 
+class TelemetrySourceConfig(BaseModel):
+    enabled: bool = Field(default=False, description="是否启用远程遥测数据源入口")
+    endpoint: str = Field(default="", description="遥测平台 API 地址（占位）")
+    api_token: str = Field(default="", description="遥测平台访问 Token（占位）")
+    timeout_seconds: int = Field(default=8, ge=2, le=60, description="请求超时时间")
+    verify_ssl: bool = Field(default=True, description="是否校验证书")
+
+
+class CMDBSourceConfig(BaseModel):
+    enabled: bool = Field(default=False, description="是否启用远程 CMDB 数据源入口")
+    endpoint: str = Field(default="", description="CMDB API 地址（占位）")
+    api_token: str = Field(default="", description="CMDB 访问 Token（占位）")
+    timeout_seconds: int = Field(default=8, ge=2, le=60, description="请求超时时间")
+    verify_ssl: bool = Field(default=True, description="是否校验证书")
+
+
 class AgentToolingConfig(BaseModel):
     code_repo: CodeRepoToolConfig = Field(default_factory=CodeRepoToolConfig)
     log_file: LogFileToolConfig = Field(default_factory=LogFileToolConfig)
     domain_excel: DomainExcelToolConfig = Field(default_factory=DomainExcelToolConfig)
+    telemetry_source: TelemetrySourceConfig = Field(default_factory=TelemetrySourceConfig)
+    cmdb_source: CMDBSourceConfig = Field(default_factory=CMDBSourceConfig)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-

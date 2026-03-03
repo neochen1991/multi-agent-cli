@@ -3,6 +3,7 @@
 Debate API Endpoints
 """
 
+import asyncio
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -20,6 +21,8 @@ from app.models.incident import IncidentStatus, IncidentUpdate
 from app.services.debate_service import debate_service
 from app.services.incident_service import incident_service
 from app.core.task_queue import task_queue
+from app.config import settings
+from app.runtime.trace_lineage import lineage_recorder, replay_session_lineage
 
 router = APIRouter()
 
@@ -64,6 +67,15 @@ class EvidenceItemResponse(BaseModel):
     strength: str
 
 
+class RootCauseCandidateResponse(BaseModel):
+    rank: int
+    summary: str
+    source_agent: Optional[str] = None
+    confidence: float
+    confidence_interval: List[float] = Field(default_factory=list)
+    evidence_refs: List[str] = Field(default_factory=list)
+
+
 class FixRecommendationResponse(BaseModel):
     """修复建议响应"""
     summary: str
@@ -95,6 +107,7 @@ class DebateResultResponse(BaseModel):
     root_cause: str
     root_cause_category: Optional[str]
     confidence: float
+    root_cause_candidates: List[RootCauseCandidateResponse]
     evidence_chain: List[EvidenceItemResponse]
     fix_recommendation: Optional[FixRecommendationResponse]
     impact_analysis: Optional[ImpactAnalysisResponse]
@@ -130,6 +143,27 @@ class TaskResponse(BaseModel):
 class CancelResponse(BaseModel):
     session_id: str
     cancelled: bool
+
+
+class LineageResponse(BaseModel):
+    session_id: str
+    records: int
+    events: int
+    tools: int
+    agents: List[str]
+    first_ts: Optional[str] = None
+    last_ts: Optional[str] = None
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ReplayResponse(BaseModel):
+    session_id: str
+    count: int
+    rendered_steps: List[str]
+    summary: Dict[str, Any]
+    timeline: List[Dict[str, Any]]
+    key_decisions: List[Dict[str, Any]] = Field(default_factory=list)
+    evidence_refs: List[str] = Field(default_factory=list)
 
 
 # ==================== API 端点 ====================
@@ -261,30 +295,43 @@ async def execute_debate_async(
         )
 
     async def _run():
-        result = await debate_service.execute_debate(
-            session_id,
-            retry_failed_only=retry_failed_only,
-        )
-        await incident_service.update_incident(
-            session.incident_id,
-            IncidentUpdate(
-                status=IncidentStatus.RESOLVED,
-                root_cause=result.root_cause,
-                fix_suggestion=(
-                    result.fix_recommendation.summary if result.fix_recommendation else None
+        try:
+            result = await asyncio.wait_for(
+                debate_service.execute_debate(
+                    session_id,
+                    retry_failed_only=retry_failed_only,
                 ),
-                impact_analysis=(
-                    result.impact_analysis.model_dump() if result.impact_analysis else None
+                timeout=max(60, int(settings.DEBATE_TIMEOUT or 600)),
+            )
+            await incident_service.update_incident(
+                session.incident_id,
+                IncidentUpdate(
+                    status=IncidentStatus.RESOLVED,
+                    root_cause=result.root_cause,
+                    fix_suggestion=(
+                        result.fix_recommendation.summary if result.fix_recommendation else None
+                    ),
+                    impact_analysis=(
+                        result.impact_analysis.model_dump() if result.impact_analysis else None
+                    ),
                 ),
-            ),
-        )
-        return {
-            "session_id": result.session_id,
-            "incident_id": result.incident_id,
-            "confidence": result.confidence,
-        }
+            )
+            return {
+                "session_id": result.session_id,
+                "incident_id": result.incident_id,
+                "confidence": result.confidence,
+            }
+        except Exception as exc:
+            await incident_service.update_incident(
+                session.incident_id,
+                IncidentUpdate(
+                    status=IncidentStatus.CLOSED,
+                    fix_suggestion=str(exc)[:260],
+                ),
+            )
+            raise
 
-    task_id = task_queue.submit(_run)
+    task_id = task_queue.submit(_run, timeout_seconds=max(60, int(settings.DEBATE_TIMEOUT or 600)))
     return TaskResponse(task_id=task_id, status="pending")
 
 
@@ -435,6 +482,53 @@ async def get_debate_result(session_id: str):
     return _build_result_response(result)
 
 
+@router.get(
+    "/{session_id}/lineage",
+    response_model=LineageResponse,
+    summary="获取会话执行谱系",
+    description="返回 session 的事件/Agent/工具调用谱系记录",
+)
+async def get_session_lineage(
+    session_id: str,
+    limit: int = Query(200, ge=1, le=2000, description="最多返回记录数"),
+):
+    rows = await lineage_recorder.read(session_id)
+    subset = rows[: max(1, int(limit))]
+    summary = await lineage_recorder.summarize(session_id)
+    return LineageResponse(
+        session_id=session_id,
+        records=int(summary.get("records") or 0),
+        events=int(summary.get("events") or 0),
+        tools=int(summary.get("tools") or 0),
+        agents=list(summary.get("agents") or []),
+        first_ts=summary.get("first_ts"),
+        last_ts=summary.get("last_ts"),
+        items=[row.model_dump(mode="json") for row in subset],
+    )
+
+
+@router.get(
+    "/{session_id}/replay",
+    response_model=ReplayResponse,
+    summary="回放会话关键流程",
+    description="按时间线回放执行节点，用于失败会话快速复盘",
+)
+async def replay_session(
+    session_id: str,
+    limit: int = Query(120, ge=1, le=1000, description="回放步数上限"),
+):
+    payload = await replay_session_lineage(session_id, limit=limit)
+    return ReplayResponse(
+        session_id=payload["session_id"],
+        count=int(payload.get("count") or 0),
+        rendered_steps=list(payload.get("rendered_steps") or []),
+        summary=dict(payload.get("summary") or {}),
+        timeline=list(payload.get("timeline") or []),
+        key_decisions=list(payload.get("key_decisions") or []),
+        evidence_refs=[str(item) for item in (payload.get("evidence_refs") or [])],
+    )
+
+
 def _build_result_response(result: DebateResult) -> DebateResultResponse:
     """构建辩论结果响应"""
     evidence_chain = [
@@ -481,6 +575,17 @@ def _build_result_response(result: DebateResult) -> DebateResultResponse:
         root_cause=result.root_cause,
         root_cause_category=result.root_cause_category,
         confidence=result.confidence,
+        root_cause_candidates=[
+            RootCauseCandidateResponse(
+                rank=item.rank,
+                summary=item.summary,
+                source_agent=item.source_agent,
+                confidence=item.confidence,
+                confidence_interval=list(item.confidence_interval or []),
+                evidence_refs=list(item.evidence_refs or []),
+            )
+            for item in (result.root_cause_candidates or [])
+        ],
         evidence_chain=evidence_chain,
         fix_recommendation=fix_rec,
         impact_analysis=impact,

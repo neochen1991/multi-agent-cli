@@ -8,6 +8,11 @@ import IncidentPage from '@/pages/Incident';
 import HistoryPage from '@/pages/History';
 import AssetsPage from '@/pages/Assets';
 import SettingsPage from '@/pages/Settings';
+import InvestigationWorkbenchPage from '@/pages/InvestigationWorkbench';
+import BenchmarkCenterPage from '@/pages/BenchmarkCenter';
+import GovernanceCenterPage from '@/pages/GovernanceCenter';
+import ToolsCenterPage from '@/pages/ToolsCenter';
+import WarRoomPage from '@/pages/WarRoom';
 
 const { Content, Footer } = Layout;
 
@@ -27,6 +32,11 @@ const App: React.FC = () => {
                   <Route path="/incident/:incidentId" element={<IncidentPage />} />
                   <Route path="/history" element={<HistoryPage />} />
                   <Route path="/assets" element={<AssetsPage />} />
+                  <Route path="/workbench" element={<InvestigationWorkbenchPage />} />
+                  <Route path="/benchmark" element={<BenchmarkCenterPage />} />
+                  <Route path="/governance" element={<GovernanceCenterPage />} />
+                  <Route path="/tools" element={<ToolsCenterPage />} />
+                  <Route path="/war-room" element={<WarRoomPage />} />
                   <Route path="/settings" element={<SettingsPage />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

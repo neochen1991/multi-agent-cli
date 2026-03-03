@@ -22,6 +22,7 @@ from app.models.debate import (
     FixRecommendation,
     ImpactAnalysis,
     RiskAssessment,
+    RootCauseCandidate,
 )
 from app.models.incident import Incident
 from app.flows.debate_flow import create_ai_debate_orchestrator
@@ -32,6 +33,8 @@ from app.services.report_generation_service import report_generation_service
 from app.config import settings
 from app.core.event_schema import enrich_event, new_trace_id
 from app.core.observability import metrics_store
+from app.runtime.evidence import normalize_evidence_items
+from app.runtime.judgement import causal_score, has_cross_source_evidence
 from app.repositories.debate_repository import (
     DebateRepository,
     InMemoryDebateRepository,
@@ -692,31 +695,120 @@ class DebateService:
         metadata = incident.get("metadata") or {}
         symptom = incident.get("description") or incident.get("title") or ""
         
-        # 采集运行态资产
-        runtime_assets = await asset_collection_service.collect_runtime_assets(
-            log_content=log_content,
-            event_callback=event_callback,
-        )
-        
-        # 采集开发态资产（如果有代码仓库信息）
-        repo_url = metadata.get("repo_url")
-        target_classes = parsed_data.get("key_classes", [])
-        dev_assets = await asset_collection_service.collect_dev_assets(
-            repo_url=repo_url,
-            target_classes=target_classes,
-            event_callback=event_callback,
-        )
-        
-        # 采集设计态资产
-        domain_name = metadata.get("domain_name")
-        design_assets = await asset_collection_service.collect_design_assets(
-            domain_name=domain_name,
-            event_callback=event_callback,
+        await self._emit_event(
+            event_callback,
+            {
+                "type": "asset_parallel_fetch_started",
+                "phase": "asset_analysis",
+            },
         )
 
-        interface_mapping = await asset_service.locate_interface_context(
-            log_content=log_content or "",
-            symptom=symptom,
+        repo_url = metadata.get("repo_url")
+        target_classes = parsed_data.get("key_classes", [])
+        domain_name = metadata.get("domain_name")
+
+        async def _collect_runtime() -> List[Any]:
+            try:
+                return await asset_collection_service.collect_runtime_assets(
+                    log_content=log_content,
+                    event_callback=event_callback,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await self._emit_event(
+                    event_callback,
+                    {
+                        "type": "asset_parallel_fetch_failed",
+                        "phase": "asset_analysis",
+                        "asset_type": "runtime",
+                        "error": str(exc),
+                    },
+                )
+                return []
+
+        async def _collect_dev() -> List[Any]:
+            try:
+                return await asset_collection_service.collect_dev_assets(
+                    repo_url=repo_url,
+                    target_classes=target_classes,
+                    event_callback=event_callback,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await self._emit_event(
+                    event_callback,
+                    {
+                        "type": "asset_parallel_fetch_failed",
+                        "phase": "asset_analysis",
+                        "asset_type": "dev",
+                        "error": str(exc),
+                    },
+                )
+                return []
+
+        async def _collect_design() -> List[Any]:
+            try:
+                return await asset_collection_service.collect_design_assets(
+                    domain_name=domain_name,
+                    event_callback=event_callback,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await self._emit_event(
+                    event_callback,
+                    {
+                        "type": "asset_parallel_fetch_failed",
+                        "phase": "asset_analysis",
+                        "asset_type": "design",
+                        "error": str(exc),
+                    },
+                )
+                return []
+
+        async def _collect_mapping() -> Dict[str, Any]:
+            try:
+                return await asset_service.locate_interface_context(
+                    log_content=log_content or "",
+                    symptom=symptom,
+                )
+            except Exception as exc:  # noqa: BLE001
+                await self._emit_event(
+                    event_callback,
+                    {
+                        "type": "asset_interface_mapping_failed",
+                        "phase": "asset_analysis",
+                        "error": str(exc),
+                    },
+                )
+                return {"matched": False, "confidence": 0.0, "reason": f"mapping failed: {str(exc)[:120]}"}
+
+        runtime_task = asyncio.create_task(_collect_runtime())
+        dev_task = asyncio.create_task(_collect_dev())
+        design_task = asyncio.create_task(_collect_design())
+        mapping_task = asyncio.create_task(_collect_mapping())
+
+        first_done, _ = await asyncio.wait(
+            {runtime_task, dev_task, design_task, mapping_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for done_task in first_done:
+            try:
+                first_payload = done_task.result()
+            except Exception:
+                first_payload = []
+            first_count = len(first_payload) if isinstance(first_payload, list) else (1 if first_payload else 0)
+            await self._emit_event(
+                event_callback,
+                {
+                    "type": "asset_first_batch_ready",
+                    "phase": "asset_analysis",
+                    "count": first_count,
+                },
+            )
+            break
+
+        runtime_assets, dev_assets, design_assets, interface_mapping = await asyncio.gather(
+            runtime_task,
+            dev_task,
+            design_task,
+            mapping_task,
         )
         await self._emit_event(
             event_callback,
@@ -1262,45 +1354,31 @@ class DebateService:
             root_cause_summary = str(root_cause_raw or "Unknown").strip() or "Unknown"
             root_cause_category = None
 
-        # 构建证据链（兼容 evidence_chain 内字符串项）
+        # 构建证据链（统一标准化模型）
         evidence_chain: List[EvidenceItem] = []
-        evidence_items = final_judgment.get("evidence_chain", [])
-        if not isinstance(evidence_items, list):
-            evidence_items = []
-        for e in evidence_items:
-            if isinstance(e, dict):
-                description = (
-                    e.get("description")
-                    or e.get("evidence")
-                    or e.get("summary")
-                    or ""
+        normalized_evidence = normalize_evidence_items(final_judgment.get("evidence_chain"))
+        if not has_cross_source_evidence(normalized_evidence):
+            normalized_evidence.extend(self._fallback_cross_source_evidence(session))
+        dedup_keys = set()
+        deduped_evidence: List[Dict[str, Any]] = []
+        for item in normalized_evidence:
+            key = f"{item.get('source')}|{item.get('description')}|{item.get('source_ref')}"
+            if key in dedup_keys:
+                continue
+            dedup_keys.add(key)
+            deduped_evidence.append(item)
+        for item in deduped_evidence:
+            evidence_chain.append(
+                EvidenceItem(
+                    evidence_id=str(item.get("evidence_id") or "") or None,
+                    type=str(item.get("type") or "unknown"),
+                    description=str(item.get("description") or ""),
+                    source=str(item.get("source") or "ai_debate"),
+                    source_ref=str(item.get("source_ref") or "") or None,
+                    location=item.get("location"),
+                    strength=str(item.get("strength") or "medium"),
                 )
-                strength = str(e.get("strength") or "medium")
-                if strength not in {"strong", "medium", "weak"}:
-                    strength = "medium"
-                evidence_chain.append(
-                    EvidenceItem(
-                        evidence_id=str(e.get("evidence_id") or "") or None,
-                        type=str(e.get("type") or "unknown"),
-                        description=str(description),
-                        source=str(e.get("source") or "ai_debate"),
-                        source_ref=str(e.get("source_ref") or "") or None,
-                        location=e.get("location") or e.get("code_location"),
-                        strength=strength,
-                    )
-                )
-            else:
-                text = str(e or "").strip()
-                if text:
-                    evidence_chain.append(
-                        EvidenceItem(
-                            type="text",
-                            description=text,
-                            source="ai_debate",
-                            location=None,
-                            strength="medium",
-                        )
-                    )
+            )
 
         # 构建修复建议
         fix_rec = final_judgment.get("fix_recommendation", {})
@@ -1417,12 +1495,48 @@ class DebateService:
                 confidence = self._coerce_confidence(judge_turn.confidence, default=0.0)
         confidence = max(0.0, min(1.0, confidence))
 
+        scoring = causal_score(
+            root_cause=root_cause_summary,
+            evidence=[item.model_dump(mode="json") for item in evidence_chain],
+            confidence=confidence,
+        )
+        topology_scoring = self._topology_propagation_score(
+            session=session,
+            evidence=[item.model_dump(mode="json") for item in evidence_chain],
+        )
+        self_consistency = self._self_consistency_score(session)
+        root_cause_candidates = self._build_root_cause_candidates(
+            session=session,
+            primary_root_cause=root_cause_summary,
+            primary_confidence=confidence,
+            evidence_chain=evidence_chain,
+            topology_score=float(topology_scoring.get("topology_score") or 0.0),
+        )
+        action_items.append(
+            {
+                "type": "quality_gate",
+                "summary": (
+                    f"相关性分={scoring['relevance_score']}, 因果分={scoring['causality_score']}, "
+                    f"拓扑传播分={topology_scoring['topology_score']}, 自一致性={self_consistency['score']}"
+                ),
+                "details": {
+                    "causal_score": scoring,
+                    "topology_score": topology_scoring,
+                    "self_consistency": self_consistency,
+                    "cross_source_evidence": has_cross_source_evidence(
+                        [item.model_dump(mode="json") for item in evidence_chain]
+                    ),
+                },
+            }
+        )
+
         return DebateResult(
             session_id=session.id,
             incident_id=session.incident_id,
             root_cause=root_cause_summary,
             root_cause_category=root_cause_category,
             confidence=confidence,
+            root_cause_candidates=root_cause_candidates,
             evidence_chain=evidence_chain,
             fix_recommendation=fix_recommendation,
             impact_analysis=impact_analysis,
@@ -1434,6 +1548,179 @@ class DebateService:
             dissenting_opinions=dissenting_opinions,
             debate_history=session.rounds
         )
+
+    def _topology_propagation_score(
+        self,
+        *,
+        session: DebateSession,
+        evidence: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        assets = session.context.get("assets") if isinstance(session.context, dict) else {}
+        assets = assets if isinstance(assets, dict) else {}
+        mapping = assets.get("interface_mapping") if isinstance(assets.get("interface_mapping"), dict) else {}
+        endpoint = mapping.get("matched_endpoint") if isinstance(mapping.get("matched_endpoint"), dict) else {}
+
+        node_signals: List[str] = []
+        if str(endpoint.get("service") or "").strip():
+            node_signals.append(f"service:{str(endpoint.get('service')).strip()}")
+        if str(mapping.get("domain") or "").strip():
+            node_signals.append(f"domain:{str(mapping.get('domain')).strip()}")
+        if str(mapping.get("aggregate") or "").strip():
+            node_signals.append(f"aggregate:{str(mapping.get('aggregate')).strip()}")
+        if str(mapping.get("owner_team") or "").strip():
+            node_signals.append(f"team:{str(mapping.get('owner_team')).strip()}")
+
+        propagation_hits = 0
+        endpoint_path = str(endpoint.get("path") or "").strip().lower()
+        endpoint_service = str(endpoint.get("service") or "").strip().lower()
+        owner_team = str(mapping.get("owner_team") or "").strip().lower()
+        for row in evidence:
+            text = " ".join(
+                [
+                    str(row.get("description") or ""),
+                    str(row.get("source_ref") or ""),
+                    str(row.get("source") or ""),
+                ]
+            ).lower()
+            if endpoint_path and endpoint_path in text:
+                propagation_hits += 1
+            if endpoint_service and endpoint_service in text:
+                propagation_hits += 1
+            if owner_team and owner_team in text:
+                propagation_hits += 1
+
+        topology_score = 0.0
+        if node_signals:
+            topology_score += min(0.45, len(node_signals) * 0.12)
+        topology_score += min(0.55, propagation_hits * 0.1)
+        return {
+            "topology_score": round(max(0.0, min(1.0, topology_score)), 3),
+            "node_signals": node_signals,
+            "propagation_hits": propagation_hits,
+        }
+
+    def _build_root_cause_candidates(
+        self,
+        *,
+        session: DebateSession,
+        primary_root_cause: str,
+        primary_confidence: float,
+        evidence_chain: List[EvidenceItem],
+        topology_score: float,
+    ) -> List[RootCauseCandidate]:
+        candidates: List[RootCauseCandidate] = []
+        seen = set()
+        base_refs = [
+            str(item.evidence_id or "").strip()
+            for item in evidence_chain[:3]
+            if str(item.evidence_id or "").strip()
+        ]
+
+        primary_summary = str(primary_root_cause or "").strip()
+        if primary_summary:
+            primary_adj = max(0.0, min(1.0, float(primary_confidence) * 0.8 + float(topology_score) * 0.2))
+            candidates.append(
+                RootCauseCandidate(
+                    rank=1,
+                    summary=primary_summary,
+                    source_agent="JudgeAgent",
+                    confidence=round(primary_adj, 3),
+                    confidence_interval=[round(max(0.0, primary_adj - 0.12), 3), round(min(1.0, primary_adj + 0.1), 3)],
+                    evidence_refs=base_refs,
+                )
+            )
+            seen.add(primary_summary.lower())
+
+        interim: List[Dict[str, Any]] = []
+        for round_ in reversed(session.rounds):
+            if round_.agent_name == "JudgeAgent":
+                continue
+            output = round_.output_content if isinstance(round_.output_content, dict) else {}
+            text = str(output.get("conclusion") or output.get("analysis") or "").strip()
+            if not text:
+                continue
+            compact = text.lower()
+            if compact in seen:
+                continue
+            score = self._coerce_confidence(round_.confidence, default=0.0)
+            if score <= 0.0:
+                score = self._coerce_confidence(output.get("confidence"), default=0.0)
+            score = max(0.0, min(1.0, score * 0.75 + topology_score * 0.25))
+            interim.append(
+                {
+                    "summary": text[:260],
+                    "agent": round_.agent_name,
+                    "confidence": round(score, 3),
+                    "interval": [round(max(0.0, score - 0.15), 3), round(min(1.0, score + 0.1), 3)],
+                }
+            )
+            seen.add(compact)
+            if len(interim) >= 8:
+                break
+
+        interim.sort(key=lambda row: float(row.get("confidence") or 0.0), reverse=True)
+        rank_base = len(candidates)
+        for idx, row in enumerate(interim[: max(0, 3 - rank_base)], start=1):
+            candidates.append(
+                RootCauseCandidate(
+                    rank=rank_base + idx,
+                    summary=str(row.get("summary") or ""),
+                    source_agent=str(row.get("agent") or ""),
+                    confidence=float(row.get("confidence") or 0.0),
+                    confidence_interval=list(row.get("interval") or []),
+                    evidence_refs=base_refs,
+                )
+            )
+        return candidates
+
+    def _fallback_cross_source_evidence(self, session: DebateSession) -> List[Dict[str, Any]]:
+        fallback: List[Dict[str, Any]] = []
+        for round_ in reversed(session.rounds):
+            output = round_.output_content if isinstance(round_.output_content, dict) else {}
+            conclusion = str(output.get("conclusion") or "").strip()
+            if not conclusion:
+                continue
+            source = "ai_debate"
+            if round_.agent_name == "LogAgent":
+                source = "runtime_log"
+            elif round_.agent_name in {"CodeAgent", "ChangeAgent"}:
+                source = "code_repo"
+            elif round_.agent_name == "DomainAgent":
+                source = "domain_asset"
+            elif round_.agent_name == "MetricsAgent":
+                source = "metrics_snapshot"
+            fallback.append(
+                {
+                    "evidence_id": f"fallback_{round_.agent_name}_{round_.round_number}",
+                    "type": round_.phase.value if hasattr(round_.phase, "value") else str(round_.phase),
+                    "description": conclusion[:200],
+                    "source": source,
+                    "source_ref": f"{round_.agent_name}:{round_.round_number}",
+                    "location": None,
+                    "strength": "medium",
+                }
+            )
+            if len(fallback) >= 4:
+                break
+        return fallback
+
+    def _self_consistency_score(self, session: DebateSession) -> Dict[str, Any]:
+        conclusions: List[str] = []
+        for round_ in session.rounds:
+            if round_.agent_name in {"JudgeAgent", "CriticAgent", "RebuttalAgent"}:
+                output = round_.output_content if isinstance(round_.output_content, dict) else {}
+                conclusion = str(output.get("conclusion") or output.get("analysis") or "").strip()
+                if conclusion:
+                    conclusions.append(conclusion)
+        if not conclusions:
+            return {"score": 0.0, "votes": 0}
+        normalized = [text.replace(" ", "").lower()[:80] for text in conclusions]
+        counts: Dict[str, int] = {}
+        for item in normalized:
+            counts[item] = counts.get(item, 0) + 1
+        top_votes = max(counts.values()) if counts else 0
+        score = top_votes / max(1, len(normalized))
+        return {"score": round(score, 3), "votes": len(normalized)}
 
 
 # 全局实例

@@ -47,6 +47,24 @@ class ShareReportResponse(BaseModel):
     created_at: datetime
 
 
+class ReportVersionResponse(BaseModel):
+    report_id: str
+    incident_id: str
+    debate_session_id: Optional[str] = None
+    format: str
+    generated_at: datetime
+    content_preview: str
+
+
+class ReportDiffResponse(BaseModel):
+    incident_id: str
+    base_report_id: Optional[str] = None
+    target_report_id: Optional[str] = None
+    changed: bool
+    summary: str
+    diff_lines: list[str] = Field(default_factory=list)
+
+
 @router.get(
     "/shared/{token}",
     response_model=ReportResponse,
@@ -137,6 +155,47 @@ async def share_report(incident_id: str):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
 
 
+@router.get(
+    "/{incident_id}/compare",
+    response_model=list[ReportVersionResponse],
+    summary="报告版本对比",
+    description="返回同一故障的历史报告版本摘要，用于横向对比",
+)
+async def compare_reports(incident_id: str):
+    items = await report_service.list_reports(incident_id)
+    versions: list[ReportVersionResponse] = []
+    for item in items:
+        versions.append(
+            ReportVersionResponse(
+                report_id=str(item.get("report_id") or ""),
+                incident_id=str(item.get("incident_id") or incident_id),
+                debate_session_id=item.get("debate_session_id"),
+                format=str(item.get("format") or "markdown"),
+                generated_at=item.get("generated_at"),
+                content_preview=str(item.get("content") or "")[:220],
+            )
+        )
+    return versions
+
+
+@router.get(
+    "/{incident_id}/compare-diff",
+    response_model=ReportDiffResponse,
+    summary="报告版本差异",
+    description="对比同 incident 最近两版报告差异（unified diff）",
+)
+async def compare_report_diff(incident_id: str):
+    payload = await report_service.compare_latest_reports(incident_id)
+    return ReportDiffResponse(
+        incident_id=str(payload.get("incident_id") or incident_id),
+        base_report_id=payload.get("base_report_id"),
+        target_report_id=payload.get("target_report_id"),
+        changed=bool(payload.get("changed")),
+        summary=str(payload.get("summary") or ""),
+        diff_lines=[str(item) for item in (payload.get("diff_lines") or [])],
+    )
+
+
 def _build_report_response(report: dict) -> ReportResponse:
     return ReportResponse(
         report_id=report["report_id"],
@@ -147,4 +206,3 @@ def _build_report_response(report: dict) -> ReportResponse:
         file_path=report.get("file_path"),
         generated_at=report["generated_at"],
     )
-

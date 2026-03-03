@@ -1740,6 +1740,20 @@ const IncidentPage: React.FC = () => {
     if (rootCause) {
       cards.push({ title: '根因结论', body: rootCause });
     }
+    const candidates = Array.isArray(debateResult.root_cause_candidates) ? debateResult.root_cause_candidates : [];
+    if (candidates.length > 0) {
+      const lines = candidates.slice(0, 5).map((item, index) => {
+        const row = asRecord(item);
+        const summary = firstTextValue(row, ['summary']) || '-';
+        const agent = firstTextValue(row, ['source_agent']) || '-';
+        const confidence = Number(row.confidence || 0);
+        const interval = Array.isArray(row.confidence_interval) ? row.confidence_interval : [];
+        const low = Number(interval[0] || 0);
+        const high = Number(interval[1] || 0);
+        return `${index + 1}. ${summary}\n来源：${agent}，置信度：${(confidence * 100).toFixed(1)}%，区间：[${(low * 100).toFixed(1)}%, ${(high * 100).toFixed(1)}%]`;
+      });
+      cards.push({ title: 'Top-K 根因候选', body: lines.join('\n') });
+    }
     const evidenceItems = Array.isArray(debateResult.evidence_chain) ? debateResult.evidence_chain : [];
     if (evidenceItems.length > 0) {
       const lines = evidenceItems.slice(0, 8).map((item, index) => {
