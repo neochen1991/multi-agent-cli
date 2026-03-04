@@ -24,11 +24,24 @@ def _render_step(row: Dict[str, Any]) -> str:
     return f"[{ts}] {kind} phase={phase} agent={agent}".strip()
 
 
-async def replay_session_lineage(session_id: str, *, limit: int = 120) -> Dict[str, Any]:
+async def replay_session_lineage(
+    session_id: str,
+    *,
+    limit: int = 120,
+    phase: str = "",
+    agent: str = "",
+) -> Dict[str, Any]:
     """Replay a session using recorded lineage records."""
 
     rows = await lineage_recorder.read(session_id)
-    subset = rows[: max(1, int(limit or 120))]
+    normalized_phase = str(phase or "").strip().lower()
+    normalized_agent = str(agent or "").strip().lower()
+    filtered = rows
+    if normalized_phase:
+        filtered = [row for row in filtered if str(row.phase or "").strip().lower() == normalized_phase]
+    if normalized_agent:
+        filtered = [row for row in filtered if str(row.agent_name or "").strip().lower() == normalized_agent]
+    subset = filtered[: max(1, int(limit or 120))]
     timeline: List[Dict[str, Any]] = [row.model_dump(mode="json") for row in subset]
     rendered = [_render_step(item) for item in timeline]
     key_decisions: List[Dict[str, Any]] = []
@@ -60,6 +73,10 @@ async def replay_session_lineage(session_id: str, *, limit: int = 120) -> Dict[s
     return {
         "session_id": session_id,
         "count": len(timeline),
+        "filters": {
+            "phase": normalized_phase,
+            "agent": normalized_agent,
+        },
         "timeline": timeline,
         "rendered_steps": rendered,
         "key_decisions": key_decisions[:30],

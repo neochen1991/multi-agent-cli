@@ -15,6 +15,7 @@ from app.models.asset import (
     DesignAssetType,
 )
 from app.services.asset_service import asset_service
+from app.services.asset_knowledge_service import asset_knowledge_service
 from app.services.incident_service import incident_service
 from app.services.debate_service import debate_service
 
@@ -619,6 +620,15 @@ async def locate_by_interface(request: InterfaceLocateRequest):
         symptom=request.symptom,
     )
     return InterfaceLocateResponse(**result)
+
+
+@router.get(
+    "/resources",
+    summary="资产资源源入口",
+    description="返回本地优先、可插拔外部源的资源入口清单",
+)
+async def list_asset_resource_sources():
+    return asset_knowledge_service.list_resource_sources()
 
 
 # ==================== 资产关联 API ====================

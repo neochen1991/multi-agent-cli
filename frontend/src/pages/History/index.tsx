@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, Col, Row, Space, Statistic, Table, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useNavigate } from 'react-router-dom';
-import { incidentApi, type Incident } from '@/services/api';
+import { debateApi, incidentApi, type Incident } from '@/services/api';
 import { formatBeijingDateTime } from '@/utils/dateTime';
 
 const { Title } = Typography;
@@ -32,12 +32,35 @@ const HistoryPage: React.FC = () => {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<Incident[]>([]);
+  const [sessionMeta, setSessionMeta] = useState<Record<string, { mode: string; currentPhase: string }>>({});
 
   const loadIncidents = async () => {
     setLoading(true);
     try {
       const data = await incidentApi.list(1, 50);
       setItems(data.items || []);
+      const sessionIds = (data.items || [])
+        .map((row) => String(row.debate_session_id || '').trim())
+        .filter(Boolean)
+        .slice(0, 20);
+      if (sessionIds.length > 0) {
+        const details = await Promise.all(
+          sessionIds.map((sid) =>
+            debateApi.get(sid).catch(() => null),
+          ),
+        );
+        const nextMeta: Record<string, { mode: string; currentPhase: string }> = {};
+        details.forEach((detail, idx) => {
+          if (!detail) return;
+          const sid = sessionIds[idx];
+          const mode = String((detail.context || {}).execution_mode || 'standard');
+          const currentPhase = String(detail.current_phase || '');
+          nextMeta[sid] = { mode, currentPhase };
+        });
+        setSessionMeta(nextMeta);
+      } else {
+        setSessionMeta({});
+      }
     } catch (e: any) {
       message.error(e?.response?.data?.detail || e.message || '加载历史失败');
     } finally {
@@ -86,6 +109,31 @@ const HistoryPage: React.FC = () => {
       render: (status: string) => <Tag color={statusColor[status] || 'default'}>{status}</Tag>,
     },
     {
+      title: '模式',
+      key: 'mode',
+      width: 120,
+      render: (_: unknown, record) => {
+        const sid = String(record.debate_session_id || '');
+        const mode = sid ? String(sessionMeta[sid]?.mode || 'standard') : '-';
+        return <Tag>{mode}</Tag>;
+      },
+    },
+    {
+      title: '预计耗时',
+      key: 'eta',
+      width: 140,
+      render: (_: unknown, record) => {
+        const sid = String(record.debate_session_id || '');
+        const mode = sid ? String(sessionMeta[sid]?.mode || 'standard') : 'standard';
+        if (['resolved', 'completed', 'closed', 'failed', 'cancelled'].includes(record.status)) {
+          return '-';
+        }
+        if (mode === 'quick') return '1-3 分钟';
+        if (mode === 'background' || mode === 'async') return '3-8 分钟';
+        return '2-6 分钟';
+      },
+    },
+    {
       title: '创建时间',
       dataIndex: 'created_at',
       key: 'created_at',
@@ -110,6 +158,23 @@ const HistoryPage: React.FC = () => {
               继续分析
             </Button>
           )}
+          {record.debate_session_id && ['pending', 'running', 'analyzing', 'debating', 'waiting', 'retrying'].includes(record.status) ? (
+            <Button
+              size="small"
+              danger
+              onClick={async () => {
+                try {
+                  await debateApi.cancel(String(record.debate_session_id || ''));
+                  message.success('会话已取消');
+                  await loadIncidents();
+                } catch (e: any) {
+                  message.error(e?.response?.data?.detail || e?.message || '取消失败');
+                }
+              }}
+            >
+              取消
+            </Button>
+          ) : null}
         </Space>
       ),
     },

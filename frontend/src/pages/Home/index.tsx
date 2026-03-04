@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Button, Card, Col, Row, Space, Statistic, Table, Tag, Typography, message } from 'antd';
+import { Button, Card, Col, Input, Row, Select, Space, Statistic, Table, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import {
   AlertOutlined,
@@ -90,6 +90,14 @@ const HomePage: React.FC = () => {
     totalIncidents: 0,
   });
   const [recentIncidents, setRecentIncidents] = useState<Incident[]>([]);
+  const [quickStartLoading, setQuickStartLoading] = useState(false);
+  const [quickStartForm, setQuickStartForm] = useState({
+    title: '',
+    service_name: '',
+    severity: 'high',
+    log_content: '',
+    mode: 'standard',
+  });
 
   const loadDashboard = async () => {
     setStatsLoading(true);
@@ -166,6 +174,32 @@ const HomePage: React.FC = () => {
     void loadDashboard();
   }, []);
 
+  const quickStartAnalysis = async () => {
+    const title = String(quickStartForm.title || '').trim();
+    if (!title) {
+      message.warning('请先输入故障标题');
+      return;
+    }
+    setQuickStartLoading(true);
+    try {
+      const incident = await incidentApi.create({
+        title,
+        severity: quickStartForm.severity,
+        service_name: String(quickStartForm.service_name || '').trim(),
+        log_content: String(quickStartForm.log_content || '').trim(),
+      });
+      const mode = String(quickStartForm.mode || 'standard') as 'standard' | 'quick' | 'background' | 'async';
+      const session = await debateApi.createSession(incident.id, { maxRounds: 1, mode });
+      message.success(`会话已创建：${session.id}`);
+      void loadDashboard();
+      navigate(`/incident/${incident.id}?view=analysis&session_id=${session.id}&auto_start=1&mode=${mode}`);
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || e?.message || '快速启动分析失败');
+    } finally {
+      setQuickStartLoading(false);
+    }
+  };
+
   const recentColumns: ColumnsType<Incident> = useMemo(
     () => [
       { title: 'Incident ID', dataIndex: 'id', key: 'id', width: 150 },
@@ -227,6 +261,70 @@ const HomePage: React.FC = () => {
             </Button>
           </Space>
           <Text type="secondary">数据基于北京时间实时统计，当前总故障：{stats.totalIncidents}</Text>
+        </Space>
+      </Card>
+
+      <Card className="module-card" title="快速启动分析" style={{ marginTop: 16 }}>
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Row gutter={[12, 12]}>
+            <Col xs={24} md={8}>
+              <Input
+                placeholder="故障标题（必填）"
+                value={quickStartForm.title}
+                onChange={(e) => setQuickStartForm((prev) => ({ ...prev, title: e.target.value }))}
+              />
+            </Col>
+            <Col xs={24} md={6}>
+              <Input
+                placeholder="服务名（可选）"
+                value={quickStartForm.service_name}
+                onChange={(e) => setQuickStartForm((prev) => ({ ...prev, service_name: e.target.value }))}
+              />
+            </Col>
+            <Col xs={24} md={4}>
+              <Select
+                value={quickStartForm.severity}
+                style={{ width: '100%' }}
+                options={[
+                  { label: 'Critical', value: 'critical' },
+                  { label: 'High', value: 'high' },
+                  { label: 'Medium', value: 'medium' },
+                  { label: 'Low', value: 'low' },
+                ]}
+                onChange={(value) => setQuickStartForm((prev) => ({ ...prev, severity: value }))}
+              />
+            </Col>
+            <Col xs={24} md={4}>
+              <Select
+                value={quickStartForm.mode}
+                style={{ width: '100%' }}
+                options={[
+                  { label: 'Standard', value: 'standard' },
+                  { label: 'Quick', value: 'quick' },
+                  { label: 'Background', value: 'background' },
+                  { label: 'Async', value: 'async' },
+                ]}
+                onChange={(value) => setQuickStartForm((prev) => ({ ...prev, mode: value }))}
+              />
+            </Col>
+            <Col xs={24} md={24} lg={4}>
+              <Button
+                type="primary"
+                className="quick-start-submit-btn"
+                loading={quickStartLoading}
+                onClick={() => void quickStartAnalysis()}
+                style={{ width: '100%' }}
+              >
+                创建并启动分析
+              </Button>
+            </Col>
+          </Row>
+          <Input.TextArea
+            rows={4}
+            placeholder="可选：粘贴关键日志/堆栈，进入详情页后会自动开始分析"
+            value={quickStartForm.log_content}
+            onChange={(e) => setQuickStartForm((prev) => ({ ...prev, log_content: e.target.value }))}
+          />
         </Space>
       </Card>
 

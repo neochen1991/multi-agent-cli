@@ -12,6 +12,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import structlog
 
 from app.config import settings
+from app.core.event_schema import enrich_event, new_trace_id
 from app.core.security import decode_token
 from app.models.incident import IncidentStatus, IncidentUpdate
 from app.runtime.task_registry import runtime_task_registry
@@ -80,21 +81,69 @@ class DebateWebSocketManager:
 ws_manager = DebateWebSocketManager()
 
 
+def _build_ws_control_event(
+    *,
+    session_id: str,
+    trace_id: str,
+    event_type: str,
+    phase: str,
+    message: str = "",
+    extra: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "type": event_type,
+        "phase": phase,
+        "session_id": session_id,
+    }
+    if message:
+        payload["message"] = message
+    if extra:
+        payload.update(extra)
+    return enrich_event(
+        payload,
+        trace_id=trace_id,
+        default_phase=phase,
+    )
+
+
 async def _run_debate_with_events(session_id: str):
     async def _forward_event(event: Dict[str, Any]):
-        await runtime_task_registry.mark_heartbeat(session_id)
+        await runtime_task_registry.mark_heartbeat(
+            session_id,
+            phase=str(event.get("phase") or ""),
+            event_type=str(event.get("type") or ""),
+            round_number=(
+                int(event.get("round_number"))
+                if isinstance(event.get("round_number"), (int, float, str)) and str(event.get("round_number")).isdigit()
+                else None
+            ),
+        )
         await ws_manager.broadcast(session_id, {"type": "event", "data": event})
 
     session = await debate_service.get_session(session_id)
     if not session:
+        event = _build_ws_control_event(
+            session_id=session_id,
+            trace_id=new_trace_id("deb"),
+            event_type="ws_error",
+            phase="failed",
+            message=f"Debate session {session_id} not found",
+        )
         await ws_manager.broadcast(
             session_id,
-            {"type": "error", "message": f"Debate session {session_id} not found"},
+            {
+                "type": "error",
+                "message": f"Debate session {session_id} not found",
+                "data": event,
+                **event,
+            },
         )
         return
 
     try:
         trace_id = str((session.context or {}).get("trace_id") or "").strip()
+        if not trace_id:
+            trace_id = new_trace_id("deb")
         await runtime_task_registry.mark_started(
             session_id=session_id,
             task_type="debate",
@@ -114,19 +163,20 @@ async def _run_debate_with_events(session_id: str):
                 ),
             ),
         )
-        await ws_manager.broadcast(
-            session_id,
+        result_event = enrich_event(
             {
-                "type": "result",
-                "data": {
-                    "session_id": result.session_id,
-                    "incident_id": result.incident_id,
-                    "root_cause": result.root_cause,
-                    "confidence": result.confidence,
-                    "created_at": result.created_at.isoformat(),
-                },
+                "type": "result_ready",
+                "phase": "completed",
+                "session_id": result.session_id,
+                "incident_id": result.incident_id,
+                "root_cause": result.root_cause,
+                "confidence": result.confidence,
+                "created_at": result.created_at.isoformat(),
             },
+            trace_id=trace_id,
+            default_phase="completed",
         )
+        await ws_manager.broadcast(session_id, {"type": "result", "data": result_event})
         await runtime_task_registry.mark_done(session_id, status="completed")
     except asyncio.CancelledError:
         await debate_service.cancel_session(session_id, reason="ws_cancel")
@@ -135,12 +185,16 @@ async def _run_debate_with_events(session_id: str):
             session_id,
             {
                 "type": "event",
-                "data": {
-                    "type": "session_cancelled",
-                    "session_id": session_id,
-                    "phase": "cancelled",
-                    "status": "cancelled",
-                },
+                "data": enrich_event(
+                    {
+                        "type": "session_cancelled",
+                        "session_id": session_id,
+                        "phase": "cancelled",
+                        "status": "cancelled",
+                    },
+                    trace_id=trace_id,
+                    default_phase="cancelled",
+                ),
             },
         )
     except Exception as e:
@@ -156,20 +210,34 @@ async def _run_debate_with_events(session_id: str):
             retry_hint = str(latest.context.get("last_error_retry_hint") or "")
         if latest:
             task_state = await runtime_task_registry.get(session_id)
-            await ws_manager.broadcast(
-                session_id,
+            snapshot = enrich_event(
                 {
                     "type": "snapshot",
-                    "data": {
-                        "session_id": latest.id,
-                        "incident_id": latest.incident_id,
-                        "status": latest.status.value,
-                        "current_round": latest.current_round,
-                        "rounds": [r.model_dump(mode="json") for r in latest.rounds],
-                        "task_state": task_state.to_dict() if task_state else None,
-                    },
+                    "phase": str(latest.current_phase.value if latest.current_phase else latest.status.value),
+                    "session_id": latest.id,
+                    "incident_id": latest.incident_id,
+                    "status": latest.status.value,
+                    "current_round": latest.current_round,
+                    "rounds": [r.model_dump(mode="json") for r in latest.rounds],
+                    "task_state": task_state.to_dict() if task_state else None,
                 },
+                trace_id=str((latest.context or {}).get("trace_id") or trace_id or ""),
+                default_phase="snapshot",
             )
+            await ws_manager.broadcast(session_id, {"type": "snapshot", "data": snapshot})
+        error_event = _build_ws_control_event(
+            session_id=session_id,
+            trace_id=trace_id,
+            event_type="ws_error",
+            phase="failed",
+            message=str(e),
+            extra={
+                "error": str(e),
+                "error_code": error_code,
+                "recoverable": recoverable,
+                "retry_hint": retry_hint,
+            },
+        )
         await ws_manager.broadcast(
             session_id,
             {
@@ -178,6 +246,8 @@ async def _run_debate_with_events(session_id: str):
                 "error_code": error_code,
                 "recoverable": recoverable,
                 "retry_hint": retry_hint,
+                "data": error_event,
+                **error_event,
             },
         )
 
@@ -200,26 +270,40 @@ async def debate_ws(websocket: WebSocket, session_id: str):
     try:
         session = await debate_service.get_session(session_id)
         if not session:
+            error_event = _build_ws_control_event(
+                session_id=session_id,
+                trace_id=new_trace_id("deb"),
+                event_type="ws_error",
+                phase="failed",
+                message=f"Debate session {session_id} not found",
+            )
             await websocket.send_json(
-                {"type": "error", "message": f"Debate session {session_id} not found"}
+                {
+                    "type": "error",
+                    "message": f"Debate session {session_id} not found",
+                    "data": error_event,
+                    **error_event,
+                }
             )
             await websocket.close(code=4404)
             return
 
         task_state = await runtime_task_registry.get(session_id)
-        await websocket.send_json(
+        snapshot = enrich_event(
             {
                 "type": "snapshot",
-                "data": {
-                    "session_id": session.id,
-                    "incident_id": session.incident_id,
-                    "status": session.status.value,
-                    "current_round": session.current_round,
-                    "rounds": [r.model_dump(mode="json") for r in session.rounds],
-                    "task_state": task_state.to_dict() if task_state else None,
-                },
-            }
+                "phase": str(session.current_phase.value if session.current_phase else session.status.value),
+                "session_id": session.id,
+                "incident_id": session.incident_id,
+                "status": session.status.value,
+                "current_round": session.current_round,
+                "rounds": [r.model_dump(mode="json") for r in session.rounds],
+                "task_state": task_state.to_dict() if task_state else None,
+            },
+            trace_id=str((session.context or {}).get("trace_id") or ""),
+            default_phase="snapshot",
         )
+        await websocket.send_json({"type": "snapshot", "data": snapshot})
 
         auto_start = websocket.query_params.get("auto_start", "true").lower() == "true"
         running_like_status = {"pending", "running", "analyzing", "debating", "waiting", "retrying"}
@@ -233,7 +317,14 @@ async def debate_ws(websocket: WebSocket, session_id: str):
         while True:
             message = await websocket.receive_text()
             if message == "ping":
-                await websocket.send_json({"type": "pong"})
+                pong_event = _build_ws_control_event(
+                    session_id=session_id,
+                    trace_id=str((session.context or {}).get("trace_id") or ""),
+                    event_type="ws_pong",
+                    phase="control",
+                    message="pong",
+                )
+                await websocket.send_json({"type": "pong", "data": pong_event, **pong_event})
             elif message == "start":
                 running_task = ws_manager.ensure_running(
                     session_id,
@@ -244,32 +335,71 @@ async def debate_ws(websocket: WebSocket, session_id: str):
                     session_id,
                     lambda: _run_debate_with_events(session_id),
                 )
-                await websocket.send_json({"type": "ack", "message": "resume accepted"})
-            elif message == "cancel":
-                cancelled = ws_manager.cancel_running(session_id)
-                await debate_service.cancel_session(session_id, reason="ws_cancel")
+                resume_task_state = await runtime_task_registry.get(session_id)
+                ack = enrich_event(
+                    {
+                        "type": "ws_ack",
+                        "phase": "control",
+                        "session_id": session_id,
+                        "message": "resume accepted",
+                        "resume_from": {
+                            "phase": str(resume_task_state.last_phase if resume_task_state else ""),
+                            "event_type": str(resume_task_state.last_event_type if resume_task_state else ""),
+                            "round": int(resume_task_state.last_round if resume_task_state else 0),
+                            "updated_at": str(resume_task_state.updated_at if resume_task_state else ""),
+                        },
+                    },
+                    trace_id=str((session.context or {}).get("trace_id") or ""),
+                    default_phase="control",
+                )
                 await websocket.send_json(
                     {
                         "type": "ack",
-                        "message": "cancel accepted" if cancelled else "no running task",
+                        "message": "resume accepted",
+                        "data": ack,
+                        **ack,
+                    }
+                )
+            elif message == "cancel":
+                cancelled = ws_manager.cancel_running(session_id)
+                await debate_service.cancel_session(session_id, reason="ws_cancel")
+                ack_message = "cancel accepted" if cancelled else "no running task"
+                ack = enrich_event(
+                    {
+                        "type": "ws_ack",
+                        "phase": "control",
+                        "session_id": session_id,
+                        "message": ack_message,
+                    },
+                    trace_id=str((session.context or {}).get("trace_id") or ""),
+                    default_phase="control",
+                )
+                await websocket.send_json(
+                    {
+                        "type": "ack",
+                        "message": ack_message,
+                        "data": ack,
+                        **ack,
                     }
                 )
             elif message == "snapshot":
                 latest = await debate_service.get_session(session_id)
                 if latest:
                     task_state = await runtime_task_registry.get(session_id)
-                    await websocket.send_json(
+                    snapshot = enrich_event(
                         {
                             "type": "snapshot",
-                            "data": {
-                                "session_id": latest.id,
-                                "status": latest.status.value,
-                                "current_round": latest.current_round,
-                                "rounds": [r.model_dump(mode="json") for r in latest.rounds],
-                                "task_state": task_state.to_dict() if task_state else None,
-                            },
-                        }
+                            "phase": str(latest.current_phase.value if latest.current_phase else latest.status.value),
+                            "session_id": latest.id,
+                            "status": latest.status.value,
+                            "current_round": latest.current_round,
+                            "rounds": [r.model_dump(mode="json") for r in latest.rounds],
+                            "task_state": task_state.to_dict() if task_state else None,
+                        },
+                        trace_id=str((latest.context or {}).get("trace_id") or ""),
+                        default_phase="snapshot",
                     )
+                    await websocket.send_json({"type": "snapshot", "data": snapshot})
 
     except WebSocketDisconnect:
         pass

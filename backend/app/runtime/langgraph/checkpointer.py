@@ -20,6 +20,13 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
+def thread_config_for_session(session_id: str) -> dict[str, dict[str, str]]:
+    """Build LangGraph thread config for a runtime session."""
+
+    sid = str(session_id or "").strip()
+    return {"configurable": {"thread_id": sid}}
+
+
 def create_checkpointer(settings: "Settings") -> "BaseCheckpointSaver":
     """
     Create a checkpointer based on configuration.
@@ -105,4 +112,5 @@ async def close_checkpointer(checkpointer: "BaseCheckpointSaver") -> None:
 __all__ = [
     "create_checkpointer",
     "close_checkpointer",
+    "thread_config_for_session",
 ]

@@ -60,7 +60,15 @@ jobs:
           python -m app.benchmark.cli --limit 3 --timeout 240
       - name: Enforce benchmark gate
         run: |
-          python scripts/benchmark-gate.py --max-failure 0.50 --max-timeout 0.50 --max-empty 0.40
+          python scripts/benchmark-gate.py \
+            --min-top1 0.30 \
+            --min-top3 0.45 \
+            --max-failure 0.50 \
+            --max-timeout 0.50 \
+            --max-empty 0.40 \
+            --max-first-evidence-p95-ms 10000 \
+            --max-top1-drop 0.03 \
+            --max-timeout-increase 0.05
       - name: Upload benchmark artifacts
         if: always()
         uses: actions/upload-artifact@v4

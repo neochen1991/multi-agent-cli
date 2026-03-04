@@ -12,7 +12,6 @@ import InvestigationWorkbenchPage from '@/pages/InvestigationWorkbench';
 import BenchmarkCenterPage from '@/pages/BenchmarkCenter';
 import GovernanceCenterPage from '@/pages/GovernanceCenter';
 import ToolsCenterPage from '@/pages/ToolsCenter';
-import WarRoomPage from '@/pages/WarRoom';
 
 const { Content, Footer } = Layout;
 
@@ -36,7 +35,7 @@ const App: React.FC = () => {
                   <Route path="/benchmark" element={<BenchmarkCenterPage />} />
                   <Route path="/governance" element={<GovernanceCenterPage />} />
                   <Route path="/tools" element={<ToolsCenterPage />} />
-                  <Route path="/war-room" element={<WarRoomPage />} />
+                  <Route path="/war-room" element={<Navigate to="/workbench" replace />} />
                   <Route path="/settings" element={<SettingsPage />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

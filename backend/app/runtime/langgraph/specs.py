@@ -113,7 +113,7 @@ _DEFAULT_SPECS: Dict[str, _SpecConfig] = {
         role="技术委员会主席",
         phase="judgment",
         system_prompt="你是技术委员会主席，整合所有证据，给出最终根因、修复与风险建议。",
-        tools=(),
+        tools=("rule_suggestion_toolkit", "runbook_case_library"),
         max_tokens=900,
         timeout=60,
     ),
@@ -122,7 +122,7 @@ _DEFAULT_SPECS: Dict[str, _SpecConfig] = {
         role="验证计划专家",
         phase="verification",
         system_prompt="你是验证计划专家，基于裁决结论输出功能/性能/回归/回滚验证计划。",
-        tools=(),
+        tools=("metrics_snapshot_analyzer", "runbook_case_library"),
         max_tokens=420,
         timeout=35,
     ),
@@ -134,7 +134,7 @@ _DEFAULT_SPECS: Dict[str, _SpecConfig] = {
             "你是生产故障问题分析主Agent。你负责拆解问题、向各专家Agent下达命令，并收敛最终结论。"
             "请输出紧凑 JSON。"
         ),
-        tools=("read_file", "search_in_files"),
+        tools=("rule_suggestion_toolkit", "metrics_snapshot_analyzer", "runbook_case_library"),
         max_tokens=600,
         timeout=45,
     ),

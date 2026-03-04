@@ -76,3 +76,48 @@ def test_state_transition_projects_history_from_messages():
     assert next_state["discussion_step_count"] >= 1
     assert len(next_state.get("history_cards") or []) >= 1
     assert next_state["history_cards"][-1].agent_name == "DomainAgent"
+
+
+def test_state_transition_accepts_structured_history_update():
+    service = StateTransitionService(
+        dedupe_new_messages=lambda existing, new: list(new),
+        message_deltas_from_cards=lambda cards: [DummyMsg(c.conclusion, c.agent_name) for c in cards],
+        derive_conversation_state=lambda history_cards, **kwargs: {
+            "claims": [{"agent": c.agent_name, "conclusion": c.conclusion} for c in history_cards],
+            "open_questions": [],
+            "agent_outputs": dict(kwargs.get("existing_agent_outputs") or {}),
+        },
+        messages_to_cards=lambda messages: [],
+        merge_round_and_message_cards=lambda round_cards, message_cards: list(round_cards),
+        structured_snapshot=lambda merged: {
+            "phase_state": {},
+            "routing_state": {},
+            "output_state": {"history_cards": list(merged.get("history_cards") or [])},
+        },
+    )
+
+    state = {
+        "messages": [],
+        "history_cards": [],
+        "discussion_step_count": 0,
+        "agent_outputs": {},
+    }
+    result = {
+        "output_state": {
+            "history_cards": [
+                AgentEvidence(
+                    agent_name="LogAgent",
+                    phase="analysis",
+                    summary="发现线索",
+                    conclusion="连接池耗尽",
+                    evidence_chain=[],
+                    confidence=0.9,
+                    raw_output={},
+                )
+            ]
+        }
+    }
+
+    next_state = service.apply_step_result(state, result)
+    assert len(next_state.get("history_cards") or []) == 1
+    assert next_state["history_cards"][0].agent_name == "LogAgent"

@@ -248,6 +248,62 @@ const SettingsPage: React.FC = () => {
                     </Form.Item>
                   </Space>
                 </Card>
+
+                <Card size="small" title="Prometheus Source（指标平台入口）">
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Form.Item
+                      name={['prometheus_source', 'enabled']}
+                      label="启用 Prometheus 入口（默认关闭）"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item name={['prometheus_source', 'endpoint']} label="Prometheus API Endpoint">
+                      <Input placeholder="https://prometheus.example.com/api/v1/query" />
+                    </Form.Item>
+                    <Form.Item name={['prometheus_source', 'api_token']} label="Prometheus API Token">
+                      <Input.Password placeholder="可选，启用后填写" />
+                    </Form.Item>
+                    <Form.Item name={['prometheus_source', 'timeout_seconds']} label="超时（秒）">
+                      <InputNumber min={2} max={60} style={{ width: 180 }} />
+                    </Form.Item>
+                    <Form.Item
+                      name={['prometheus_source', 'verify_ssl']}
+                      label="校验证书"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                  </Space>
+                </Card>
+
+                <Card size="small" title="Loki Source（日志平台入口）">
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Form.Item
+                      name={['loki_source', 'enabled']}
+                      label="启用 Loki 入口（默认关闭）"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item name={['loki_source', 'endpoint']} label="Loki API Endpoint">
+                      <Input placeholder="https://loki.example.com/loki/api/v1/query_range" />
+                    </Form.Item>
+                    <Form.Item name={['loki_source', 'api_token']} label="Loki API Token">
+                      <Input.Password placeholder="可选，启用后填写" />
+                    </Form.Item>
+                    <Form.Item name={['loki_source', 'timeout_seconds']} label="超时（秒）">
+                      <InputNumber min={2} max={60} style={{ width: 180 }} />
+                    </Form.Item>
+                    <Form.Item
+                      name={['loki_source', 'verify_ssl']}
+                      label="校验证书"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                  </Space>
+                </Card>
               </Space>
             </Card>
 

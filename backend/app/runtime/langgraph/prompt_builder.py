@@ -12,7 +12,9 @@ from app.runtime.langgraph.context_builders import (
     peer_items_for_collaboration_prompt,
     supervisor_recent_messages,
 )
+from app.runtime.langgraph.rca_skill import build_rca_skill_context
 from app.runtime.langgraph.prompts import (
+    PROMPT_TEMPLATE_VERSION,
     build_agent_prompt,
     build_collaboration_prompt,
     build_peer_driven_prompt,
@@ -33,11 +35,17 @@ class PromptBuilder:
         max_history_items: int,
         to_json: Callable[[Any], str],
         derive_conversation_state_with_context: Callable[..., Dict[str, Any]],
+        template_version: str = PROMPT_TEMPLATE_VERSION,
     ) -> None:
         self._max_rounds = int(max_rounds or 1)
         self._max_history_items = int(max_history_items or 2)
         self._to_json = to_json
         self._derive_conversation_state_with_context = derive_conversation_state_with_context
+        self._template_version = str(template_version or PROMPT_TEMPLATE_VERSION)
+
+    @property
+    def template_version(self) -> str:
+        return self._template_version
 
     def build_commander_prompt(
         self,
@@ -45,6 +53,7 @@ class PromptBuilder:
         loop_round: int,
         context: Dict[str, Any],
         history_cards: List[AgentEvidence],
+        work_log_context: Optional[Dict[str, Any]] = None,
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         existing_agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> str:
@@ -59,6 +68,8 @@ class PromptBuilder:
             max_rounds=self._max_rounds,
             context=context,
             history_cards=history_cards,
+            skill_context=build_rca_skill_context(context=context, loop_round=loop_round, max_rounds=self._max_rounds),
+            work_log_context=work_log_context,
             peer_items=peer_items,
             dialogue_items=dialogue_items,
             to_json=self._to_json,
@@ -73,6 +84,7 @@ class PromptBuilder:
         round_history_cards: List[AgentEvidence],
         discussion_step_count: int,
         max_discussion_steps: int,
+        work_log_context: Optional[Dict[str, Any]] = None,
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         existing_agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> str:
@@ -86,6 +98,8 @@ class PromptBuilder:
             max_rounds=self._max_rounds,
             context=context,
             round_history_cards=round_history_cards,
+            skill_context=build_rca_skill_context(context=context, loop_round=loop_round, max_rounds=self._max_rounds),
+            work_log_context=work_log_context,
             recent_messages=supervisor_recent_messages(
                 round_history_cards=round_history_cards,
                 dialogue_items=dialogue_items or [],
@@ -106,6 +120,7 @@ class PromptBuilder:
         context: Dict[str, Any],
         history_cards: List[AgentEvidence],
         assigned_command: Optional[Dict[str, Any]] = None,
+        work_log_context: Optional[Dict[str, Any]] = None,
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         inbox_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
@@ -134,8 +149,10 @@ class PromptBuilder:
             loop_round=loop_round,
             max_rounds=self._max_rounds,
             context=context,
+            skill_context=build_rca_skill_context(context=context, loop_round=loop_round, max_rounds=self._max_rounds),
             peer_items=peer_items,
             assigned_command=assigned_command,
+            work_log_context=work_log_context,
             dialogue_items=dialogue_items,
             inbox_items=inbox_messages,
             to_json=self._to_json,
@@ -149,6 +166,7 @@ class PromptBuilder:
         context: Dict[str, Any],
         history_cards: List[AgentEvidence],
         assigned_command: Optional[Dict[str, Any]] = None,
+        work_log_context: Optional[Dict[str, Any]] = None,
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         inbox_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
@@ -158,6 +176,7 @@ class PromptBuilder:
             max_rounds=self._max_rounds,
             max_history_items=self._max_history_items,
             context=context,
+            skill_context=build_rca_skill_context(context=context, loop_round=loop_round, max_rounds=self._max_rounds),
             history_cards=history_cards,
             history_items=history_items_for_agent_prompt(
                 agent_name=spec.name,
@@ -166,6 +185,7 @@ class PromptBuilder:
                 limit=max(1, self._max_history_items),
             ),
             assigned_command=assigned_command,
+            work_log_context=work_log_context,
             dialogue_items=dialogue_items,
             inbox_items=inbox_messages,
             to_json=self._to_json,
@@ -179,6 +199,7 @@ class PromptBuilder:
         context: Dict[str, Any],
         peer_cards: List[AgentEvidence],
         assigned_command: Optional[Dict[str, Any]] = None,
+        work_log_context: Optional[Dict[str, Any]] = None,
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         inbox_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
@@ -187,6 +208,7 @@ class PromptBuilder:
             loop_round=loop_round,
             max_rounds=self._max_rounds,
             context=context,
+            skill_context=build_rca_skill_context(context=context, loop_round=loop_round, max_rounds=self._max_rounds),
             peer_cards=peer_cards,
             peer_items=peer_items_for_collaboration_prompt(
                 spec_name=spec.name,
@@ -195,6 +217,7 @@ class PromptBuilder:
                 limit=max(2, len(peer_cards) if peer_cards else 2),
             ),
             assigned_command=assigned_command,
+            work_log_context=work_log_context,
             dialogue_items=dialogue_items,
             inbox_items=inbox_messages,
             to_json=self._to_json,

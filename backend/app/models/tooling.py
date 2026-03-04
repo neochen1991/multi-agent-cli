@@ -47,10 +47,28 @@ class CMDBSourceConfig(BaseModel):
     verify_ssl: bool = Field(default=True, description="是否校验证书")
 
 
+class PrometheusSourceConfig(BaseModel):
+    enabled: bool = Field(default=False, description="是否启用 Prometheus 入口")
+    endpoint: str = Field(default="", description="Prometheus HTTP API 地址")
+    api_token: str = Field(default="", description="Prometheus 访问 Token（可选）")
+    timeout_seconds: int = Field(default=8, ge=2, le=60, description="请求超时时间")
+    verify_ssl: bool = Field(default=True, description="是否校验证书")
+
+
+class LokiSourceConfig(BaseModel):
+    enabled: bool = Field(default=False, description="是否启用 Loki 入口")
+    endpoint: str = Field(default="", description="Loki HTTP API 地址")
+    api_token: str = Field(default="", description="Loki 访问 Token（可选）")
+    timeout_seconds: int = Field(default=8, ge=2, le=60, description="请求超时时间")
+    verify_ssl: bool = Field(default=True, description="是否校验证书")
+
+
 class AgentToolingConfig(BaseModel):
     code_repo: CodeRepoToolConfig = Field(default_factory=CodeRepoToolConfig)
     log_file: LogFileToolConfig = Field(default_factory=LogFileToolConfig)
     domain_excel: DomainExcelToolConfig = Field(default_factory=DomainExcelToolConfig)
     telemetry_source: TelemetrySourceConfig = Field(default_factory=TelemetrySourceConfig)
     cmdb_source: CMDBSourceConfig = Field(default_factory=CMDBSourceConfig)
+    prometheus_source: PrometheusSourceConfig = Field(default_factory=PrometheusSourceConfig)
+    loki_source: LokiSourceConfig = Field(default_factory=LokiSourceConfig)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

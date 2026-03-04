@@ -62,7 +62,9 @@
       "Bash(claude mcp list)",
       "Bash(cd /tmp && npx playwright install chromium 2>&1 | tail -3)",
       "Bash(cd /tmp && node zhihu_article.mjs 2>&1)",
-      "WebFetch(domain:www.alibabacloud.com)"
+      "WebFetch(domain:www.alibabacloud.com)",
+      "WebFetch(domain:www.dynatrace.com)",
+      "WebFetch(domain:www.instana.com)"
     ]
   }
 }

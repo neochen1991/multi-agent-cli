@@ -8,6 +8,7 @@ from app.runtime.langgraph.state import AgentSpec
 from app.runtime.messages import AgentEvidence
 
 ToJsonFn = Callable[[Any], str]
+PROMPT_TEMPLATE_VERSION = "lg-rca-prompt-v2.1.0"
 
 
 def coordinator_command_schema() -> Dict[str, Any]:
@@ -102,6 +103,8 @@ def build_problem_analysis_commander_prompt(
     max_rounds: int,
     context: Dict[str, Any],
     history_cards: Optional[List[AgentEvidence]] = None,
+    skill_context: Optional[Dict[str, Any]] = None,
+    work_log_context: Optional[Dict[str, Any]] = None,
     peer_items: Optional[List[Dict[str, Any]]] = None,
     dialogue_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
@@ -121,15 +124,23 @@ def build_problem_analysis_commander_prompt(
     dialogue_block = ""
     if dialogue_items:
         dialogue_block = f"\n最近对话消息:\n```json\n{to_json(dialogue_items[-8:])}\n```\n"
+    work_log_block = ""
+    if work_log_context:
+        work_log_block = f"\n工作日志上下文:\n```json\n{to_json(work_log_context)}\n```\n"
+    skill_block = ""
+    if skill_context:
+        skill_block = f"\nRCA 技能模板与场景参数:\n```json\n{to_json(skill_context)}\n```\n"
     return (
         f"你是问题分析主Agent。当前第 {loop_round}/{max_rounds} 轮。\n"
         "请先给出一段简短会议发言(chat_message)，然后给出对各专家Agent的命令清单(commands)。\n"
         "同时你需要决定下一步调度：next_mode/next_agent；如果你判断证据充分可以停止，设置 should_stop=true 并给出 stop_reason。\n"
-        "必须覆盖 LogAgent、DomainAgent、CodeAgent、MetricsAgent、ChangeAgent、RunbookAgent、RuleSuggestionAgent；"
+        "请优先覆盖故障上下文中的 available_analysis_agents；"
         "若已存在历史结论，可补充 CriticAgent/RebuttalAgent/JudgeAgent/VerificationAgent 命令。\n"
         "命令要具体到分析重点，不要泛泛而谈。\n\n"
         f"故障上下文:\n```json\n{to_json(context)}\n```\n\n"
         f"{dialogue_block}"
+        f"{skill_block}"
+        f"{work_log_block}"
         f"已有观点卡片:\n```json\n{to_json(peer_items)}\n```\n\n"
         f"仅输出 JSON，格式:\n```json\n{to_json(schema)}\n```"
     )
@@ -141,6 +152,8 @@ def build_problem_analysis_supervisor_prompt(
     max_rounds: int,
     context: Dict[str, Any],
     round_history_cards: Optional[List[AgentEvidence]] = None,
+    skill_context: Optional[Dict[str, Any]] = None,
+    work_log_context: Optional[Dict[str, Any]] = None,
     recent_messages: Optional[List[Dict[str, Any]]] = None,
     open_questions: List[str],
     discussion_step_count: int,
@@ -162,6 +175,12 @@ def build_problem_analysis_supervisor_prompt(
     dialogue_block = ""
     if dialogue_items:
         dialogue_block = f"\n最近对话消息:\n```json\n{to_json(dialogue_items[-10:])}\n```\n"
+    work_log_block = ""
+    if work_log_context:
+        work_log_block = f"\n工作日志上下文:\n```json\n{to_json(work_log_context)}\n```\n"
+    skill_block = ""
+    if skill_context:
+        skill_block = f"\nRCA 技能模板与场景参数:\n```json\n{to_json(skill_context)}\n```\n"
     return (
         f"你是问题分析主Agent，正在主持故障分析讨论。当前第 {loop_round}/{max_rounds} 轮。\n"
         "请像会议主持人一样决定下一位发言者或停止讨论。你必须输出 JSON。\n"
@@ -173,6 +192,8 @@ def build_problem_analysis_supervisor_prompt(
         f"讨论步数预算: {discussion_step_count}/{max_discussion_steps}\n"
         f"故障上下文:\n```json\n{to_json(context)}\n```\n\n"
         f"{dialogue_block}"
+        f"{skill_block}"
+        f"{work_log_block}"
         f"本轮最近发言:\n```json\n{to_json(recent_messages)}\n```\n\n"
         f"未决问题:\n```json\n{to_json(open_questions[:8])}\n```\n\n"
         f"输出 JSON 格式:\n```json\n{to_json(schema)}\n```"
@@ -186,9 +207,11 @@ def build_agent_prompt(
     max_rounds: int,
     max_history_items: int,
     context: Dict[str, Any],
+    skill_context: Optional[Dict[str, Any]] = None,
     history_cards: Optional[List[AgentEvidence]] = None,
     history_items: Optional[List[Dict[str, Any]]] = None,
     assigned_command: Optional[Dict[str, Any]],
+    work_log_context: Optional[Dict[str, Any]] = None,
     dialogue_items: Optional[List[Dict[str, Any]]] = None,
     inbox_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
@@ -229,6 +252,12 @@ def build_agent_prompt(
     inbox_block = ""
     if inbox_items:
         inbox_block = f"你收到的消息（命令/反馈/证据）：\n```json\n{to_json(inbox_items[-8:])}\n```\n\n"
+    work_log_block = ""
+    if work_log_context:
+        work_log_block = f"工作日志上下文：\n```json\n{to_json(work_log_context)}\n```\n\n"
+    skill_block = ""
+    if skill_context:
+        skill_block = f"RCA 技能模板与场景参数：\n```json\n{to_json(skill_context)}\n```\n\n"
     return (
         f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段={spec.phase}。\n"
         "只需要基于核心观点与结论推理，不要复述全部历史，结论请简短。\n"
@@ -237,6 +266,8 @@ def build_agent_prompt(
         f"{command_block}"
         f"{dialogue_block}"
         f"{inbox_block}"
+        f"{skill_block}"
+        f"{work_log_block}"
         f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
         f"最近结论卡片：\n```json\n{to_json(history_items)}\n```\n\n"
         f"请仅输出 JSON，格式示例：\n```json\n{to_json(output_schema)}\n```"
@@ -249,9 +280,11 @@ def build_collaboration_prompt(
     loop_round: int,
     max_rounds: int,
     context: Dict[str, Any],
+    skill_context: Optional[Dict[str, Any]] = None,
     peer_cards: Optional[List[AgentEvidence]] = None,
     peer_items: Optional[List[Dict[str, Any]]] = None,
     assigned_command: Optional[Dict[str, Any]],
+    work_log_context: Optional[Dict[str, Any]] = None,
     dialogue_items: Optional[List[Dict[str, Any]]] = None,
     inbox_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
@@ -279,6 +312,12 @@ def build_collaboration_prompt(
     inbox_block = ""
     if inbox_items:
         inbox_block = f"你收到的消息（命令/反馈/证据）：\n```json\n{to_json(inbox_items[-8:])}\n```\n\n"
+    work_log_block = ""
+    if work_log_context:
+        work_log_block = f"工作日志上下文：\n```json\n{to_json(work_log_context)}\n```\n\n"
+    skill_block = ""
+    if skill_context:
+        skill_block = f"RCA 技能模板与场景参数：\n```json\n{to_json(skill_context)}\n```\n\n"
     return (
         f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段=analysis。\n"
         "现在进入协同复核阶段：你必须基于其他 Agent 的结论进行交叉校验并修正自己的判断。\n"
@@ -290,6 +329,8 @@ def build_collaboration_prompt(
         f"{command_block}"
         f"{dialogue_block}"
         f"{inbox_block}"
+        f"{skill_block}"
+        f"{work_log_block}"
         f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
         f"同伴结论：\n```json\n{to_json(peer_items)}\n```\n\n"
         f"输出格式：\n```json\n{to_json(_normal_output_schema())}\n```"
@@ -302,8 +343,10 @@ def build_peer_driven_prompt(
     loop_round: int,
     max_rounds: int,
     context: Dict[str, Any],
+    skill_context: Optional[Dict[str, Any]] = None,
     peer_items: List[Dict[str, Any]],
     assigned_command: Optional[Dict[str, Any]],
+    work_log_context: Optional[Dict[str, Any]] = None,
     dialogue_items: Optional[List[Dict[str, Any]]] = None,
     inbox_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
@@ -314,6 +357,12 @@ def build_peer_driven_prompt(
     inbox_block = ""
     if inbox_items:
         inbox_block = f"你收到的消息（命令/反馈/证据）：\n```json\n{to_json(inbox_items[-10:])}\n```\n\n"
+    work_log_block = ""
+    if work_log_context:
+        work_log_block = f"工作日志上下文：\n```json\n{to_json(work_log_context)}\n```\n\n"
+    skill_block = ""
+    if skill_context:
+        skill_block = f"RCA 技能模板与场景参数：\n```json\n{to_json(skill_context)}\n```\n\n"
     if spec.name == "JudgeAgent":
         command_block = ""
         if assigned_command:
@@ -329,6 +378,8 @@ def build_peer_driven_prompt(
             f"{command_block}"
             f"{dialogue_block}"
             f"{inbox_block}"
+            f"{skill_block}"
+            f"{work_log_block}"
             f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
             f"同伴结论：\n```json\n{to_json(peer_items)}\n```\n\n"
             f"输出格式：\n```json\n{to_json(judge_output_schema())}\n```"
@@ -348,6 +399,8 @@ def build_peer_driven_prompt(
             f"{command_block}"
             f"{dialogue_block}"
             f"{inbox_block}"
+            f"{skill_block}"
+            f"{work_log_block}"
             f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
             f"同伴结论：\n```json\n{to_json(peer_items)}\n```\n\n"
             f"输出格式：\n```json\n{to_json(verification_output_schema())}\n```"
@@ -370,6 +423,8 @@ def build_peer_driven_prompt(
         f"{command_block}"
         f"{dialogue_block}"
         f"{inbox_block}"
+        f"{skill_block}"
+        f"{work_log_block}"
         f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
         f"同伴结论：\n```json\n{to_json(peer_items)}\n```\n\n"
         f"输出格式：\n```json\n{to_json(_normal_output_schema())}\n```"

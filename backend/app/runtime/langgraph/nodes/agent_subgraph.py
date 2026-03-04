@@ -65,7 +65,7 @@ def create_agent_subgraph_node(
         agent_name = agent_spec.name
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
-        history_cards = list(state.get("history_cards") or [])
+        history_cards = orchestrator._history_cards_for_state(state, limit=20)
         dialogue_items = orchestrator._dialogue_items_from_messages(
             list(state.get("messages") or []),
             limit=6,

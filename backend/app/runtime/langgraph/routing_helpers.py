@@ -171,6 +171,7 @@ def fallback_supervisor_route(
     state: Dict[str, Any],
     round_cards: List[AgentEvidence],
     debate_enable_critique: bool,
+    require_verification: bool = True,
     consensus_threshold: float,
     max_discussion_steps_default: int,
     parallel_analysis_agents: Sequence[str],
@@ -190,6 +191,10 @@ def fallback_supervisor_route(
     judge_card = recent_judge_card(round_cards)
     judge_output = _agent_output_from_state(state, "JudgeAgent")
     judge_conf = _output_confidence(judge_output, default=float(judge_card.confidence or 0.0) if judge_card else 0.0)
+    judge_count = 0
+    for card in round_cards:
+        if str(card.agent_name or "").strip() == "JudgeAgent":
+            judge_count += 1
 
     if not all(name in seen_set for name in parallel_analysis_agents):
         return {
@@ -223,7 +228,7 @@ def fallback_supervisor_route(
             "stop_reason": "",
         }
 
-    verification_available = True
+    verification_available = bool(require_verification)
     verification_done = "VerificationAgent" in seen_set
 
     if judge_conf >= consensus_threshold and verification_available and not verification_done:
@@ -243,6 +248,14 @@ def fallback_supervisor_route(
         }
 
     if discussion_step_count >= max_steps:
+        if judge_card is not None or judge_output:
+            if judge_conf >= max(0.55, consensus_threshold * 0.8) or judge_count >= 2:
+                return {
+                    "next_step": "",
+                    "reason": "达到讨论步数预算且已有可用裁决，结束本轮",
+                    "should_stop": True,
+                    "stop_reason": "讨论预算耗尽，采用当前裁决收敛",
+                }
         return {
             "next_step": step_for_agent("JudgeAgent"),
             "reason": "达到讨论步数预算，要求 JudgeAgent 最终裁决",
@@ -250,7 +263,7 @@ def fallback_supervisor_route(
             "stop_reason": "",
         }
 
-    if (judge_card is not None or judge_output) and not verification_done:
+    if verification_available and (judge_card is not None or judge_output) and not verification_done:
         return {
             "next_step": step_for_agent("VerificationAgent"),
             "reason": "裁决后补充验证计划",

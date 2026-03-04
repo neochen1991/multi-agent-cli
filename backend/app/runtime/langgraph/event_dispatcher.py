@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from app.core.event_schema import enrich_event
+from app.runtime.langgraph.output_truncation import output_reference_store
 from app.runtime.session_store import runtime_session_store
 from app.runtime.trace_lineage import lineage_recorder
 
@@ -87,6 +89,7 @@ class EventDispatcher:
             kind = "agent"
         elif event_type.startswith("tool_") or "tool" in event_type:
             kind = "tool"
+        tool_audit = self._build_tool_audit(payload) if kind == "tool" else {}
         await lineage_recorder.append(
             session_id=session_id,
             trace_id=str(payload.get("trace_id") or self._trace_id or ""),
@@ -102,8 +105,55 @@ class EventDispatcher:
                 "event_id": payload.get("event_id"),
                 "event_sequence": payload.get("event_sequence"),
                 "message": str(payload.get("message") or "")[:240],
+                **tool_audit,
             },
         )
+
+    def _build_tool_audit(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        tool_name = str(payload.get("tool_name") or payload.get("name") or "").strip()
+        status = str(payload.get("status") or payload.get("io_status") or "").strip() or "unknown"
+        duration_ms = float(payload.get("latency_ms") or payload.get("duration_ms") or 0.0)
+        error_text = str(payload.get("error") or payload.get("error_message") or "").strip()
+        request = {
+            "command_gate": payload.get("command_gate") if isinstance(payload.get("command_gate"), dict) else {},
+            "io_action": payload.get("io_action"),
+            "phase": payload.get("phase"),
+        }
+        response = {}
+        if isinstance(payload.get("data_preview"), dict):
+            response["data_preview"] = payload.get("data_preview")
+        if isinstance(payload.get("data_detail"), dict):
+            response["data_detail"] = payload.get("data_detail")
+        if isinstance(payload.get("io_detail"), dict):
+            response["io_detail"] = payload.get("io_detail")
+        output_ref = ""
+        if response:
+            try:
+                serialized = json.dumps(response, ensure_ascii=False)
+            except Exception:
+                serialized = ""
+            if len(serialized) > 1800:
+                output_ref = output_reference_store.save(
+                    content=serialized,
+                    session_id=str(payload.get("session_id") or self._session_id or ""),
+                    category="tool_audit",
+                    metadata={
+                        "tool_name": tool_name,
+                        "event_type": str(payload.get("type") or ""),
+                    },
+                )
+                response = {"truncated": True, "output_ref": output_ref}
+        return {
+            "tool_name": tool_name,
+            "request": request,
+            "response": response,
+            "status": status,
+            "duration_ms": duration_ms,
+            "error": error_text,
+            "ref_id": output_ref,
+            "execution_path": str(payload.get("execution_path") or ""),
+            "permission": payload.get("permission_decision") or {},
+        }
 
 
 __all__ = ["EventDispatcher"]

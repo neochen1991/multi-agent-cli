@@ -10,6 +10,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha1
+import json
 import os
 from pathlib import Path
 import re
@@ -22,7 +23,12 @@ import structlog
 
 from app.config import settings
 from app.models.tooling import AgentToolingConfig
-from app.runtime.connectors import CMDBConnector, TelemetryConnector
+from app.runtime.connectors import (
+    CMDBConnector,
+    LokiConnector,
+    PrometheusConnector,
+    TelemetryConnector,
+)
 from app.services.tooling_service import tooling_service
 from app.tools.case_library import CaseLibraryTool
 
@@ -63,6 +69,8 @@ class ToolContextResult:
     data: Dict[str, Any]
     command_gate: Dict[str, Any] = field(default_factory=dict)
     audit_log: List[Dict[str, Any]] = field(default_factory=list)
+    execution_path: str = ""
+    permission_decision: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -74,6 +82,8 @@ class ToolContextResult:
             "data": self.data,
             "command_gate": self.command_gate,
             "audit_log": self.audit_log,
+            "execution_path": self.execution_path,
+            "permission_decision": self.permission_decision,
         }
 
 
@@ -82,6 +92,9 @@ class AgentToolContextService:
         self._case_library = CaseLibraryTool()
         self._telemetry_connector = TelemetryConnector()
         self._cmdb_connector = CMDBConnector()
+        self._prometheus_connector = PrometheusConnector()
+        self._loki_connector = LokiConnector()
+        self._audit_seq = 0
 
     async def build_context(
         self,
@@ -96,6 +109,15 @@ class AgentToolContextService:
         if agent_name == "CodeAgent":
             result = await self._build_code_context(
                 cfg, compact_context, incident_context, assigned_command, command_gate
+            )
+        elif agent_name == "ProblemAnalysisAgent":
+            # 主Agent默认使用“规则建议工具包”聚合指标与案例库证据
+            result = await self._build_rule_suggestion_context(
+                cfg,
+                compact_context,
+                incident_context,
+                assigned_command,
+                command_gate,
             )
         elif agent_name == "ChangeAgent":
             result = await self._build_change_context(
@@ -113,6 +135,42 @@ class AgentToolContextService:
         elif agent_name == "RunbookAgent":
             result = await self._build_runbook_context(
                 compact_context, incident_context, assigned_command, command_gate
+            )
+        elif agent_name == "CriticAgent":
+            # 质疑Agent基于客观指标做反证与漏洞审查
+            result = await self._build_metrics_context(
+                cfg,
+                compact_context,
+                incident_context,
+                assigned_command,
+                command_gate,
+            )
+        elif agent_name == "RebuttalAgent":
+            # 反驳Agent优先补充日志侧证据
+            result = await self._build_log_context(
+                cfg,
+                compact_context,
+                incident_context,
+                assigned_command,
+                command_gate,
+            )
+        elif agent_name == "JudgeAgent":
+            # 裁决Agent基于规则建议工具包汇总可验证证据
+            result = await self._build_rule_suggestion_context(
+                cfg,
+                compact_context,
+                incident_context,
+                assigned_command,
+                command_gate,
+            )
+        elif agent_name == "VerificationAgent":
+            # 验证Agent基于指标快照生成验证与回归观察点
+            result = await self._build_metrics_context(
+                cfg,
+                compact_context,
+                incident_context,
+                assigned_command,
+                command_gate,
             )
         elif agent_name == "RuleSuggestionAgent":
             result = await self._build_rule_suggestion_context(
@@ -141,6 +199,18 @@ class AgentToolContextService:
                     )
                 ],
             )
+        result.permission_decision = {
+            "allow_tool": bool(command_gate.get("allow_tool")),
+            "reason": str(command_gate.get("reason") or ""),
+            "decision_source": str(command_gate.get("decision_source") or ""),
+        }
+        if not result.execution_path:
+            if result.name in {"telemetry_connector", "cmdb_connector"}:
+                result.execution_path = "remote"
+            elif result.name in {"git_repo_search", "git_change_window", "local_log_reader", "domain_excel_lookup"}:
+                result.execution_path = "local"
+            else:
+                result.execution_path = "none"
         return result.to_dict()
 
     async def _build_code_context(
@@ -587,6 +657,8 @@ class AgentToolContextService:
                 audit_log=audit_log,
             )
         remote_telemetry_payload: Dict[str, Any] = {}
+        remote_prometheus_payload: Dict[str, Any] = {}
+        remote_loki_payload: Dict[str, Any] = {}
         if bool(cfg.telemetry_source.enabled):
             telemetry_result = await self._telemetry_connector.fetch(
                 cfg.telemetry_source,
@@ -610,9 +682,60 @@ class AgentToolContextService:
             )
             if telemetry_status == "ok" and isinstance(telemetry_result.get("data"), dict):
                 remote_telemetry_payload = dict(telemetry_result.get("data") or {})
+        if bool(getattr(cfg, "prometheus_source", None) and cfg.prometheus_source.enabled):
+            prometheus_result = await self._prometheus_connector.fetch(
+                cfg.prometheus_source,
+                {
+                    "service_name": str(incident_context.get("service_name") or ""),
+                    "query": str(assigned_command.get("focus") if isinstance(assigned_command, dict) else ""),
+                },
+            )
+            prometheus_status = str(prometheus_result.get("status") or "unknown")
+            audit_log.append(
+                self._audit(
+                    tool_name="prometheus_connector",
+                    action="remote_fetch",
+                    status=prometheus_status,
+                    detail={
+                        "enabled": bool(cfg.prometheus_source.enabled),
+                        "endpoint": str(cfg.prometheus_source.endpoint or "")[:180],
+                        "message": str(prometheus_result.get("message") or "")[:180],
+                    },
+                )
+            )
+            if prometheus_status == "ok" and isinstance(prometheus_result.get("data"), dict):
+                remote_prometheus_payload = dict(prometheus_result.get("data") or {})
+        if bool(getattr(cfg, "loki_source", None) and cfg.loki_source.enabled):
+            loki_result = await self._loki_connector.fetch(
+                cfg.loki_source,
+                {
+                    "service_name": str(incident_context.get("service_name") or ""),
+                    "trace_id": str(incident_context.get("trace_id") or ""),
+                    "query": str(assigned_command.get("focus") if isinstance(assigned_command, dict) else ""),
+                },
+            )
+            loki_status = str(loki_result.get("status") or "unknown")
+            audit_log.append(
+                self._audit(
+                    tool_name="loki_connector",
+                    action="remote_fetch",
+                    status=loki_status,
+                    detail={
+                        "enabled": bool(cfg.loki_source.enabled),
+                        "endpoint": str(cfg.loki_source.endpoint or "")[:180],
+                        "message": str(loki_result.get("message") or "")[:180],
+                    },
+                )
+            )
+            if loki_status == "ok" and isinstance(loki_result.get("data"), dict):
+                remote_loki_payload = dict(loki_result.get("data") or {})
         metrics_context = dict(incident_context or {})
         if remote_telemetry_payload:
             metrics_context["remote_telemetry_payload"] = remote_telemetry_payload
+        if remote_prometheus_payload:
+            metrics_context["remote_prometheus_payload"] = remote_prometheus_payload
+        if remote_loki_payload:
+            metrics_context["remote_loki_payload"] = remote_loki_payload
         signals = self._collect_metrics_signals(compact_context, metrics_context)
         audit_log.append(
             self._audit(
@@ -636,7 +759,15 @@ class AgentToolContextService:
                     "remote_telemetry": {
                         "enabled": bool(cfg.telemetry_source.enabled),
                         "status": "ok" if remote_telemetry_payload else "disabled_or_unavailable",
-                    }
+                    },
+                    "remote_prometheus": {
+                        "enabled": bool(getattr(cfg, "prometheus_source", None) and cfg.prometheus_source.enabled),
+                        "status": "ok" if remote_prometheus_payload else "disabled_or_unavailable",
+                    },
+                    "remote_loki": {
+                        "enabled": bool(getattr(cfg, "loki_source", None) and cfg.loki_source.enabled),
+                        "status": "ok" if remote_loki_payload else "disabled_or_unavailable",
+                    },
                 },
                 command_gate=command_gate,
                 audit_log=audit_log,
@@ -653,6 +784,16 @@ class AgentToolContextService:
                     "enabled": bool(cfg.telemetry_source.enabled),
                     "status": "ok" if remote_telemetry_payload else "disabled_or_unavailable",
                     "payload": remote_telemetry_payload,
+                },
+                "remote_prometheus": {
+                    "enabled": bool(getattr(cfg, "prometheus_source", None) and cfg.prometheus_source.enabled),
+                    "status": "ok" if remote_prometheus_payload else "disabled_or_unavailable",
+                    "payload": remote_prometheus_payload,
+                },
+                "remote_loki": {
+                    "enabled": bool(getattr(cfg, "loki_source", None) and cfg.loki_source.enabled),
+                    "status": "ok" if remote_loki_payload else "disabled_or_unavailable",
+                    "payload": remote_loki_payload,
                 },
             },
             command_gate=command_gate,
@@ -945,6 +1086,21 @@ class AgentToolContextService:
                 )
             )
             return ""
+        if not self._is_allowed_git_host(url):
+            safe_url = self._mask_url_secret(url)
+            audit_log.append(
+                self._audit(
+                    tool_name="git_repo_search",
+                    action="permission_check",
+                    status="denied",
+                    detail={
+                        "reason": "repo host not in allowlist",
+                        "repo_url": safe_url,
+                        "allowlist": list(settings.TOOL_GIT_HOST_ALLOWLIST or []),
+                    },
+                )
+            )
+            return ""
 
         cache_root = Path(settings.LOCAL_STORE_DIR) / "tool_cache" / "repos"
         cache_root.mkdir(parents=True, exist_ok=True)
@@ -1206,6 +1362,19 @@ class AgentToolContextService:
         env.setdefault("GIT_ASKPASS", "echo")
         return env
 
+    def _is_allowed_git_host(self, repo_url: str) -> bool:
+        raw = str(repo_url or "").strip()
+        if not raw:
+            return False
+        parts = urlsplit(raw)
+        host = str(parts.hostname or "").strip().lower()
+        if not host:
+            return False
+        allowlist = [str(item or "").strip().lower() for item in (settings.TOOL_GIT_HOST_ALLOWLIST or []) if str(item or "").strip()]
+        if not allowlist:
+            return True
+        return host in allowlist
+
     def _inject_token(self, repo_url: str, token: str) -> str:
         raw = str(repo_url or "").strip()
         tk = str(token or "").strip()
@@ -1305,6 +1474,8 @@ class AgentToolContextService:
             str(incident_context.get("log_content") or ""),
             str(incident_context.get("description") or ""),
             str(incident_context.get("remote_telemetry_payload") or ""),
+            str(incident_context.get("remote_prometheus_payload") or ""),
+            str(incident_context.get("remote_loki_payload") or ""),
         ]
         metric_patterns = [
             ("cpu", r"cpu[^0-9]*([0-9]+(?:\.[0-9]+)?%?)", "CPU"),
@@ -1441,13 +1612,73 @@ class AgentToolContextService:
         status: str,
         detail: Dict[str, Any],
     ) -> Dict[str, Any]:
+        detail_payload = detail if isinstance(detail, dict) else {"value": str(detail or "")}
+        call_id = self._next_audit_call_id(tool_name=tool_name, action=action)
         return {
             "timestamp": datetime.utcnow().isoformat(),
+            "call_id": call_id,
             "tool_name": tool_name,
             "action": action,
             "status": status,
-            "detail": detail,
+            "request_summary": self._request_summary(detail_payload),
+            "response_summary": self._response_summary(detail_payload),
+            "detail_preview": self._detail_preview(detail_payload),
+            "duration_ms": self._coerce_duration_ms(detail_payload),
+            "detail": detail_payload,
         }
+
+    def _next_audit_call_id(self, *, tool_name: str, action: str) -> str:
+        self._audit_seq += 1
+        tool = re.sub(r"[^a-z0-9]+", "_", str(tool_name or "tool").lower()).strip("_") or "tool"
+        act = re.sub(r"[^a-z0-9]+", "_", str(action or "action").lower()).strip("_") or "action"
+        return f"{tool}_{act}_{self._audit_seq:06d}"
+
+    def _detail_preview(self, detail: Dict[str, Any], *, max_chars: int = 420) -> str:
+        try:
+            text = json.dumps(detail, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            text = str(detail)
+        text = str(text or "").strip()
+        if len(text) <= max_chars:
+            return text
+        return f"{text[:max_chars]}..."
+
+    def _request_summary(self, detail: Dict[str, Any]) -> str:
+        picks: List[str] = []
+        for key in ("path", "repo_url", "endpoint", "sheet_name", "keywords", "query", "service_name"):
+            value = detail.get(key)
+            if value in (None, "", [], {}):
+                continue
+            picks.append(f"{key}={str(value)[:100]}")
+        return "；".join(picks)[:260]
+
+    def _response_summary(self, detail: Dict[str, Any]) -> str:
+        picks: List[str] = []
+        for key in (
+            "status",
+            "hits_count",
+            "lines_count",
+            "matches_count",
+            "match_count",
+            "result_count",
+            "error",
+        ):
+            value = detail.get(key)
+            if value in (None, "", [], {}):
+                continue
+            picks.append(f"{key}={str(value)[:100]}")
+        return "；".join(picks)[:260]
+
+    def _coerce_duration_ms(self, detail: Dict[str, Any]) -> Optional[float]:
+        for key in ("duration_ms", "latency_ms", "elapsed_ms"):
+            value = detail.get(key)
+            if value is None:
+                continue
+            try:
+                return round(float(value), 2)
+            except Exception:
+                continue
+        return None
 
     def _sanitize_command_part(self, item: str) -> str:
         text = str(item or "")

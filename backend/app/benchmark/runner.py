@@ -63,9 +63,12 @@ class BenchmarkRunner:
         status = "ok"
         predicted_root_cause = ""
         confidence = 0.0
+        predicted_candidates: List[str] = []
+        evidence_source_count = 0
         session_id = ""
         incident_id = ""
         error = ""
+        first_evidence_latency_ms = 0.0
         try:
             incident = await incident_service.create_incident(
                 IncidentCreate(
@@ -93,8 +96,35 @@ class BenchmarkRunner:
                 debate_service.execute_debate(session.id),
                 timeout=max(30, int(timeout_seconds or 240)),
             )
+            finished_session = await debate_service.get_session(session_id)
+            if finished_session and isinstance(finished_session.context, dict):
+                first_evidence_at = str(finished_session.context.get("first_evidence_at") or "").strip()
+                if first_evidence_at:
+                    try:
+                        start_ts = finished_session.created_at
+                        end_ts = datetime.fromisoformat(first_evidence_at.replace("Z", "+00:00"))
+                        if start_ts.tzinfo is None and end_ts.tzinfo is not None:
+                            start_ts = start_ts.replace(tzinfo=end_ts.tzinfo)
+                        first_evidence_latency_ms = max(
+                            0.0,
+                            round((end_ts - start_ts).total_seconds() * 1000, 2),
+                        )
+                    except Exception:
+                        first_evidence_latency_ms = 0.0
             predicted_root_cause = str(result.root_cause or "")
             confidence = float(result.confidence or 0.0)
+            predicted_candidates = [
+                str(item.summary or "").strip()
+                for item in list(result.root_cause_candidates or [])[:3]
+                if str(item.summary or "").strip()
+            ]
+            evidence_source_count = len(
+                {
+                    str(item.source or "").strip()
+                    for item in list(result.evidence_chain or [])
+                    if str(item.source or "").strip()
+                }
+            )
             await incident_service.update_incident(
                 incident_id,
                 IncidentUpdate(
@@ -136,18 +166,23 @@ class BenchmarkRunner:
         score = evaluate_case(
             expected_root_cause=fixture.expected_root_cause,
             predicted_root_cause=predicted_root_cause,
+            predicted_candidates=predicted_candidates,
             confidence=confidence,
             duration_ms=duration_ms,
             status=status,
         )
         return {
             "fixture_id": fixture.fixture_id,
+            "scenario": fixture.scenario,
             "incident_id": incident_id,
             "session_id": session_id,
             "expected_root_cause": fixture.expected_root_cause,
             "expected_domain": fixture.expected_domain,
             "expected_aggregate": fixture.expected_aggregate,
             "predicted_root_cause": predicted_root_cause,
+            "predicted_candidates": predicted_candidates,
+            "evidence_source_count": evidence_source_count,
+            "first_evidence_latency_ms": first_evidence_latency_ms,
             "status": status,
             "error": error,
             **score,

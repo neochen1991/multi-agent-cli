@@ -1,16 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
-  Avatar,
   Button,
   Card,
   Col,
   Divider,
-  Empty,
   Input,
   Row,
   Select,
   Space,
+  Spin,
   Statistic,
   Steps,
   Tag,
@@ -31,9 +30,15 @@ import { formatBeijingDateTime, formatBeijingTime } from '@/utils/dateTime';
 import AssetMappingPanel from '@/components/incident/AssetMappingPanel';
 import DebateProcessPanel from '@/components/incident/DebateProcessPanel';
 import DebateResultPanel from '@/components/incident/DebateResultPanel';
+import DialogueFilterBar from '@/components/incident/DialogueFilterBar';
+import DialogueStream, { type DialogueViewMessage } from '@/components/incident/DialogueStream';
+import AgentNetworkGraph, {
+  type AgentNetworkEdge,
+  type AgentNetworkNode,
+} from '@/components/incident/AgentNetworkGraph';
 
 const { TextArea } = Input;
-const { Paragraph, Text } = Typography;
+const { Text } = Typography;
 
 type EventRecord = {
   id: string;
@@ -43,7 +48,7 @@ type EventRecord = {
   data?: unknown;
 };
 
-type DialogueMessage = {
+type DialogueMessage = DialogueViewMessage & {
   id: string;
   timeText: string;
   eventTsMs?: number;
@@ -86,12 +91,16 @@ const IncidentPage: React.FC = () => {
   const [eventSearchText, setEventSearchText] = useState<string>('');
   const [running, setRunning] = useState(false);
   const [debateMaxRounds, setDebateMaxRounds] = useState<number>(1);
+  const [executionMode, setExecutionMode] = useState<'standard' | 'quick' | 'background' | 'async'>('standard');
+  const [bootstrapping, setBootstrapping] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const pollingRef = useRef(false);
   const runningRef = useRef(false);
   const assetMappingReadyRef = useRef(false);
+  const autoStartConsumedRef = useRef<Set<string>>(new Set());
   const streamTimersRef = useRef<Record<string, number>>({});
   const seenEventIdsRef = useRef<Set<string>>(new Set());
+  const seenEventDedupeKeysRef = useRef<Set<string>>(new Set());
   const seenEventFingerprintsRef = useRef<Set<string>>(new Set());
 
   const steps = useMemo(
@@ -106,6 +115,7 @@ const IncidentPage: React.FC = () => {
 
   const appendEvent = (kind: string, text: string, data?: unknown) => {
     const dataRecord = asRecord(data);
+    const dedupeKey = String(dataRecord.dedupe_key || '').trim();
     const eventId = String(dataRecord.event_id || '').trim();
     const fingerprint = [
       kind,
@@ -116,6 +126,12 @@ const IncidentPage: React.FC = () => {
       String(dataRecord.timestamp || ''),
       String(text || ''),
     ].join('|');
+    if (dedupeKey) {
+      if (seenEventDedupeKeysRef.current.has(dedupeKey)) {
+        return;
+      }
+      seenEventDedupeKeysRef.current.add(dedupeKey);
+    }
     if (eventId) {
       if (seenEventIdsRef.current.has(eventId)) {
         return;
@@ -132,7 +148,7 @@ const IncidentPage: React.FC = () => {
         ? formatBeijingDateTime(eventTsRaw)
         : formatBeijingDateTime(new Date());
     const record: EventRecord = {
-      id: eventId || `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+      id: dedupeKey || eventId || `${Date.now()}_${Math.random().toString(16).slice(2)}`,
       timeText: displayTime,
       kind,
       text,
@@ -297,10 +313,16 @@ const IncidentPage: React.FC = () => {
       .map((item, index) => {
         const row = asRecord(item);
         const ts = firstTextValue(row, ['timestamp']) || '-';
+        const callId = firstTextValue(row, ['call_id']) || '-';
         const action = firstTextValue(row, ['action']) || '-';
         const status = firstTextValue(row, ['status']) || '-';
+        const requestSummary = firstTextValue(row, ['request_summary']);
+        const responseSummary = firstTextValue(row, ['response_summary']);
+        const duration = firstTextValue(row, ['duration_ms']);
         const detail = toDisplayText(row.detail);
-        return `${index + 1}. [${ts}] action=${action} status=${status}\n${detail}`;
+        return `${index + 1}. [${ts}] call_id=${callId} action=${action} status=${status}${
+          duration ? ` duration_ms=${duration}` : ''
+        }\n${requestSummary ? `request=${requestSummary}\n` : ''}${responseSummary ? `response=${responseSummary}\n` : ''}${detail}`;
       })
       .join('\n');
   };
@@ -431,6 +453,26 @@ const IncidentPage: React.FC = () => {
     return output.trim();
   };
 
+  const extractRegexField = (source: string, fieldName: string): string => {
+    const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const patterns = [
+      new RegExp(`"${escaped}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, 'is'),
+      new RegExp(`'${escaped}'\\s*:\\s*'((?:\\\\.|[^'\\\\])*)'`, 'is'),
+    ];
+    for (const pattern of patterns) {
+      const match = source.match(pattern);
+      if (!match) continue;
+      const raw = String(match[1] || '').trim();
+      if (!raw) continue;
+      return raw
+        .replace(/\\n/g, '\n')
+        .replace(/\\t/g, '\t')
+        .replace(/\\"/g, '"')
+        .replace(/\\'/g, "'");
+    }
+    return '';
+  };
+
   const stripJsonTail = (source: string): string => {
     const firstBrace = source.indexOf('{');
     if (firstBrace < 0) return source.trim();
@@ -454,14 +496,20 @@ const IncidentPage: React.FC = () => {
     const chatFromLooseJson =
       extractLooseJsonStringField(source, 'chat_message') ||
       extractLooseJsonStringField(source, 'message') ||
-      extractLooseJsonStringField(source, 'summary');
+      extractLooseJsonStringField(source, 'summary') ||
+      extractRegexField(source, 'chat_message') ||
+      extractRegexField(source, 'message') ||
+      extractRegexField(source, 'summary');
     if (chatFromLooseJson) return chatFromLooseJson;
     if (source.includes('{') && /"(chat_message|message|summary|conclusion|analysis)"/.test(source)) {
       const stripped = stripJsonTail(source);
       if (stripped) return stripped;
       return '结构化分析结果已生成';
     }
-    return source.trim();
+    return source
+      .replace(/^我的判断是[:：]\s*/i, '')
+      .replace(/^结论[:：]\s*/i, '')
+      .trim();
   };
 
   const normalizeForCompare = (value: string): string =>
@@ -489,6 +537,14 @@ const IncidentPage: React.FC = () => {
       return minLen / maxLen >= 0.85;
     }
     return false;
+  };
+
+  const isLikelyDuplicateStatement = (leftText: string, rightText: string): boolean => {
+    if (isNearDuplicateText(leftText, rightText)) return true;
+    const left = normalizeForCompare(leftText);
+    const right = normalizeForCompare(rightText);
+    if (!left || !right) return false;
+    return left.includes(right) || right.includes(left);
   };
 
   const parseEventTimestampMs = (data: Record<string, unknown>): number | undefined => {
@@ -578,7 +634,7 @@ const IncidentPage: React.FC = () => {
       const speechText = extractChatMessageText(firstTextValue(data, ['message']) || messageText || '（空发言）');
       const conclusionText = extractChatMessageText(firstTextValue(data, ['conclusion']));
       if (conclusionText) {
-        const duplicated = speechText && isNearDuplicateText(conclusionText, speechText);
+        const duplicated = speechText && isLikelyDuplicateStatement(conclusionText, speechText);
         detail = normalizeMarkdownText(
           [`结论：${conclusionText}`, speechText && !duplicated ? `发言：${speechText}` : '']
             .filter(Boolean)
@@ -645,10 +701,26 @@ const IncidentPage: React.FC = () => {
     } else if (kind === 'agent_tool_io') {
       const action = firstTextValue(data, ['io_action']) || '-';
       const ioStatus = firstTextValue(data, ['io_status']) || '-';
+      const ioCallId = firstTextValue(data, ['io_call_id']) || '-';
+      const ioTs = firstTextValue(data, ['io_timestamp']) || '-';
+      const ioDuration = firstTextValue(data, ['io_duration_ms']) || '';
+      const ioRequest = firstTextValue(data, ['io_request_summary']) || '';
+      const ioResponse = firstTextValue(data, ['io_response_summary']) || '';
       const ioDetail = toDisplayText(data.io_detail);
       status = ioStatus === 'error' ? 'error' : 'done';
       summary = `${agentName} 工具I/O：${action}（${ioStatus}）`;
-      detail = normalizeMarkdownText(`I/O 详情：\n${ioDetail}`);
+      detail = normalizeMarkdownText(
+        [
+          `调用ID：${ioCallId}`,
+          `时间：${ioTs}`,
+          ioDuration ? `耗时：${ioDuration} ms` : '',
+          ioRequest ? `请求摘要：${ioRequest}` : '',
+          ioResponse ? `响应摘要：${ioResponse}` : '',
+          `I/O 详情：\n${ioDetail}`,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      );
     } else if (kind === 'agent_tool_context_failed') {
       status = 'error';
       summary = `${agentName} 工具调用失败`;
@@ -815,6 +887,13 @@ const IncidentPage: React.FC = () => {
       case 'session_failed':
         return `会话失败 ${String(data?.error_code || '')} ${error || String(data?.error_message || '')} ${String(data?.retry_hint || '')}`.trim();
       case 'ws_ack':
+        if (String(data?.message || '').toLowerCase().includes('resume')) {
+          const resumeFrom = asRecord(data?.resume_from);
+          const fromPhase = String(resumeFrom.phase || '-');
+          const fromEvent = String(resumeFrom.event_type || '-');
+          const fromRound = String(resumeFrom.round || '0');
+          return `恢复分析确认：从 phase=${fromPhase}, event=${fromEvent}, round=${fromRound} 继续`;
+        }
         return `控制指令确认 ${String(data?.message || '')}`.trim();
       case 'ws_control':
         return `控制指令 ${String(data?.action || '-')}`.trim();
@@ -889,6 +968,10 @@ const IncidentPage: React.FC = () => {
     if (typeof maxRoundsRaw === 'number' && Number.isFinite(maxRoundsRaw)) {
       setDebateMaxRounds(Math.max(1, Math.min(8, Math.trunc(maxRoundsRaw))));
     }
+    const modeRaw = String((detail.context as Record<string, unknown> | undefined)?.execution_mode || '').trim();
+    if (modeRaw === 'standard' || modeRaw === 'quick' || modeRaw === 'background' || modeRaw === 'async') {
+      setExecutionMode(modeRaw);
+    }
 
     const persisted = (detail.context as Record<string, unknown> | undefined)?.event_log;
     if (Array.isArray(persisted)) {
@@ -911,8 +994,9 @@ const IncidentPage: React.FC = () => {
             const ts = typeof row.timestamp === 'string' ? row.timestamp : '';
             const kind = typeof event.type === 'string' ? event.type : 'event';
             const eventId = typeof event.event_id === 'string' ? event.event_id : '';
+            const dedupeKey = typeof event.dedupe_key === 'string' ? event.dedupe_key : '';
             return {
-              id: eventId || `persisted_${idx}_${ts || kind}`,
+              id: dedupeKey || eventId || `persisted_${idx}_${ts || kind}`,
               timeText: ts ? formatBeijingTime(ts) : '--:--:--',
               kind,
               text: formatEventText(kind, event),
@@ -925,6 +1009,8 @@ const IncidentPage: React.FC = () => {
         const row = (item || {}) as Record<string, unknown>;
         const event = (row.event || {}) as Record<string, unknown>;
         const eventId = typeof event.event_id === 'string' ? event.event_id : '';
+        const dedupeKey = typeof event.dedupe_key === 'string' ? event.dedupe_key : '';
+        if (dedupeKey) seenEventDedupeKeysRef.current.add(dedupeKey);
         if (eventId) seenEventIdsRef.current.add(eventId);
         const fingerprint = [
           String(event.type || ''),
@@ -956,8 +1042,12 @@ const IncidentPage: React.FC = () => {
         service_name: incidentForm.service_name,
         environment: incidentForm.environment,
       });
-      const session = await debateApi.createSession(incident.id, { maxRounds: debateMaxRounds });
+      const session = await debateApi.createSession(incident.id, {
+        maxRounds: debateMaxRounds,
+        mode: executionMode,
+      });
       seenEventIdsRef.current.clear();
+      seenEventDedupeKeysRef.current.clear();
       seenEventFingerprintsRef.current.clear();
       setEventRecords([]);
       setStreamedMessageText({});
@@ -983,8 +1073,12 @@ const IncidentPage: React.FC = () => {
     if (!incidentId) return null;
     setLoading(true);
     try {
-      const session = await debateApi.createSession(incidentId, { maxRounds: debateMaxRounds });
+      const session = await debateApi.createSession(incidentId, {
+        maxRounds: debateMaxRounds,
+        mode: executionMode,
+      });
       seenEventIdsRef.current.clear();
+      seenEventDedupeKeysRef.current.clear();
       seenEventFingerprintsRef.current.clear();
       setEventRecords([]);
       setStreamedMessageText({});
@@ -1054,6 +1148,35 @@ const IncidentPage: React.FC = () => {
       pollingRef.current = false;
       setRunning(false);
     }
+  };
+
+  const pollTaskUntilDone = async (taskId: string, sid: string) => {
+    const maxAttempts = 120;
+    for (let i = 0; i < maxAttempts; i += 1) {
+      const task = await debateApi.getTask(taskId).catch(() => null);
+      const status = String(task?.status || 'pending').toLowerCase();
+      appendEvent('task_status', `后台任务状态: ${status}`, { task_id: taskId, status });
+      if (status === 'completed') {
+        await loadSessionArtifacts(sid);
+        advanceStep(3);
+        setRunning(false);
+        return;
+      }
+      if (status === 'failed') {
+        appendEvent('session_failed', `后台任务失败: ${String(task?.error || '')}`, {
+          task_id: taskId,
+          status,
+          error: String(task?.error || ''),
+        });
+        await loadSessionArtifacts(sid).catch(() => undefined);
+        advanceStep(2);
+        setRunning(false);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    appendEvent('result_timeout', '后台任务等待超时，请稍后查看结果');
+    setRunning(false);
   };
 
   const startRealtimeDebate = async (
@@ -1149,11 +1272,11 @@ const IncidentPage: React.FC = () => {
             return;
           }
           if (payload.type === 'ack') {
-            appendEvent('ws_ack', `控制指令已确认: ${payload.message || '-'}`, payload);
+            appendEvent('ws_ack', `控制指令已确认: ${payload.message || '-'}`, payload.data || payload);
             return;
           }
           if (payload.type === 'error') {
-            appendEvent('error', `错误: ${payload.message || 'unknown'}`, payload);
+            appendEvent('error', `错误: ${payload.message || 'unknown'}`, payload.data || payload);
             setRunning(false);
             await loadSessionArtifacts(targetSessionId).catch(() => undefined);
             advanceStep(2);
@@ -1196,6 +1319,26 @@ const IncidentPage: React.FC = () => {
     if (!targetIncidentId || !targetSessionId) return;
     advanceStep(1);
     await loadSessionArtifacts(targetSessionId).catch(() => undefined);
+    if (executionMode === 'async' || executionMode === 'background') {
+      setRunning(true);
+      appendEvent('start', `开始${executionMode === 'async' ? '异步' : '后台'}辩论任务`);
+      try {
+        const task = executionMode === 'async'
+          ? await debateApi.executeAsync(targetSessionId)
+          : await debateApi.executeBackground(targetSessionId);
+        appendEvent('task_submitted', `任务已提交: ${task.task_id}`, {
+          task_id: task.task_id,
+          status: task.status,
+          mode: executionMode,
+        });
+        advanceStep(2);
+        await pollTaskUntilDone(task.task_id, targetSessionId);
+      } catch (e: any) {
+        message.error(e?.response?.data?.detail || e?.message || '后台任务启动失败');
+        setRunning(false);
+      }
+      return;
+    }
     await startRealtimeDebate({ sessionId: targetSessionId, incidentId: targetIncidentId });
   };
 
@@ -1257,13 +1400,27 @@ const IncidentPage: React.FC = () => {
 
   useEffect(() => {
     const iid = routeIncidentId || searchParams.get('incident_id');
+    const querySessionId = String(searchParams.get('session_id') || '').trim();
+    const autoStart = String(searchParams.get('auto_start') || '').trim() === '1';
+    const modeParam = String(searchParams.get('mode') || '').trim().toLowerCase();
+    if (modeParam === 'standard' || modeParam === 'quick' || modeParam === 'background' || modeParam === 'async') {
+      setExecutionMode(modeParam);
+    }
     const preferredView = (searchParams.get('view') || '').toLowerCase();
     if (!iid) {
+      setBootstrapping(false);
       setReportResult(null);
       assetMappingReadyRef.current = false;
       return;
     }
+    if (preferredView === 'result' || preferredView === 'report') {
+      setActiveStep(3);
+    } else if (preferredView === 'analysis') {
+      setActiveStep(1);
+    }
+    setBootstrapping(true);
     seenEventIdsRef.current.clear();
+    seenEventDedupeKeysRef.current.clear();
     seenEventFingerprintsRef.current.clear();
     setEventRecords([]);
     setStreamedMessageText({});
@@ -1281,9 +1438,10 @@ const IncidentPage: React.FC = () => {
           severity: incident.severity || 'medium',
           service_name: incident.service_name || '',
         }));
-        if (incident.debate_session_id) {
-          setSessionId(incident.debate_session_id);
-          const detail = await loadSessionArtifacts(incident.debate_session_id);
+        const targetSessionId = querySessionId || incident.debate_session_id || '';
+        if (targetSessionId) {
+          setSessionId(targetSessionId);
+          const detail = await loadSessionArtifacts(targetSessionId);
           const status = detail?.status || '';
           if (preferredView === 'result' || preferredView === 'report') {
             advanceStep(3);
@@ -1294,11 +1452,20 @@ const IncidentPage: React.FC = () => {
           } else {
             advanceStep(1);
           }
+          const lowerStatus = String(status || '').toLowerCase();
+          const runningLike = ['pending', 'running', 'analyzing', 'debating', 'waiting', 'retrying'].includes(lowerStatus);
+          if (autoStart && !autoStartConsumedRef.current.has(targetSessionId) && runningLike) {
+            autoStartConsumedRef.current.add(targetSessionId);
+            void startRealtimeDebate({ sessionId: targetSessionId, incidentId: iid });
+          }
         } else if (preferredView === 'analysis') {
           advanceStep(0);
         }
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        setBootstrapping(false);
+      });
   }, [searchParams, routeIncidentId]);
 
   useEffect(() => {
@@ -1391,6 +1558,119 @@ const IncidentPage: React.FC = () => {
     };
   }, [debateEvents.length, dialogueMessages, filteredDebateEvents.length]);
 
+  const agentNetworkData = useMemo(() => {
+    const nodeMap = new Map<string, AgentNetworkNode>();
+    const edgeMap = new Map<string, AgentNetworkEdge>();
+
+    const inferRole = (name: string): AgentNetworkNode['role'] => {
+      if (name === 'ProblemAnalysisAgent') return 'commander';
+      if (!name || name.toLowerCase() === 'system') return 'observer';
+      return 'specialist';
+    };
+
+    const ensureNode = (name: string): AgentNetworkNode | null => {
+      const nodeId = String(name || '').trim();
+      if (!nodeId) return null;
+      const existing = nodeMap.get(nodeId);
+      if (existing) return existing;
+      const created: AgentNetworkNode = {
+        id: nodeId,
+        label: nodeId,
+        role: inferRole(nodeId),
+        inbound: 0,
+        outbound: 0,
+        activity: 0,
+      };
+      nodeMap.set(nodeId, created);
+      return created;
+    };
+
+    const bumpActivity = (name: string) => {
+      const node = ensureNode(name);
+      if (!node) return;
+      node.activity += 1;
+    };
+
+    const upsertEdge = (
+      sourceName: string,
+      targetName: string,
+      relation: AgentNetworkEdge['relation'],
+    ) => {
+      const source = ensureNode(sourceName);
+      const target = ensureNode(targetName);
+      if (!source || !target || source.id === target.id) return;
+      const edgeKey = `${source.id}|${target.id}|${relation}`;
+      const existing = edgeMap.get(edgeKey);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        edgeMap.set(edgeKey, {
+          id: edgeKey,
+          source: source.id,
+          target: target.id,
+          relation,
+          count: 1,
+        });
+      }
+      source.outbound += 1;
+      source.activity += 1;
+      target.inbound += 1;
+      target.activity += 1;
+    };
+
+    const parseTargetAgent = (data: Record<string, unknown>, text: string): string => {
+      const direct = firstTextValue(data, ['target_agent', 'receiver', 'to_agent', 'target']);
+      if (direct) return direct;
+      const fromText = String(text || '').match(/->\s*([A-Za-z][A-Za-z0-9_-]*)/);
+      return fromText?.[1] || '';
+    };
+
+    debateEvents
+      .slice()
+      .reverse()
+      .forEach((row) => {
+        const data = asRecord(row.data);
+        const kind = row.kind;
+        const agentName = firstTextValue(data, ['agent_name', 'agent']) || '';
+        if (agentName) bumpActivity(agentName);
+
+        if (kind === 'agent_command_issued') {
+          const source = agentName || 'ProblemAnalysisAgent';
+          const target = parseTargetAgent(data, row.text);
+          if (target) {
+            upsertEdge(source, target, 'command');
+          }
+          return;
+        }
+
+        if (kind === 'agent_command_feedback') {
+          const source = agentName;
+          const target = firstTextValue(data, ['target_agent']) || 'ProblemAnalysisAgent';
+          if (source && target) {
+            upsertEdge(source, target, 'feedback');
+          }
+          return;
+        }
+
+        if (kind === 'agent_chat_message') {
+          const source = agentName;
+          const replyTo = firstTextValue(data, ['reply_to']);
+          if (source && replyTo && replyTo !== 'all') {
+            upsertEdge(source, replyTo, 'reply');
+          }
+          return;
+        }
+      });
+
+    const nodes = Array.from(nodeMap.values()).sort((left, right) => {
+      if (left.role === 'commander' && right.role !== 'commander') return -1;
+      if (left.role !== 'commander' && right.role === 'commander') return 1;
+      return left.label.localeCompare(right.label);
+    });
+    const edges = Array.from(edgeMap.values()).sort((left, right) => right.count - left.count);
+    return { nodes, edges };
+  }, [debateEvents]);
+
   useEffect(() => {
     const currentIds = new Set(filteredDialogueMessages.map((item) => item.id));
     setStreamedMessageText((prev) => {
@@ -1447,135 +1727,46 @@ const IncidentPage: React.FC = () => {
     });
   }, [filteredDialogueMessages]);
 
-  const buildCompactDetail = (value: string): { text: string; truncated: boolean } => {
-    const normalized = normalizeMarkdownText(value || '');
-    const lines = normalized
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
-    if (lines.length === 0) return { text: '', truncated: false };
-    const compact = lines.slice(0, 3).join('\n');
-    if (compact.length > 220) {
-      return { text: `${compact.slice(0, 220).trim()}...`, truncated: true };
-    }
-    if (lines.length > 3) return { text: `${compact}\n...`, truncated: true };
-    return { text: compact, truncated: false };
-  };
+  const renderEventFilters = (
+    <DialogueFilterBar
+      agents={eventFilterOptions.agents}
+      phases={eventFilterOptions.phases}
+      types={eventFilterOptions.types}
+      selectedAgent={eventFilterAgent}
+      selectedPhase={eventFilterPhase}
+      selectedType={eventFilterType}
+      searchText={eventSearchText}
+      onAgentChange={setEventFilterAgent}
+      onPhaseChange={setEventFilterPhase}
+      onTypeChange={setEventFilterType}
+      onSearchChange={setEventSearchText}
+      onReset={() => {
+        setEventFilterAgent('all');
+        setEventFilterPhase('all');
+        setEventFilterType('all');
+        setEventSearchText('');
+      }}
+      filteredCount={filteredDialogueMessages.length}
+      totalCount={dialogueMessages.length}
+    />
+  );
 
-  const renderDialogueStream = () => {
-    if (filteredDialogueMessages.length === 0) {
-      return <Empty description="暂无匹配的事件明细" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
-    }
-    return (
-      <div className="dialogue-stream discord-thread">
-        {filteredDialogueMessages.map((msg) => {
-          const renderedText = streamedMessageText[msg.id] ?? '';
-          const fullText = msg.status === 'streaming' ? renderedText : msg.detail;
-          const compactView = buildCompactDetail(fullText || msg.detail);
-          const compactText = compactView.text;
-          const showCursor =
-            msg.status === 'streaming' && renderedText.length < (msg.detail || '').length;
-          const isExpanded = Boolean(expandedDialogueIds[msg.id]);
-          const canExpand = compactView.truncated;
-          return (
-            <div
-              key={msg.id}
-              className={`dialogue-row ${msg.side === 'agent' ? 'dialogue-row-agent' : 'dialogue-row-system'}`}
-            >
-              <Avatar size="small" className="dialogue-avatar">
-                {msg.agentName.slice(0, 1).toUpperCase()}
-              </Avatar>
-              <div className={`dialogue-message dialogue-status-${msg.status}`}>
-                <div className="dialogue-meta">
-                  <Text className="dialogue-username">{msg.agentName}</Text>
-                  <Text className="dialogue-time">{msg.timeText}</Text>
-                  {msg.phase && <Tag className="dialogue-tag">{msg.phase}</Tag>}
-                  <Tag className="dialogue-tag">{msg.eventType}</Tag>
-                  {msg.latencyMs ? <Tag className="dialogue-tag">{`${msg.latencyMs}ms`}</Tag> : null}
-                </div>
-                <Paragraph className="dialogue-summary">{msg.summary}</Paragraph>
-                {isExpanded ? (
-                  <pre className="dialogue-content">
-                    {fullText}
-                    {showCursor ? <span className="dialogue-cursor">▋</span> : ''}
-                  </pre>
-                ) : (
-                  <pre className="dialogue-content dialogue-content-compact">
-                    {compactText || '暂无关键信息'}
-                    {showCursor ? <span className="dialogue-cursor">▋</span> : ''}
-                  </pre>
-                )}
-                {canExpand && (
-                  <Button
-                    type="link"
-                    size="small"
-                    style={{ paddingInline: 0, marginTop: 6 }}
-                    onClick={() =>
-                      setExpandedDialogueIds((prev) => ({
-                        ...prev,
-                        [msg.id]: !prev[msg.id],
-                      }))
-                    }
-                  >
-                    {isExpanded ? '收起详情' : '展开详情'}
-                  </Button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    );
-  };
+  const renderDialogueStream = (
+    <DialogueStream
+      messages={filteredDialogueMessages}
+      streamedMessageText={streamedMessageText}
+      expandedDialogueIds={expandedDialogueIds}
+      onToggleExpanded={(id) =>
+        setExpandedDialogueIds((prev) => ({
+          ...prev,
+          [id]: !prev[id],
+        }))
+      }
+    />
+  );
 
-  const renderEventFilters = () => (
-    <Space wrap style={{ marginBottom: 12 }}>
-      <Select
-        style={{ width: 180 }}
-        value={eventFilterAgent}
-        onChange={setEventFilterAgent}
-        options={eventFilterOptions.agents.map((value) => ({
-          label: value === 'all' ? '全部Agent' : value,
-          value,
-        }))}
-      />
-      <Select
-        style={{ width: 180 }}
-        value={eventFilterPhase}
-        onChange={setEventFilterPhase}
-        options={eventFilterOptions.phases.map((value) => ({
-          label: value === 'all' ? '全部阶段' : value,
-          value,
-        }))}
-      />
-      <Select
-        style={{ width: 220 }}
-        value={eventFilterType}
-        onChange={setEventFilterType}
-        options={eventFilterOptions.types.map((value) => ({
-          label: value === 'all' ? '全部事件类型' : value,
-          value,
-        }))}
-      />
-      <Input
-        allowClear
-        style={{ width: 260 }}
-        value={eventSearchText}
-        placeholder="搜索摘要/细节/trace_id"
-        onChange={(e) => setEventSearchText(e.target.value)}
-      />
-      <Button
-        onClick={() => {
-          setEventFilterAgent('all');
-          setEventFilterPhase('all');
-          setEventFilterType('all');
-          setEventSearchText('');
-        }}
-      >
-        重置筛选
-      </Button>
-      <Tag color="blue">{`显示 ${filteredDialogueMessages.length} / ${dialogueMessages.length} 条`}</Tag>
-    </Space>
+  const renderAgentNetwork = (
+    <AgentNetworkGraph nodes={agentNetworkData.nodes} edges={agentNetworkData.edges} />
   );
 
   const switchToStep = async (nextStep: number) => {
@@ -1888,6 +2079,18 @@ const IncidentPage: React.FC = () => {
       </Card>
 
       <div style={{ marginTop: 24 }}>
+        {bootstrapping && (
+          <Card className="module-card" style={{ minHeight: 180 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 132 }}>
+              <Space direction="vertical" align="center" size="middle">
+                <Spin />
+                <Text type="secondary">正在加载会话与报告数据...</Text>
+              </Space>
+            </div>
+          </Card>
+        )}
+        {!bootstrapping && (
+          <>
         {activeStep === 0 && (
           <Card
             className="module-card"
@@ -1920,7 +2123,7 @@ const IncidentPage: React.FC = () => {
                     onChange={(e) => setIncidentForm((s) => ({ ...s, description: e.target.value }))}
                   />
                 </Col>
-                <Col xs={24} md={8}>
+                <Col xs={24} md={6}>
                   <Select
                     value={incidentForm.severity}
                     style={{ width: '100%' }}
@@ -1933,14 +2136,14 @@ const IncidentPage: React.FC = () => {
                     ]}
                   />
                 </Col>
-                <Col xs={24} md={8}>
+                <Col xs={24} md={6}>
                   <Input
                     placeholder="服务名（可选）"
                     value={incidentForm.service_name}
                     onChange={(e) => setIncidentForm((s) => ({ ...s, service_name: e.target.value }))}
                   />
                 </Col>
-                <Col xs={24} md={8}>
+                <Col xs={24} md={6}>
                   <Select
                     value={debateMaxRounds}
                     style={{ width: '100%' }}
@@ -1952,6 +2155,19 @@ const IncidentPage: React.FC = () => {
                       { label: '辩论4轮', value: 4 },
                       { label: '辩论5轮', value: 5 },
                       { label: '辩论6轮', value: 6 },
+                    ]}
+                  />
+                </Col>
+                <Col xs={24} md={6}>
+                  <Select
+                    value={executionMode}
+                    style={{ width: '100%' }}
+                    onChange={(value) => setExecutionMode(value)}
+                    options={[
+                      { label: 'Standard（实时）', value: 'standard' },
+                      { label: 'Quick（快速）', value: 'quick' },
+                      { label: 'Background（后台）', value: 'background' },
+                      { label: 'Async（异步）', value: 'async' },
                     ]}
                   />
                 </Col>
@@ -2015,8 +2231,9 @@ const IncidentPage: React.FC = () => {
             onCancel={() => sendWsControl('cancel')}
             onResume={() => sendWsControl('resume')}
             onRetryFailed={retryFailedAgents}
-            eventFiltersNode={renderEventFilters()}
-            dialogueNode={renderDialogueStream()}
+            eventFiltersNode={renderEventFilters}
+            dialogueNode={renderDialogueStream}
+            agentNetworkNode={renderAgentNetwork}
             roundCollapseItems={roundCollapseItems}
             timelineItems={timelineItems}
             eventStats={eventStats}
@@ -2026,6 +2243,7 @@ const IncidentPage: React.FC = () => {
         {activeStep === 3 && (
           <DebateResultPanel
             mainAgentConclusion={mainAgentConclusion}
+            debateResult={debateResult}
             sessionStatus={sessionStatus}
             sessionError={extractSessionError(sessionDetail)}
             debateSummaryCards={debateSummaryCards}
@@ -2037,6 +2255,8 @@ const IncidentPage: React.FC = () => {
             debateConfidence={debateResult?.confidence}
             onRegenerateReport={regenerateReport}
           />
+        )}
+          </>
         )}
       </div>
     </div>

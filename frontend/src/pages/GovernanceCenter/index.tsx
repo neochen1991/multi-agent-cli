@@ -20,11 +20,21 @@ const GovernanceCenterPage: React.FC = () => {
   const [tenants, setTenants] = useState<Array<Record<string, any>>>([]);
   const [remediationItems, setRemediationItems] = useState<Array<Record<string, any>>>([]);
   const [externalItems, setExternalItems] = useState<Array<Record<string, any>>>([]);
+  const [externalSyncSettings, setExternalSyncSettings] = useState<Record<string, any>>({});
+  const [externalSyncTemplates, setExternalSyncTemplates] = useState<Record<string, any>>({});
   const [remediationSummary, setRemediationSummary] = useState('');
+  const [metricsWindowDays, setMetricsWindowDays] = useState(7);
+  const [teamMetrics, setTeamMetrics] = useState<Array<Record<string, any>>>([]);
+  const [teamMetricsMeta, setTeamMetricsMeta] = useState<Record<string, any>>({});
+  const [replaySessionId, setReplaySessionId] = useState('');
+  const [replayResult, setReplayResult] = useState<Record<string, any>>({});
+  const [replayLoading, setReplayLoading] = useState(false);
+  const [runtimeProfiles, setRuntimeProfiles] = useState<Array<Record<string, any>>>([]);
+  const [runtimeActiveProfile, setRuntimeActiveProfile] = useState<string>('balanced');
 
   const load = async () => {
     try {
-      const [card, trend, estimate, feedback, learning, tenantRes, remediationRes, externalRes] = await Promise.all([
+      const [card, trend, estimate, feedback, learning, tenantRes, remediationRes, externalRes, teamMetricsRes, syncSettings, syncTemplates, runtimeProfilesRes, runtimeActiveRes] = await Promise.all([
         governanceApi.systemCard(),
         governanceApi.qualityTrend(30),
         governanceApi.costEstimate(costCaseCount),
@@ -33,6 +43,11 @@ const GovernanceCenterPage: React.FC = () => {
         governanceApi.listTenants(),
         governanceApi.listRemediation(30),
         governanceApi.listExternalSync(30),
+        governanceApi.teamMetrics(metricsWindowDays, 100),
+        governanceApi.externalSyncSettings(),
+        governanceApi.externalSyncTemplates(),
+        governanceApi.runtimeStrategies(),
+        governanceApi.runtimeStrategyActive(),
       ]);
       setSystemCard(card as Record<string, any>);
       setQuality((trend?.items || []) as Array<Record<string, any>>);
@@ -42,6 +57,12 @@ const GovernanceCenterPage: React.FC = () => {
       setTenants((tenantRes?.items || []) as Array<Record<string, any>>);
       setRemediationItems((remediationRes?.items || []) as Array<Record<string, any>>);
       setExternalItems((externalRes?.items || []) as Array<Record<string, any>>);
+      setExternalSyncSettings((syncSettings || {}) as Record<string, any>);
+      setExternalSyncTemplates((syncTemplates || {}) as Record<string, any>);
+      setTeamMetrics((teamMetricsRes?.items || []) as Array<Record<string, any>>);
+      setTeamMetricsMeta((teamMetricsRes || {}) as Record<string, any>);
+      setRuntimeProfiles(((runtimeProfilesRes.items || []) as Array<Record<string, any>>));
+      setRuntimeActiveProfile(String(runtimeActiveRes.active_profile || 'balanced'));
     } catch (e: any) {
       message.error(e?.response?.data?.detail || e?.message || '治理数据加载失败');
     }
@@ -49,7 +70,7 @@ const GovernanceCenterPage: React.FC = () => {
 
   useEffect(() => {
     void load();
-  }, [costCaseCount]);
+  }, [costCaseCount, metricsWindowDays]);
 
   const submitFeedback = async () => {
     try {
@@ -144,6 +165,48 @@ const GovernanceCenterPage: React.FC = () => {
     }
   };
 
+  const updateExternalAutoSync = async (enabled: boolean) => {
+    try {
+      await governanceApi.updateExternalSyncSettings({
+        enabled,
+        providers: externalSyncSettings.providers || ['jira', 'servicenow', 'slack', 'feishu', 'pagerduty'],
+      });
+      message.success('自动同步设置已更新');
+      await load();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || e?.message || '自动同步设置更新失败');
+    }
+  };
+
+  const updateRuntimeStrategy = async (profile: string) => {
+    try {
+      await governanceApi.updateRuntimeStrategyActive(profile);
+      setRuntimeActiveProfile(profile);
+      message.success('运行策略已更新');
+      await load();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || e?.message || '运行策略更新失败');
+    }
+  };
+
+  const loadSessionReplay = async () => {
+    const sid = replaySessionId.trim();
+    if (!sid) {
+      message.warning('请输入 session_id');
+      return;
+    }
+    setReplayLoading(true);
+    try {
+      const payload = await governanceApi.sessionReplay(sid, 160);
+      setReplayResult(payload as Record<string, any>);
+      message.success('回放加载完成');
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || e?.message || '回放加载失败');
+    } finally {
+      setReplayLoading(false);
+    }
+  };
+
   return (
     <div>
       <Card className="module-card">
@@ -204,6 +267,115 @@ const GovernanceCenterPage: React.FC = () => {
                 <Text type="secondary">
                   {formatBeijingDateTime(String(item.generated_at || ''))} · Top1{' '}
                   {(Number((item.summary || {}).top1_rate || 0) * 100).toFixed(1)}%
+                </Text>
+              </List.Item>
+            )}
+          />
+        </Space>
+      </Card>
+
+      <Card className="module-card" title="运行策略中心（ReActMaster）" style={{ marginTop: 16 }}>
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space wrap>
+            <Text>当前策略</Text>
+            <Select
+              value={runtimeActiveProfile}
+              style={{ width: 220 }}
+              options={runtimeProfiles.map((item) => ({
+                label: `${String(item.name || '-')}: ${String(item.description || '').slice(0, 18)}`,
+                value: String(item.name || 'balanced'),
+              }))}
+              onChange={(value) => void updateRuntimeStrategy(value)}
+            />
+          </Space>
+          <List
+            size="small"
+            dataSource={runtimeProfiles}
+            renderItem={(item) => (
+              <List.Item>
+                <Text type="secondary">
+                  {String(item.name || '-')} · rounds={String(item.suggested_max_rounds || '-')} · doomLoop=
+                  {String(item.doom_loop_max_repeat || '-')} · compaction={String(item.compaction_max_messages || '-')} ·
+                  prune={String(item.prune_history_limit || '-')} · truncation={String(item.truncation_max_chars || '-')}
+                </Text>
+              </List.Item>
+            )}
+          />
+        </Space>
+      </Card>
+
+      <Card className="module-card" title="团队治理指标" style={{ marginTop: 16 }}>
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space wrap>
+            <Text>时间窗（天）</Text>
+            <InputNumber min={1} max={90} value={metricsWindowDays} onChange={(v) => setMetricsWindowDays(Number(v || 7))} />
+          </Space>
+          <List
+            size="small"
+            dataSource={teamMetrics}
+            locale={{ emptyText: '暂无团队指标数据' }}
+            renderItem={(item) => (
+              <List.Item>
+                <Space direction="vertical" size={0}>
+                  <Text strong>
+                    {String(item.team || '-')} · sessions={String(item.sessions || 0)} · success=
+                    {(Number(item.success_rate || 0) * 100).toFixed(1)}%
+                  </Text>
+                  <Text type="secondary">
+                    timeout={(Number(item.timeout_rate || 0) * 100).toFixed(1)}% · tool_fail=
+                    {(Number(item.tool_failure_rate || 0) * 100).toFixed(1)}% · 估算成本=
+                    {Number(item.estimated_model_cost || 0).toFixed(4)} CNY
+                  </Text>
+                </Space>
+              </List.Item>
+            )}
+          />
+          <Card size="small">
+            <Space direction="vertical" size={4} style={{ width: '100%' }}>
+              <Text strong>Session SLA</Text>
+              <Text type="secondary">
+                首条证据延迟={String(((teamMetricsMeta.sla || {}) as Record<string, any>).first_evidence_latency_ms || 0)}ms ·
+                首结论延迟={String(((teamMetricsMeta.sla || {}) as Record<string, any>).first_conclusion_latency_ms || 0)}ms ·
+                完整报告延迟={String(((teamMetricsMeta.sla || {}) as Record<string, any>).report_latency_ms || 0)}ms
+              </Text>
+            </Space>
+          </Card>
+          <List
+            size="small"
+            header={<Text strong>Token 成本趋势</Text>}
+            dataSource={(teamMetricsMeta.token_cost_trend || []) as Array<Record<string, any>>}
+            locale={{ emptyText: '暂无趋势数据' }}
+            renderItem={(item) => (
+              <List.Item>
+                <Text type="secondary">
+                  {String(item.day || '-')} · tokens={String(item.estimated_tokens || 0)} · cost=
+                  {Number(item.estimated_model_cost || 0).toFixed(4)} CNY
+                </Text>
+              </List.Item>
+            )}
+          />
+          <List
+            size="small"
+            header={<Text strong>超时热点 TopN</Text>}
+            dataSource={(teamMetricsMeta.timeout_hotspots || []) as Array<Record<string, any>>}
+            locale={{ emptyText: '暂无超时热点' }}
+            renderItem={(item) => (
+              <List.Item>
+                <Text type="secondary">
+                  {String(item.key || '-')} · count={String(item.count || 0)}
+                </Text>
+              </List.Item>
+            )}
+          />
+          <List
+            size="small"
+            header={<Text strong>工具失败 TopN</Text>}
+            dataSource={(teamMetricsMeta.tool_failure_topn || []) as Array<Record<string, any>>}
+            locale={{ emptyText: '暂无工具失败热点' }}
+            renderItem={(item) => (
+              <List.Item>
+                <Text type="secondary">
+                  {String(item.tool_name || '-')} · count={String(item.count || 0)}
                 </Text>
               </List.Item>
             )}
@@ -304,7 +476,31 @@ const GovernanceCenterPage: React.FC = () => {
 
       <Card className="module-card" title="多租户治理与外部协同" style={{ marginTop: 16 }}>
         <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space wrap>
+            <Text>自动同步</Text>
+            <Select
+              value={Boolean(externalSyncSettings.enabled) ? 'enabled' : 'disabled'}
+              style={{ width: 160 }}
+              options={[
+                { label: '开启', value: 'enabled' },
+                { label: '关闭', value: 'disabled' },
+              ]}
+              onChange={(value) => void updateExternalAutoSync(value === 'enabled')}
+            />
+          </Space>
           <Button onClick={() => void emitExternalSync()}>写入外部协同记录（Jira）</Button>
+          <List
+            size="small"
+            header={<Text strong>字段映射模板</Text>}
+            dataSource={Object.entries(externalSyncTemplates || {})}
+            renderItem={([provider, mapping]) => (
+              <List.Item>
+                <Text type="secondary">
+                  {provider}: {JSON.stringify(mapping).slice(0, 200)}
+                </Text>
+              </List.Item>
+            )}
+          />
           <List
             size="small"
             header={<Text strong>租户策略</Text>}
@@ -333,9 +529,62 @@ const GovernanceCenterPage: React.FC = () => {
           />
         </Space>
       </Card>
+
+      <Card className="module-card" title="Session 回放（关键决策路径）" style={{ marginTop: 16 }}>
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space wrap>
+            <Input
+              value={replaySessionId}
+              onChange={(e) => setReplaySessionId(e.target.value)}
+              placeholder="输入 session_id（deb_xxx）"
+              style={{ width: 260 }}
+            />
+            <Button loading={replayLoading} onClick={() => void loadSessionReplay()}>
+              加载回放
+            </Button>
+          </Space>
+          {Object.keys(replayResult).length > 0 ? (
+            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+              <Text>
+                session={String(replayResult.session_id || '-')} · status={String(replayResult.session_status || '-')} · incident=
+                {String(replayResult.incident_id || '-')}
+              </Text>
+              <Text type="secondary">
+                root_cause={String(replayResult.root_cause || '暂无')} · confidence=
+                {(Number(replayResult.confidence || 0) * 100).toFixed(1)}%
+              </Text>
+              <List
+                size="small"
+                header={<Text strong>关键决策</Text>}
+                dataSource={(replayResult.key_decisions || []) as Array<Record<string, any>>}
+                locale={{ emptyText: '暂无关键决策' }}
+                renderItem={(item) => (
+                  <List.Item>
+                    <Text>
+                      [{String(item.agent || '-')}] {String(item.conclusion || '-')}
+                    </Text>
+                  </List.Item>
+                )}
+              />
+              <List
+                size="small"
+                header={<Text strong>时间线步骤</Text>}
+                dataSource={(replayResult.rendered_steps || []) as string[]}
+                locale={{ emptyText: '暂无步骤' }}
+                renderItem={(line) => (
+                  <List.Item>
+                    <Text type="secondary">{line}</Text>
+                  </List.Item>
+                )}
+              />
+            </Space>
+          ) : (
+            <Text type="secondary">输入 session_id 后可回放主流程关键决策与证据引用。</Text>
+          )}
+        </Space>
+      </Card>
     </div>
   );
 };
 
 export default GovernanceCenterPage;
-

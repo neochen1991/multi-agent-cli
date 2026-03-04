@@ -23,6 +23,9 @@ class TaskRecord:
     updated_at: str
     trace_id: str = ""
     error: str = ""
+    last_phase: str = ""
+    last_event_type: str = ""
+    last_round: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -33,6 +36,9 @@ class TaskRecord:
             "updated_at": self.updated_at,
             "trace_id": self.trace_id,
             "error": self.error,
+            "last_phase": self.last_phase,
+            "last_event_type": self.last_event_type,
+            "last_round": self.last_round,
         }
 
     @classmethod
@@ -45,6 +51,9 @@ class TaskRecord:
             updated_at=str(payload.get("updated_at") or datetime.utcnow().isoformat()),
             trace_id=str(payload.get("trace_id") or ""),
             error=str(payload.get("error") or ""),
+            last_phase=str(payload.get("last_phase") or ""),
+            last_event_type=str(payload.get("last_event_type") or ""),
+            last_round=int(payload.get("last_round") or 0),
         )
 
 
@@ -74,17 +83,36 @@ class RuntimeTaskRegistry:
                 started_at=now,
                 updated_at=now,
                 trace_id=trace_id,
+                last_phase="",
+                last_event_type="",
+                last_round=0,
             )
             self._tasks[session_id] = record
             self._persist_locked()
             return record
 
-    async def mark_heartbeat(self, session_id: str) -> Optional[TaskRecord]:
+    async def mark_heartbeat(
+        self,
+        session_id: str,
+        *,
+        phase: str = "",
+        event_type: str = "",
+        round_number: int | None = None,
+    ) -> Optional[TaskRecord]:
         async with self._lock:
             record = self._tasks.get(session_id)
             if not record:
                 return None
             record.updated_at = datetime.utcnow().isoformat()
+            if phase:
+                record.last_phase = str(phase)
+            if event_type:
+                record.last_event_type = str(event_type)
+            if round_number is not None:
+                try:
+                    record.last_round = max(0, int(round_number))
+                except (TypeError, ValueError):
+                    pass
             self._persist_locked()
             return record
 
@@ -138,4 +166,3 @@ class RuntimeTaskRegistry:
 
 
 runtime_task_registry = RuntimeTaskRegistry()
-

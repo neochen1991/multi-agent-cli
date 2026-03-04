@@ -10,7 +10,7 @@ from app.runtime.messages import AgentMessage
 
 
 async def execute_supervisor_decide(orchestrator: Any, state: Dict[str, Any]) -> Dict[str, Any]:
-    history_cards = list(state.get("history_cards") or [])
+    history_cards = orchestrator._history_cards_for_state(state, limit=20)
     dialogue_items = orchestrator._dialogue_items_from_messages(
         list(state.get("messages") or []),
         limit=6,

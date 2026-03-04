@@ -7,9 +7,11 @@ helpers, but node-level state transitions are now defined here.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict
 
 from app.runtime.langgraph.mailbox import clone_mailbox, compact_mailbox, dequeue_messages, enqueue_message
+from app.runtime.langgraph.state import DebateTurn
 from app.runtime.messages import AgentMessage
 
 
@@ -63,13 +65,46 @@ async def execute_single_phase_agent(
         dialogue_items=dialogue_items,
         inbox_messages=inbox_messages,
     )
-    turn = await orchestrator._agent_runner.run_agent(
-        spec=effective_spec,
-        prompt=prompt,
-        round_number=round_number,
-        loop_round=loop_round,
-        history_cards_context=history_cards,
-    )
+    if agent_name == "VerificationAgent" and not bool(
+        getattr(orchestrator, "_require_verification_plan", True)
+    ):
+        now = datetime.utcnow()
+        turn = DebateTurn(
+            round_number=round_number,
+            phase=effective_spec.phase,
+            agent_name=effective_spec.name,
+            agent_role=effective_spec.role,
+            model={"name": "rule-skip"},
+            input_message=prompt,
+            output_content={
+                "chat_message": "快速模式下跳过验证计划生成，直接进入结论落地。",
+                "analysis": "当前会话策略为 quick/background，不强制补充 VerificationAgent 计划。",
+                "conclusion": "已跳过验证计划生成，不影响根因与修复建议输出。",
+                "confidence": 0.8,
+                "evidence_chain": [],
+            },
+            confidence=0.8,
+            started_at=now,
+            completed_at=now,
+        )
+        await orchestrator._emit_event(
+            {
+                "type": "verification_skipped",
+                "phase": "verification",
+                "agent_name": "VerificationAgent",
+                "loop_round": loop_round,
+                "round_number": round_number,
+                "reason": "runtime_policy_quick_mode",
+            }
+        )
+    else:
+        turn = await orchestrator._agent_runner.run_agent(
+            spec=effective_spec,
+            prompt=prompt,
+            round_number=round_number,
+            loop_round=loop_round,
+            history_cards_context=history_cards,
+        )
     await orchestrator._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
     if assigned_command:
         await orchestrator._emit_agent_command_feedback(
@@ -120,7 +155,7 @@ def build_agent_node(orchestrator: Any, agent_name: str) -> Callable[[Dict[str, 
     async def _node(state: Dict[str, Any]) -> Dict[str, Any]:
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
-        history_cards = list(state.get("history_cards") or [])
+        history_cards = orchestrator._history_cards_for_state(state, limit=20)
         dialogue_items = orchestrator._dialogue_items_from_messages(
             list(state.get("messages") or []),
             limit=6,

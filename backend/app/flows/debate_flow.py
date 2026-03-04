@@ -8,7 +8,7 @@ to the LangGraph runtime orchestrator implementation.
 from typing import Optional
 
 from app.config import settings
-from app.runtime.langgraph_runtime import (
+from app.runtime_core import (
     LangGraphRuntimeOrchestrator,
     DebateTurn,
 )

@@ -12,6 +12,7 @@ from typing import List
 class IncidentFixture:
     fixture_id: str
     title: str
+    scenario: str
     symptom: str
     log_excerpt: str
     stacktrace: str
@@ -41,6 +42,7 @@ def load_fixtures(limit: int = 0) -> List[IncidentFixture]:
             IncidentFixture(
                 fixture_id=str(payload.get("id") or path.stem),
                 title=str(payload.get("title") or path.stem),
+                scenario=str(payload.get("scenario") or payload.get("category") or path.stem),
                 symptom=str(payload.get("symptom") or ""),
                 log_excerpt=str(payload.get("log_excerpt") or ""),
                 stacktrace=str(payload.get("stacktrace") or ""),
@@ -50,4 +52,3 @@ def load_fixtures(limit: int = 0) -> List[IncidentFixture]:
             )
         )
     return fixtures
-

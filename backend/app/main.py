@@ -15,7 +15,7 @@ import structlog
 from app.config import settings
 from app.api.router import api_router
 from app.api.ws_debates import router as ws_router
-from app.core.observability import MetricsMiddleware, metrics_store
+from app.core.observability import MetricsMiddleware, beijing_timestamp_processor, metrics_store
 from app.core.rate_limit import RateLimitMiddleware
 from app.core.security import AuthRBACMiddleware
 
@@ -27,6 +27,7 @@ structlog.configure(
         structlog.stdlib.add_log_level,
         structlog.stdlib.PositionalArgumentsFormatter(),
         structlog.processors.TimeStamper(fmt="iso"),
+        beijing_timestamp_processor,
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),

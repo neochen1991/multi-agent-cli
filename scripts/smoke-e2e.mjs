@@ -1,6 +1,6 @@
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
-const WS_TIMEOUT_MS = Number(process.env.WS_TIMEOUT_MS || 900000);
+const WS_TIMEOUT_MS = Number(process.env.WS_TIMEOUT_MS || 420000);
 const SMOKE_SCENARIO = String(process.env.SMOKE_SCENARIO || '').trim();
 
 const scenarios = [
@@ -80,27 +80,44 @@ async function runRealtimeDebate(sessionId, token = '', timeoutMs = WS_TIMEOUT_M
   return new Promise((resolve, reject) => {
     const events = [];
     const ws = new WebSocket(wsUrl);
+    let settled = false;
+    const done = (handler, payload) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        ws.close();
+      } catch (_) {
+        // ignore
+      }
+      handler(payload);
+    };
     const timer = setTimeout(() => {
-      ws.close();
-      reject(new Error('websocket timeout waiting result'));
+      done(reject, new Error('websocket timeout waiting result'));
     }, timeoutMs);
 
     ws.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data);
         if (payload.type === 'event') {
-          events.push(payload.data?.type || 'event');
+          const eventType = payload.data?.type || 'event';
+          events.push(eventType);
+          if (eventType === 'session_failed') {
+            const error =
+              payload.data?.error ||
+              payload.data?.error_message ||
+              payload.data?.message ||
+              'session_failed';
+            done(reject, new Error(`session_failed: ${error}`));
+            return;
+          }
         }
         if (payload.type === 'error') {
-          clearTimeout(timer);
-          ws.close();
-          reject(new Error(payload.message || 'websocket error'));
+          done(reject, new Error(payload.message || 'websocket error'));
           return;
         }
         if (payload.type === 'result') {
-          clearTimeout(timer);
-          ws.close();
-          resolve({ result: payload.data, events });
+          done(resolve, { result: payload.data, events });
         }
       } catch (_) {
         // ignore non-json
@@ -108,9 +125,13 @@ async function runRealtimeDebate(sessionId, token = '', timeoutMs = WS_TIMEOUT_M
     };
 
     ws.onerror = () => {
-      clearTimeout(timer);
-      ws.close();
-      reject(new Error('websocket connection error'));
+      done(reject, new Error('websocket connection error'));
+    };
+
+    ws.onclose = () => {
+      if (!settled) {
+        done(reject, new Error('websocket closed before result'));
+      }
     };
   });
 }
@@ -140,7 +161,7 @@ async function runScenario(scenario, token) {
   );
 
   const session = await jsonRequest(
-    `${BACKEND_URL}/api/v1/debates/?incident_id=${incident.id}`,
+    `${BACKEND_URL}/api/v1/debates/?incident_id=${incident.id}&mode=quick`,
     { method: 'POST' },
     token,
   );

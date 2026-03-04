@@ -31,7 +31,6 @@ logger = structlog.get_logger()
 class AgentInvokeResult:
     content: str
     invoke_mode: str
-    factory_error: str = ""
 
 
 class RetryableAgentTimeoutError(RuntimeError):
@@ -103,7 +102,6 @@ def run_agent_once(orchestrator: Any, spec: AgentSpec, prompt: str, max_tokens: 
     return AgentInvokeResult(
         content=LLMClient._extract_reply_text(reply, agent_name=spec.name),
         invoke_mode="direct",
-        factory_error="",
     )
 
 
@@ -202,6 +200,11 @@ async def call_agent(
     attempt_max_tokens = agent_max_tokens
     timeout_plan = orchestrator._agent_timeout_plan(spec.name)
     max_attempts = max(1, len(timeout_plan))
+    prompt_template_version = (
+        str(orchestrator._prompt_template_version())
+        if hasattr(orchestrator, "_prompt_template_version")
+        else "unknown"
+    )
     event_common = {
         "phase": spec.phase,
         "agent_name": spec.name,
@@ -209,6 +212,7 @@ async def call_agent(
         "model": model_name,
         "loop_round": loop_round,
         "round_number": round_number,
+        "prompt_template_version": prompt_template_version,
     }
 
     await orchestrator._emit_event(
@@ -269,11 +273,34 @@ async def call_agent(
         async for attempt in retrying:
             attempt_idx = int(attempt.retry_state.attempt_number or 1)
             attempt_timeout = timeout_plan[min(attempt_idx - 1, len(timeout_plan) - 1)]
+            session_budget = orchestrator._remaining_session_budget_seconds()
+            if session_budget is not None:
+                # Keep a small buffer to avoid consuming the whole session budget in one call.
+                attempt_timeout = min(float(attempt_timeout), max(1.0, float(session_budget) - 1.0))
             started_clock = perf_counter()
             with attempt:
                 try:
+                    if session_budget is not None and session_budget <= 1.0:
+                        await orchestrator._emit_event(
+                            {
+                                "type": "session_budget_exhausted",
+                                **event_common,
+                                "attempt": attempt_idx,
+                                "max_attempts": max_attempts,
+                                "remaining_seconds": round(float(session_budget), 3),
+                            }
+                        )
+                        raise asyncio.TimeoutError("session timeout budget exhausted")
+
+                    queue_timeout = float(orchestrator._agent_queue_timeout(spec.name))
+                    if session_budget is not None:
+                        queue_timeout = min(queue_timeout, max(0.5, float(session_budget)))
                     queue_started = perf_counter()
-                    async with orchestrator._get_llm_semaphore():
+                    semaphore = orchestrator._get_llm_semaphore()
+                    acquired = False
+                    try:
+                        await asyncio.wait_for(semaphore.acquire(), timeout=queue_timeout)
+                        acquired = True
                         queue_wait_ms = round((perf_counter() - queue_started) * 1000, 2)
                         logger.info(
                             "runtime_agent_llm_started",
@@ -285,7 +312,13 @@ async def call_agent(
                             attempt=attempt_idx,
                             max_attempts=max_attempts,
                             timeout_seconds=attempt_timeout,
+                            queue_timeout_seconds=queue_timeout,
                             queue_wait_ms=queue_wait_ms,
+                            session_budget_seconds=(
+                                round(float(session_budget), 3)
+                                if session_budget is not None
+                                else None
+                            ),
                         )
                         invoke_result = await asyncio.wait_for(
                             asyncio.to_thread(
@@ -297,21 +330,38 @@ async def call_agent(
                             ),
                             timeout=attempt_timeout,
                         )
-                    raw_content = str(getattr(invoke_result, "content", "") or "")
-                    raw_content = truncate_text(raw_content, max_chars=9000)
-                    invoke_mode = str(getattr(invoke_result, "invoke_mode", "") or "direct")
-                    factory_error = str(getattr(invoke_result, "factory_error", "") or "")
-                    if invoke_mode == "direct" and factory_error:
+                    except asyncio.TimeoutError as queue_exc:
+                        queue_wait_ms = round((perf_counter() - queue_started) * 1000, 2)
                         await orchestrator._emit_event(
                             {
-                                "type": "agent_factory_fallback",
-                                "phase": spec.phase,
-                                "agent_name": spec.name,
-                                "session_id": orchestrator.session_id,
-                                "model": model_name,
-                                "reason": factory_error[:400],
+                                "type": "llm_queue_timeout",
+                                **event_common,
+                                "attempt": attempt_idx,
+                                "max_attempts": max_attempts,
+                                "queue_timeout_seconds": queue_timeout,
+                                "queue_wait_ms": queue_wait_ms,
                             }
                         )
+                        raise RetryableAgentTimeoutError(
+                            f"llm queue timeout after {queue_timeout:.1f}s"
+                        ) from queue_exc
+                    finally:
+                        if acquired:
+                            semaphore.release()
+                    raw_content = str(getattr(invoke_result, "content", "") or "")
+                    raw_content = truncate_text(
+                        raw_content,
+                        max_chars=9000,
+                        session_id=str(orchestrator.session_id or ""),
+                        category="llm_raw_content",
+                        metadata={
+                            "agent_name": spec.name,
+                            "phase": spec.phase,
+                            "round_number": round_number,
+                            "loop_round": loop_round,
+                        },
+                    )
+                    invoke_mode = str(getattr(invoke_result, "invoke_mode", "") or "direct")
                     await orchestrator._emit_event(
                         {
                             "type": "llm_invoke_path",
@@ -320,7 +370,7 @@ async def call_agent(
                             "session_id": orchestrator.session_id,
                             "model": model_name,
                             "invoke_mode": invoke_mode,
-                            "factory_enabled": bool(settings.AGENT_USE_FACTORY),
+                            "execution_path": "chat_openai_direct",
                             "tool_count": len(tuple(spec.tools or ())),
                         }
                     )
@@ -330,7 +380,18 @@ async def call_agent(
                         raw_content,
                         judge_fallback_summary=orchestrator.JUDGE_FALLBACK_SUMMARY,
                     )
-                    payload = truncate_payload(payload, max_chars=2600)
+                    payload = truncate_payload(
+                        payload,
+                        max_chars=2600,
+                        session_id=str(orchestrator.session_id or ""),
+                        category="agent_output_payload",
+                        metadata={
+                            "agent_name": spec.name,
+                            "phase": spec.phase,
+                            "round_number": round_number,
+                            "loop_round": loop_round,
+                        },
+                    )
                     if spec.name == "JudgeAgent":
                         final_judgment = payload.get("final_judgment")
                         root_cause = (

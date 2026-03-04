@@ -8,6 +8,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime
 import json
+from time import monotonic
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from uuid import uuid4
 
@@ -43,14 +44,18 @@ from app.runtime.langgraph.message_ops import (
     merge_round_and_message_cards as merge_round_and_message_cards_ops,
     message_signature as message_signature_ops,
     messages_to_cards as messages_to_cards_ops,
+    prune_history_cards as prune_history_cards_ops,
 )
 from app.runtime.langgraph.prompt_builder import PromptBuilder
 from app.runtime.langgraph.phase_executor import PhaseExecutor
 from app.runtime.langgraph.routing_strategy import HybridRouter
 from app.runtime.langgraph.services.state_transition_service import StateTransitionService
+from app.runtime.langgraph.services.routing_service import RoutingService
 from app.runtime.langgraph.phase_manager import PhaseManager
 from app.runtime.langgraph.session_compaction import SessionCompaction
 from app.runtime.langgraph.doom_loop_guard import DoomLoopGuard
+from app.runtime.langgraph.output_truncation import truncate_text as truncate_text_with_ref
+from app.runtime.langgraph.work_log_manager import work_log_manager
 from app.runtime.langgraph.mailbox import (
     clone_mailbox,
     compact_mailbox,
@@ -58,15 +63,12 @@ from app.runtime.langgraph.mailbox import (
     enqueue_message,
 )
 from app.runtime.langgraph.routing import (
-    agent_from_step as agent_from_step_route,
     fallback_supervisor_route as fallback_supervisor_route_helper,
     judge_is_ready as judge_is_ready_route,
     recent_agent_card as recent_agent_card_route,
     route_from_commander_output as route_from_commander_output_helper,
     round_agent_counts as round_agent_counts_route,
     route_guardrail as route_guardrail_helper,
-    step_for_agent as step_for_agent_route,
-    supervisor_step_to_node as supervisor_step_to_node_route,
 )
 from app.runtime.langgraph.nodes import (
     execute_supervisor_decide,
@@ -80,6 +82,7 @@ from app.runtime.langgraph.state import (
     AgentSpec,
     DebateExecState as _DebateExecState,
     DebateTurn,
+    build_session_init_update,
     structured_state_snapshot,
 )
 from app.runtime.messages import AgentEvidence, AgentMessage, FinalVerdict, RoundCheckpoint
@@ -120,13 +123,18 @@ class LangGraphRuntimeOrchestrator:
         self._active_round_commands: Dict[str, Dict[str, Any]] = {}
         self._event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
         self._input_context: Dict[str, Any] = {}
+        self._enable_critique: bool = bool(settings.DEBATE_ENABLE_CRITIQUE)
+        self._require_verification_plan: bool = True
         self._event_dispatcher = EventDispatcher()
         self._agent_runner = AgentRunner(self)
         self._routing_strategy = HybridRouter()
-        self._agent_factory = None
+        self._routing_service = RoutingService()
+        self._work_log_manager = work_log_manager
         self._llm_semaphore_limit = max(1, int(settings.LLM_MAX_CONCURRENCY or 1))
         self._llm_semaphore: Optional[asyncio.Semaphore] = None
         self._llm_semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._session_timeout_seconds: Optional[float] = None
+        self._session_deadline_monotonic: Optional[float] = None
         self._graph_checkpointer = create_checkpointer(settings)
         self._prompt_builder = PromptBuilder(
             max_rounds=self.max_rounds,
@@ -157,6 +165,48 @@ class LangGraphRuntimeOrchestrator:
             base_url=settings.LLM_BASE_URL,
             max_rounds=max_rounds,
             consensus_threshold=consensus_threshold,
+            prompt_template_version=self._prompt_builder.template_version,
+        )
+
+    def _configure_runtime_policy(self, context: Dict[str, Any]) -> None:
+        execution_mode = str((context or {}).get("execution_mode") or "standard").strip().lower()
+        runtime_strategy = (context or {}).get("runtime_strategy")
+        phase_mode = ""
+        if isinstance(runtime_strategy, dict):
+            phase_mode = str(runtime_strategy.get("phase_mode") or "").strip().lower()
+
+        core_agents = ("LogAgent", "DomainAgent", "CodeAgent")
+        balanced_agents = ("LogAgent", "DomainAgent", "CodeAgent", "MetricsAgent")
+        fast_agents = ("LogAgent", "DomainAgent", "CodeAgent", "MetricsAgent", "ChangeAgent")
+
+        if phase_mode in {"economy", "failfast"} or execution_mode == "quick":
+            selected_agents = core_agents
+            max_discussion_steps = 4
+            enable_critique = False
+            require_verification_plan = False
+        elif phase_mode == "fast_track" or execution_mode in {"background", "async"}:
+            selected_agents = fast_agents
+            max_discussion_steps = 10
+            enable_critique = False
+            require_verification_plan = False
+        else:
+            selected_agents = balanced_agents
+            max_discussion_steps = 8
+            enable_critique = bool(settings.DEBATE_ENABLE_CRITIQUE)
+            require_verification_plan = True
+
+        self.PARALLEL_ANALYSIS_AGENTS = tuple(selected_agents)
+        self.MAX_DISCUSSION_STEPS_PER_ROUND = int(max_discussion_steps)
+        self._enable_critique = bool(enable_critique)
+        self._require_verification_plan = bool(require_verification_plan)
+        logger.info(
+            "runtime_policy_applied",
+            execution_mode=execution_mode,
+            phase_mode=phase_mode or "standard",
+            parallel_analysis_agents=list(self.PARALLEL_ANALYSIS_AGENTS),
+            max_discussion_steps=self.MAX_DISCUSSION_STEPS_PER_ROUND,
+            enable_critique=self._enable_critique,
+            require_verification_plan=self._require_verification_plan,
         )
 
     def _get_llm_semaphore(self) -> asyncio.Semaphore:
@@ -165,17 +215,6 @@ class LangGraphRuntimeOrchestrator:
             self._llm_semaphore = asyncio.Semaphore(self._llm_semaphore_limit)
             self._llm_semaphore_loop = loop
         return self._llm_semaphore
-
-    def _get_agent_factory(self):
-        if self._agent_factory is not None:
-            return self._agent_factory
-        try:
-            from app.runtime.agents.factory import AgentFactory
-        except Exception:
-            self._agent_factory = None
-            return None
-        self._agent_factory = AgentFactory()
-        return self._agent_factory
 
     @staticmethod
     def _is_rate_limited_error(error_text: str) -> bool:
@@ -203,13 +242,22 @@ class LangGraphRuntimeOrchestrator:
             session_id=str(self.session_id or ""),
             callback=event_callback,
         )
+        self._configure_runtime_policy(context)
+        configured_session_timeout = float(context.get("session_timeout_seconds") or 0.0)
+        if configured_session_timeout <= 0:
+            configured_session_timeout = float(max(30, int(settings.DEBATE_TIMEOUT or 600)))
+        self._session_timeout_seconds = configured_session_timeout
+        self._session_deadline_monotonic = monotonic() + configured_session_timeout
         await lineage_recorder.append(
             session_id=str(self.session_id),
             trace_id=self.trace_id,
             kind="session",
             phase="coordination",
             event_type="session_started",
-            payload={"context_keys": list((context or {}).keys())},
+            payload={
+                "context_keys": list((context or {}).keys()),
+                "session_timeout_seconds": configured_session_timeout,
+            },
         )
         context_summary = {
             "log_excerpt": str(context.get("log_content") or "")[:1400],
@@ -218,6 +266,8 @@ class LangGraphRuntimeOrchestrator:
             "runtime_assets_count": len(context.get("runtime_assets") or []),
             "dev_assets_count": len(context.get("dev_assets") or []),
             "design_assets_count": len(context.get("design_assets") or []),
+            "execution_mode": str(context.get("execution_mode") or "standard"),
+            "available_analysis_agents": list(self.PARALLEL_ANALYSIS_AGENTS),
         }
 
         graph_builder = GraphBuilder(self)
@@ -257,6 +307,9 @@ class LangGraphRuntimeOrchestrator:
                     event_type="session_failed",
                 )
             raise
+        finally:
+            self._session_timeout_seconds = None
+            self._session_deadline_monotonic = None
 
     async def _graph_init_session(self, state: _DebateExecState) -> _DebateExecState:
         context_summary = state.get("context_summary") or {}
@@ -272,56 +325,39 @@ class LangGraphRuntimeOrchestrator:
                 "mode": "langgraph_runtime",
             }
         )
-        init_state = {
-            "history_cards": [],
-            "messages": [],
-            "claims": [],
-            "open_questions": [],
-            "agent_outputs": {},
-            "consensus_reached": False,
-            "executed_rounds": 0,
-            "current_round": 0,
-            "continue_next_round": False,
-            "agent_commands": {},
-            "next_step": "",
-            "round_start_turn_index": 0,
-            "agent_mailbox": {},
-            "discussion_step_count": 0,
-            "max_discussion_steps": self.MAX_DISCUSSION_STEPS_PER_ROUND,
-            "supervisor_stop_requested": False,
-            "supervisor_stop_reason": "",
-            "supervisor_notes": [],
-        }
-        return {**init_state, **structured_state_snapshot(init_state)}
+        return build_session_init_update(self.MAX_DISCUSSION_STEPS_PER_ROUND)
 
     def _route_after_analysis_parallel(self, state: _DebateExecState) -> str:
-        return "analysis_collaboration" if settings.DEBATE_ENABLE_COLLABORATION else "critic"
+        return self._routing_service.route_after_analysis_parallel(
+            enable_collaboration=settings.DEBATE_ENABLE_COLLABORATION
+        )
 
     def _route_after_critic(self, state: _DebateExecState) -> str:
-        return "rebuttal" if settings.DEBATE_ENABLE_CRITIQUE else "judge"
+        return self._routing_service.route_after_critic(
+            enable_critique=settings.DEBATE_ENABLE_CRITIQUE
+        )
 
     def _supervisor_step_to_node(self, next_step: str) -> str:
-        return supervisor_step_to_node_route(next_step)
+        return self._routing_service.supervisor_step_to_node(next_step)
 
     def _route_after_supervisor_decide(self, state: _DebateExecState) -> str:
-        return self._supervisor_step_to_node(str(state.get("next_step") or ""))
+        return self._routing_service.route_after_supervisor_decide(state)
 
     def _route_after_round_evaluate(self, state: _DebateExecState) -> str:
-        return "round_start" if bool(state.get("continue_next_round")) else "finalize"
+        return self._routing_service.route_after_round_evaluate(state)
 
     def _round_discussion_budget(self) -> int:
-        base = self.MAX_DISCUSSION_STEPS_PER_ROUND
-        if settings.DEBATE_ENABLE_COLLABORATION:
-            base += 2
-        if not settings.DEBATE_ENABLE_CRITIQUE:
-            base = max(6, base - 2)
-        return max(6, min(base, 24))
+        return self._routing_service.round_discussion_budget(
+            base_steps=self.MAX_DISCUSSION_STEPS_PER_ROUND,
+            enable_collaboration=settings.DEBATE_ENABLE_COLLABORATION,
+            enable_critique=settings.DEBATE_ENABLE_CRITIQUE,
+        )
 
     def _step_for_agent(self, agent_name: str) -> str:
-        return step_for_agent_route(agent_name)
+        return self._routing_service.step_for_agent(agent_name)
 
     def _agent_from_step(self, step: str) -> str:
-        return agent_from_step_route(step)
+        return self._routing_service.agent_from_step(step)
 
     def _round_turns_from_state(self, state: _DebateExecState) -> List[DebateTurn]:
         start_index = max(0, int(state.get("round_start_turn_index") or 0))
@@ -342,6 +378,21 @@ class LangGraphRuntimeOrchestrator:
         limit: int = 12,
     ) -> List[AgentEvidence]:
         return messages_to_cards_ops(messages, limit=limit)
+
+    def _history_cards_for_state(
+        self,
+        state: Dict[str, Any],
+        *,
+        limit: int = 20,
+    ) -> List[AgentEvidence]:
+        """Build execution cards with message-first projection.
+
+        `history_cards` remains as a UI/display projection; runtime decisions should
+        primarily consume cards derived from LangGraph `messages`.
+        """
+        stored_cards = list(state.get("history_cards") or [])
+        message_cards = self._messages_to_cards(list(state.get("messages") or []), limit=max(8, limit))
+        return merge_round_and_message_cards_ops(stored_cards, message_cards, limit=max(8, limit))
 
     def _round_cards_for_routing(self, state: _DebateExecState) -> List[AgentEvidence]:
         round_cards = self._round_cards_from_state(state)
@@ -374,7 +425,7 @@ class LangGraphRuntimeOrchestrator:
         return judge_is_ready_route(
             round_cards,
             parallel_analysis_agents=self.PARALLEL_ANALYSIS_AGENTS,
-            debate_enable_critique=settings.DEBATE_ENABLE_CRITIQUE,
+            debate_enable_critique=self._enable_critique,
         )
 
     def _route_guardrail(
@@ -391,7 +442,7 @@ class LangGraphRuntimeOrchestrator:
             consensus_threshold=self.consensus_threshold,
             max_discussion_steps_default=self.MAX_DISCUSSION_STEPS_PER_ROUND,
             parallel_analysis_agents=self.PARALLEL_ANALYSIS_AGENTS,
-            debate_enable_critique=settings.DEBATE_ENABLE_CRITIQUE,
+            debate_enable_critique=self._enable_critique,
         )
 
     def _fallback_supervisor_route(
@@ -402,7 +453,8 @@ class LangGraphRuntimeOrchestrator:
         return fallback_supervisor_route_helper(
             state=state,
             round_cards=round_cards,
-            debate_enable_critique=settings.DEBATE_ENABLE_CRITIQUE,
+            debate_enable_critique=self._enable_critique,
+            require_verification=self._require_verification_plan,
             consensus_threshold=self.consensus_threshold,
             max_discussion_steps_default=self.MAX_DISCUSSION_STEPS_PER_ROUND,
             parallel_analysis_agents=self.PARALLEL_ANALYSIS_AGENTS,
@@ -598,7 +650,7 @@ class LangGraphRuntimeOrchestrator:
         current_round = int(state.get("current_round") or 0) + 1
         if current_round > max(1, self.max_rounds):
             return {"continue_next_round": False}
-        history_cards = list(state.get("history_cards") or [])
+        history_cards = self._history_cards_for_state(state, limit=20)
         dialogue_items = self._dialogue_items_from_messages(
             list(state.get("messages") or []),
             limit=4,
@@ -685,7 +737,7 @@ class LangGraphRuntimeOrchestrator:
     async def _graph_analysis_parallel(self, state: _DebateExecState) -> _DebateExecState:
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
-        history_cards = list(state.get("history_cards") or [])
+        history_cards = self._history_cards_for_state(state, limit=20)
         dialogue_items = self._dialogue_items_from_messages(
             list(state.get("messages") or []),
             limit=4,
@@ -708,7 +760,7 @@ class LangGraphRuntimeOrchestrator:
             return {}
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
-        history_cards = list(state.get("history_cards") or [])
+        history_cards = self._history_cards_for_state(state, limit=20)
         dialogue_items = self._dialogue_items_from_messages(
             list(state.get("messages") or []),
             limit=5,
@@ -730,7 +782,7 @@ class LangGraphRuntimeOrchestrator:
             return {}
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
-        history_cards = list(state.get("history_cards") or [])
+        history_cards = self._history_cards_for_state(state, limit=20)
         dialogue_items = self._dialogue_items_from_messages(
             list(state.get("messages") or []),
             limit=5,
@@ -758,7 +810,7 @@ class LangGraphRuntimeOrchestrator:
             return {}
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
-        history_cards = list(state.get("history_cards") or [])
+        history_cards = self._history_cards_for_state(state, limit=20)
         dialogue_items = self._dialogue_items_from_messages(
             list(state.get("messages") or []),
             limit=5,
@@ -784,7 +836,7 @@ class LangGraphRuntimeOrchestrator:
     async def _graph_judge(self, state: _DebateExecState) -> _DebateExecState:
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
-        history_cards = list(state.get("history_cards") or [])
+        history_cards = self._history_cards_for_state(state, limit=20)
         dialogue_items = self._dialogue_items_from_messages(
             list(state.get("messages") or []),
             limit=6,
@@ -813,7 +865,7 @@ class LangGraphRuntimeOrchestrator:
 
     async def _graph_round_evaluate(self, state: _DebateExecState) -> _DebateExecState:
         current_round = int(state.get("current_round") or 1)
-        history_cards = list(state.get("history_cards") or [])
+        history_cards = self._history_cards_for_state(state, limit=20)
         judge_card = self._recent_judge_card(self._round_cards_from_state(state))
         judge_confidence = float((judge_card.confidence if judge_card else 0.0) or 0.0)
         supervisor_stop_requested = bool(state.get("supervisor_stop_requested") or False)
@@ -854,6 +906,9 @@ class LangGraphRuntimeOrchestrator:
     def _coordinator_command_schema(self) -> Dict[str, Any]:
         return coordinator_command_schema_template()
 
+    def _prompt_template_version(self) -> str:
+        return str(self._prompt_builder.template_version or "unknown")
+
     def _build_problem_analysis_commander_prompt(
         self,
         loop_round: int,
@@ -866,6 +921,7 @@ class LangGraphRuntimeOrchestrator:
             loop_round=loop_round,
             context=context,
             history_cards=history_cards,
+            work_log_context=self._work_log_context(limit=18),
             dialogue_items=dialogue_items,
             existing_agent_outputs=existing_agent_outputs,
         )
@@ -888,6 +944,7 @@ class LangGraphRuntimeOrchestrator:
             round_history_cards=round_history_cards,
             discussion_step_count=discussion_step_count,
             max_discussion_steps=max_discussion_steps,
+            work_log_context=self._work_log_context(limit=18),
             dialogue_items=dialogue_items,
             existing_agent_outputs=existing_agent_outputs,
         )
@@ -1280,7 +1337,7 @@ class LangGraphRuntimeOrchestrator:
         )
 
     async def _graph_finalize(self, state: _DebateExecState) -> _DebateExecState:
-        history_cards = list(state.get("history_cards") or [])
+        history_cards = self._history_cards_for_state(state, limit=24)
         consensus_reached = bool(state.get("consensus_reached") or False)
         executed_rounds = int(state.get("executed_rounds") or state.get("current_round") or 0)
         final_payload = dict(state.get("final_payload") or {})
@@ -1322,6 +1379,7 @@ class LangGraphRuntimeOrchestrator:
             context=context,
             history_cards=history_cards,
             assigned_command=assigned_command,
+            work_log_context=self._work_log_context(limit=14),
             dialogue_items=dialogue_items,
             inbox_messages=inbox_messages,
         )
@@ -1488,8 +1546,20 @@ class LangGraphRuntimeOrchestrator:
             raw_output=turn.output_content,
         )
         history_cards.append(card)
-        if len(history_cards) > 20:
-            del history_cards[:-20]
+        pruned_cards, prune_stats = prune_history_cards_ops(history_cards, limit=20)
+        history_cards[:] = pruned_cards
+        if int(prune_stats.get("pruned_count") or 0) > 0:
+            await self._emit_event(
+                {
+                    "type": "history_pruned",
+                    "phase": turn.phase,
+                    "agent_name": turn.agent_name,
+                    "loop_round": loop_round,
+                    "round_number": turn.round_number,
+                    "pruned_count": int(prune_stats.get("pruned_count") or 0),
+                    "saved_chars": int(prune_stats.get("saved_chars") or 0),
+                }
+            )
 
         await runtime_session_store.append_round(
             self.session_id,
@@ -1506,7 +1576,7 @@ class LangGraphRuntimeOrchestrator:
         )
 
     def _agent_sequence(self) -> List[AgentSpec]:
-        return build_agent_sequence(enable_critique=bool(settings.DEBATE_ENABLE_CRITIQUE))
+        return build_agent_sequence(enable_critique=bool(self._enable_critique))
 
     def _evidence_texts(self, raw_items: Any, *, limit: int = 3) -> List[str]:
         if not isinstance(raw_items, list):
@@ -1539,6 +1609,7 @@ class LangGraphRuntimeOrchestrator:
             context=context,
             history_cards=history_cards,
             assigned_command=assigned_command,
+            work_log_context=self._work_log_context(limit=14),
             dialogue_items=dialogue_items,
             inbox_messages=inbox_messages,
         )
@@ -1559,9 +1630,13 @@ class LangGraphRuntimeOrchestrator:
             context=context,
             peer_cards=peer_cards,
             assigned_command=assigned_command,
+            work_log_context=self._work_log_context(limit=14),
             dialogue_items=dialogue_items,
             inbox_messages=inbox_messages,
         )
+
+    def _work_log_context(self, *, limit: int = 16) -> Dict[str, Any]:
+        return self._work_log_manager.build_context(str(self.session_id or ""), limit=limit)
 
     def _history_items_for_agent_prompt(
         self,
@@ -1724,6 +1799,8 @@ class LangGraphRuntimeOrchestrator:
                 "data_detail": detailed_tool_data,
                 "command_gate": command_gate,
                 "audit_log": audit_log,
+                "execution_path": str(tool_context.get("execution_path") or ""),
+                "permission_decision": self._tool_event_value(tool_context.get("permission_decision") or {}),
             }
         )
         logger.info(
@@ -1740,6 +1817,8 @@ class LangGraphRuntimeOrchestrator:
             data_preview=compact_tool_data,
             command_gate=command_gate,
             audit_log=audit_log,
+            execution_path=str(tool_context.get("execution_path") or ""),
+            permission_decision=self._tool_event_value(tool_context.get("permission_decision") or {}),
         )
         if isinstance(audit_log, list):
             for idx, record in enumerate(audit_log, start=1):
@@ -1764,6 +1843,11 @@ class LangGraphRuntimeOrchestrator:
                         "tool_name": str(tool_context.get("name") or ""),
                         "io_action": str(record.get("action") or ""),
                         "io_status": str(record.get("status") or ""),
+                        "io_call_id": str(record.get("call_id") or ""),
+                        "io_timestamp": str(record.get("timestamp") or ""),
+                        "io_duration_ms": record.get("duration_ms"),
+                        "io_request_summary": str(record.get("request_summary") or ""),
+                        "io_response_summary": str(record.get("response_summary") or ""),
                         "io_detail": self._tool_event_value(record.get("detail") or {}),
                     }
                 )
@@ -1796,7 +1880,20 @@ class LangGraphRuntimeOrchestrator:
         used = bool(tool_ctx.get("used"))
         if enabled and used and status == "ok":
             return spec
-        if spec.name in {"LogAgent", "DomainAgent", "CodeAgent", "MetricsAgent", "ChangeAgent", "RunbookAgent"} and tuple(spec.tools or ()):
+        if spec.name in {
+            "ProblemAnalysisAgent",
+            "LogAgent",
+            "DomainAgent",
+            "CodeAgent",
+            "MetricsAgent",
+            "ChangeAgent",
+            "RunbookAgent",
+            "RuleSuggestionAgent",
+            "CriticAgent",
+            "RebuttalAgent",
+            "JudgeAgent",
+            "VerificationAgent",
+        } and tuple(spec.tools or ()):
             return replace(spec, tools=())
         return spec
 
@@ -1819,7 +1916,13 @@ class LangGraphRuntimeOrchestrator:
         if depth >= 4:
             return "..."
         if isinstance(value, str):
-            return value[:1600]
+            return truncate_text_with_ref(
+                value,
+                max_chars=1600,
+                session_id=str(self.session_id or ""),
+                category="tool_event_value",
+                metadata={"depth": depth},
+            )
         if isinstance(value, (int, float, bool)) or value is None:
             return value
         if isinstance(value, list):
@@ -1852,10 +1955,15 @@ class LangGraphRuntimeOrchestrator:
 
     def _agent_timeout_plan(self, agent_name: str) -> List[float]:
         if agent_name == "JudgeAgent":
+            if not self._require_verification_plan:
+                quick_timeout = float(max(int(settings.llm_judge_retry_timeout), 75))
+                return [quick_timeout]
             first_timeout = float(max(18, int(settings.llm_judge_timeout)))
             retry_timeout = float(max(first_timeout, int(settings.llm_judge_retry_timeout)))
             return [first_timeout, retry_timeout]
         if agent_name == "ProblemAnalysisAgent":
+            if not self._require_verification_plan:
+                return [float(max(20, int(settings.llm_analysis_timeout)))]
             first_timeout = float(max(12, int(settings.llm_analysis_timeout)))
             retry_timeout = float(max(first_timeout, min(int(settings.llm_analysis_timeout) + 10, 60)))
             return [first_timeout, retry_timeout]
@@ -1869,6 +1977,15 @@ class LangGraphRuntimeOrchestrator:
         if agent_name in {"CriticAgent", "RebuttalAgent"}:
             return max(15, min(int(settings.llm_review_timeout), 90))
         return max(15, min(int(settings.llm_analysis_timeout), 90))
+
+    def _agent_queue_timeout(self, agent_name: str) -> float:
+        _ = agent_name
+        return float(max(2, int(settings.llm_queue_timeout)))
+
+    def _remaining_session_budget_seconds(self) -> Optional[float]:
+        if self._session_deadline_monotonic is None:
+            return None
+        return max(0.0, self._session_deadline_monotonic - monotonic())
 
     def _prepare_timeout_retry_input(
         self,

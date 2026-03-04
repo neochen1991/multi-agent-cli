@@ -16,6 +16,8 @@ from app.runtime.langgraph.state import (
     DebateExecState,
     structured_state_snapshot,
     sync_structured_state,
+    flatten_structured_state_view,
+    flatten_structured_overrides,
 )
 from app.runtime.messages import AgentEvidence
 
@@ -292,6 +294,51 @@ class TestStructuredState:
         assert "phase_state" in merged
         assert "routing_state" in merged
         assert "output_state" in merged
+
+    def test_structured_state_snapshot_prefers_nested_values(self):
+        payload = {
+            "current_round": 1,
+            "next_step": "speak:LogAgent",
+            "phase_state": {
+                "current_round": 3,
+                "executed_rounds": 2,
+                "consensus_reached": True,
+                "continue_next_round": False,
+            },
+            "routing_state": {
+                "next_step": "finalize",
+            },
+        }
+
+        snapshot = structured_state_snapshot(payload)
+
+        assert snapshot["phase_state"]["current_round"] == 3
+        assert snapshot["routing_state"]["next_step"] == "finalize"
+
+    def test_flatten_structured_state_view_merges_flat_and_nested(self):
+        payload = {
+            "current_round": 1,
+            "discussion_step_count": 2,
+            "phase_state": {"current_round": 4},
+            "routing_state": {"discussion_step_count": 7},
+        }
+
+        flat = flatten_structured_state_view(payload)
+
+        assert flat["current_round"] == 4
+        assert flat["discussion_step_count"] == 7
+
+    def test_flatten_structured_overrides_only_returns_explicit_keys(self):
+        overrides = flatten_structured_overrides(
+            {
+                "routing_state": {"next_step": "judge_agent_node"},
+                "output_state": {"agent_outputs": {"JudgeAgent": {"conclusion": "ok"}}},
+            }
+        )
+
+        assert overrides["next_step"] == "judge_agent_node"
+        assert "agent_outputs" in overrides
+        assert "current_round" not in overrides
 
 
 class TestGetStateSummary:

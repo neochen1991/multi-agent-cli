@@ -23,6 +23,8 @@ from app.services.incident_service import incident_service
 from app.core.task_queue import task_queue
 from app.config import settings
 from app.runtime.trace_lineage import lineage_recorder, replay_session_lineage
+from app.runtime_serve import normalize_execution_mode
+from app.runtime.langgraph.output_truncation import get_output_reference
 
 router = APIRouter()
 
@@ -147,6 +149,7 @@ class CancelResponse(BaseModel):
 
 class LineageResponse(BaseModel):
     session_id: str
+    resolved_session_id: Optional[str] = None
     records: int
     events: int
     tools: int
@@ -158,12 +161,24 @@ class LineageResponse(BaseModel):
 
 class ReplayResponse(BaseModel):
     session_id: str
+    resolved_session_id: Optional[str] = None
     count: int
     rendered_steps: List[str]
     summary: Dict[str, Any]
     timeline: List[Dict[str, Any]]
+    filters: Dict[str, Any] = Field(default_factory=dict)
     key_decisions: List[Dict[str, Any]] = Field(default_factory=list)
     evidence_refs: List[str] = Field(default_factory=list)
+
+
+class OutputReferenceResponse(BaseModel):
+    ref_id: str
+    found: bool
+    session_id: str = ""
+    category: str = ""
+    content: str = ""
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str = ""
 
 
 # ==================== API 端点 ====================
@@ -184,6 +199,11 @@ async def create_debate_session(
         le=8,
         description="本次辩论最大轮数（可选，默认使用系统配置）",
     ),
+    mode: str = Query(
+        default="standard",
+        pattern="^(standard|quick|background|async)$",
+        description="会话执行模式：standard|quick|background|async",
+    ),
 ):
     """创建辩论会话"""
     # 获取故障事件
@@ -198,6 +218,7 @@ async def create_debate_session(
     session = await debate_service.create_session(
         incident,
         max_rounds=max_rounds,
+        execution_mode=normalize_execution_mode(mode).value,
     )
     
     # 更新故障状态
@@ -293,6 +314,72 @@ async def execute_debate_async(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Debate session {session_id} not found",
         )
+
+    async def _run():
+        try:
+            result = await asyncio.wait_for(
+                debate_service.execute_debate(
+                    session_id,
+                    retry_failed_only=retry_failed_only,
+                ),
+                timeout=max(60, int(settings.DEBATE_TIMEOUT or 600)),
+            )
+            await incident_service.update_incident(
+                session.incident_id,
+                IncidentUpdate(
+                    status=IncidentStatus.RESOLVED,
+                    root_cause=result.root_cause,
+                    fix_suggestion=(
+                        result.fix_recommendation.summary if result.fix_recommendation else None
+                    ),
+                    impact_analysis=(
+                        result.impact_analysis.model_dump() if result.impact_analysis else None
+                    ),
+                ),
+            )
+            return {
+                "session_id": result.session_id,
+                "incident_id": result.incident_id,
+                "confidence": result.confidence,
+            }
+        except Exception as exc:
+            await incident_service.update_incident(
+                session.incident_id,
+                IncidentUpdate(
+                    status=IncidentStatus.CLOSED,
+                    fix_suggestion=str(exc)[:260],
+                ),
+            )
+            raise
+
+    task_id = task_queue.submit(_run, timeout_seconds=max(60, int(settings.DEBATE_TIMEOUT or 600)))
+    return TaskResponse(task_id=task_id, status="pending")
+
+
+@router.post(
+    "/{session_id}/execute-background",
+    response_model=TaskResponse,
+    summary="后台执行辩论流程",
+    description="提交后台辩论任务（适用于断连后继续）",
+)
+async def execute_debate_background(
+    session_id: str,
+    retry_failed_only: bool = Query(
+        default=False,
+        description="是否仅重试失败的 Agent（当前为兼容参数，默认 false）",
+    ),
+):
+    session = await debate_service.get_session(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Debate session {session_id} not found",
+        )
+
+    context = dict(session.context or {})
+    context["execution_mode"] = normalize_execution_mode("background").value
+    session.context = context
+    await debate_service.update_session(session)
 
     async def _run():
         try:
@@ -492,11 +579,12 @@ async def get_session_lineage(
     session_id: str,
     limit: int = Query(200, ge=1, le=2000, description="最多返回记录数"),
 ):
-    rows = await lineage_recorder.read(session_id)
+    resolved_session_id, rows = await _resolve_lineage_session_rows(session_id)
     subset = rows[: max(1, int(limit))]
-    summary = await lineage_recorder.summarize(session_id)
+    summary = await lineage_recorder.summarize(resolved_session_id)
     return LineageResponse(
         session_id=session_id,
+        resolved_session_id=resolved_session_id,
         records=int(summary.get("records") or 0),
         events=int(summary.get("events") or 0),
         tools=int(summary.get("tools") or 0),
@@ -516,17 +604,74 @@ async def get_session_lineage(
 async def replay_session(
     session_id: str,
     limit: int = Query(120, ge=1, le=1000, description="回放步数上限"),
+    phase: str = Query("", description="按阶段过滤（可选）"),
+    agent: str = Query("", description="按 Agent 过滤（可选）"),
 ):
-    payload = await replay_session_lineage(session_id, limit=limit)
+    resolved_session_id, rows = await _resolve_lineage_session_rows(session_id)
+    if rows:
+        payload = await replay_session_lineage(resolved_session_id, limit=limit, phase=phase, agent=agent)
+    else:
+        payload = await replay_session_lineage(session_id, limit=limit, phase=phase, agent=agent)
     return ReplayResponse(
-        session_id=payload["session_id"],
+        session_id=session_id,
+        resolved_session_id=resolved_session_id,
         count=int(payload.get("count") or 0),
         rendered_steps=list(payload.get("rendered_steps") or []),
         summary=dict(payload.get("summary") or {}),
         timeline=list(payload.get("timeline") or []),
+        filters=dict(payload.get("filters") or {}),
         key_decisions=list(payload.get("key_decisions") or []),
         evidence_refs=[str(item) for item in (payload.get("evidence_refs") or [])],
     )
+
+
+@router.get(
+    "/output-refs/{ref_id}",
+    response_model=OutputReferenceResponse,
+    summary="获取截断输出完整内容",
+    description="通过 ref_id 读取本地保存的完整输出",
+)
+async def get_output_ref(ref_id: str):
+    payload = get_output_reference(ref_id)
+    if not payload:
+        return OutputReferenceResponse(ref_id=ref_id, found=False)
+    return OutputReferenceResponse(
+        ref_id=str(payload.get("ref_id") or ref_id),
+        found=True,
+        session_id=str(payload.get("session_id") or ""),
+        category=str(payload.get("category") or ""),
+        content=str(payload.get("content") or ""),
+        metadata=dict(payload.get("metadata") or {}),
+        created_at=str(payload.get("created_at") or ""),
+    )
+
+
+async def _resolve_lineage_session_rows(session_id: str) -> tuple[str, List[Any]]:
+    session_key = str(session_id or "").strip()
+    if not session_key:
+        return "unknown", []
+
+    direct_rows = await lineage_recorder.read(session_key)
+    if direct_rows:
+        return session_key, direct_rows
+
+    debate_session = await debate_service.get_session(session_key)
+    if not debate_session:
+        return session_key, []
+
+    candidates: List[str] = []
+    llm_session_id = str(getattr(debate_session, "llm_session_id", "") or "").strip()
+    if llm_session_id and llm_session_id != session_key:
+        candidates.append(llm_session_id)
+    runtime_session_id = str((debate_session.context or {}).get("runtime_session_id") or "").strip()
+    if runtime_session_id and runtime_session_id not in {session_key, *candidates}:
+        candidates.append(runtime_session_id)
+
+    for candidate in candidates:
+        rows = await lineage_recorder.read(candidate)
+        if rows:
+            return candidate, rows
+    return session_key, []
 
 
 def _build_result_response(result: DebateResult) -> DebateResultResponse:

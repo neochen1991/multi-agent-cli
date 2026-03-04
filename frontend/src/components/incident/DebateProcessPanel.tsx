@@ -15,6 +15,7 @@ type Props = {
   onRetryFailed: () => Promise<void>;
   eventFiltersNode: React.ReactNode;
   dialogueNode: React.ReactNode;
+  agentNetworkNode?: React.ReactNode;
   roundCollapseItems: CollapseProps['items'];
   timelineItems: TimelineProps['items'];
   eventStats?: {
@@ -37,6 +38,7 @@ const DebateProcessPanel: React.FC<Props> = ({
   onRetryFailed,
   eventFiltersNode,
   dialogueNode,
+  agentNetworkNode,
   roundCollapseItems,
   timelineItems,
   eventStats,
@@ -87,13 +89,18 @@ const DebateProcessPanel: React.FC<Props> = ({
           items={[
             {
               key: 'dialogue',
-              label: '对话流',
+              label: '辩论对话',
               children: (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                   {eventFiltersNode}
                   {dialogueNode}
                 </Space>
               ),
+            },
+            {
+              key: 'network',
+              label: 'Agent链路图',
+              children: agentNetworkNode || <Empty description="暂无Agent链路数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />,
             },
             {
               key: 'rounds',
@@ -106,9 +113,9 @@ const DebateProcessPanel: React.FC<Props> = ({
                 ),
             },
             {
-              key: 'timeline',
-              label: '事件时间线',
-              children:
+              key: 'events',
+              label: '事件明细',
+              children: (
                 timelineItems && timelineItems.length > 0 ? (
                   <div className="process-timeline-wrap">
                     <div className="process-timeline-list">
@@ -120,8 +127,9 @@ const DebateProcessPanel: React.FC<Props> = ({
                     </div>
                   </div>
                 ) : (
-                  <Empty description="暂无时间线记录" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-                ),
+                  <Empty description="暂无事件明细" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                )
+              ),
             },
           ]}
         />

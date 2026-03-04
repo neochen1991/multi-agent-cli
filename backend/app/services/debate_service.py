@@ -7,6 +7,7 @@ Debate Service
 
 import asyncio
 import uuid
+from contextlib import suppress
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -34,7 +35,9 @@ from app.config import settings
 from app.core.event_schema import enrich_event, new_trace_id
 from app.core.observability import metrics_store
 from app.runtime.evidence import normalize_evidence_items
-from app.runtime.judgement import causal_score, has_cross_source_evidence
+from app.runtime.judgement import causal_score, has_cross_source_evidence, score_topology_propagation
+from app.runtime_serve import normalize_execution_mode
+from app.runtime.langgraph.strategy_center import runtime_strategy_center
 from app.repositories.debate_repository import (
     DebateRepository,
     InMemoryDebateRepository,
@@ -141,6 +144,7 @@ class DebateService:
         self,
         incident: Incident,
         max_rounds: Optional[int] = None,
+        execution_mode: str = "standard",
     ) -> DebateSession:
         """
         创建辩论会话
@@ -154,8 +158,16 @@ class DebateService:
         session_id = f"deb_{uuid.uuid4().hex[:8]}"
         
         debate_config: Dict[str, Any] = {}
+        normalized_mode = normalize_execution_mode(execution_mode).value
+        selected_strategy = runtime_strategy_center.select(
+            severity=str(incident.severity or ""),
+            execution_mode=normalized_mode,
+        )
+        strategy_suggest_rounds = int(selected_strategy.get("suggested_max_rounds") or settings.DEBATE_MAX_ROUNDS)
         if max_rounds is not None:
             debate_config["max_rounds"] = max(1, min(8, int(max_rounds)))
+        else:
+            debate_config["max_rounds"] = max(1, min(8, strategy_suggest_rounds))
 
         session_context: Dict[str, Any] = {
             "incident": incident.model_dump(),
@@ -163,9 +175,15 @@ class DebateService:
             "exception_stack": incident.exception_stack,
             "parsed_data": incident.parsed_data,
             "_event_sequence": 0,
+            "execution_mode": normalized_mode,
+            "runtime_strategy": selected_strategy,
         }
         if debate_config:
             session_context["debate_config"] = debate_config
+        if normalized_mode == "quick":
+            cfg = dict(session_context.get("debate_config") or {})
+            cfg["max_rounds"] = 1
+            session_context["debate_config"] = cfg
 
         session = DebateSession(
             id=session_id,
@@ -181,6 +199,8 @@ class DebateService:
             session_id=session_id,
             incident_id=incident.id,
             max_rounds=debate_config.get("max_rounds"),
+            execution_mode=normalized_mode,
+            runtime_strategy=str(selected_strategy.get("name") or ""),
         )
         
         return session
@@ -188,6 +208,10 @@ class DebateService:
     async def get_session(self, session_id: str) -> Optional[DebateSession]:
         """获取辩论会话"""
         return await self._repository.get_session(session_id)
+
+    async def update_session(self, session: DebateSession) -> DebateSession:
+        """更新会话上下文/状态。"""
+        return await self._repository.save_session(session)
     
     async def execute_debate(
         self,
@@ -273,6 +297,11 @@ class DebateService:
                 "retry_failed_only": bool(retry_failed_only),
             }
         )
+        await self._emit_seed_evidence_event(
+            session=session,
+            session_id=session_id,
+            emit=_emit_and_record,
+        )
         
         try:
             # ========== 模块1: 资产采集 ==========
@@ -322,7 +351,20 @@ class DebateService:
                 }
             )
 
+            execution_mode = str(session.context.get("execution_mode") or "standard").strip().lower()
+            runtime_strategy = session.context.get("runtime_strategy")
+            phase_mode = ""
+            if isinstance(runtime_strategy, dict):
+                phase_mode = str(runtime_strategy.get("phase_mode") or "").strip().lower()
             max_attempts = 2
+            allow_peer_fallback_judgment = False
+            if execution_mode in {"quick", "background", "async"} or phase_mode in {
+                "economy",
+                "fast_track",
+                "failfast",
+            }:
+                max_attempts = 1
+                allow_peer_fallback_judgment = True
             attempt = 0
             debate_result: Dict[str, Any] = {}
             while attempt < max_attempts:
@@ -334,6 +376,10 @@ class DebateService:
                         assets,
                         event_callback=_emit_and_record,
                         session_id=session_id,
+                    )
+                    debate_result = self._promote_judge_conclusion(
+                        debate_result,
+                        allow_peer_fallback=allow_peer_fallback_judgment,
                     )
                     if settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION and not self._has_effective_llm_conclusion(
                         debate_result
@@ -640,6 +686,49 @@ class DebateService:
         logger.warning("unknown_round_phase_fallback_to_analysis", raw_phase=raw_phase)
         return DebatePhase.ANALYSIS
 
+    async def _emit_seed_evidence_event(
+        self,
+        *,
+        session: DebateSession,
+        session_id: str,
+        emit,
+    ) -> None:
+        """Emit early evidence so users can see investigation progress immediately."""
+        context = session.context if isinstance(session.context, dict) else {}
+        interface_mapping = context.get("interface_mapping") if isinstance(context.get("interface_mapping"), dict) else {}
+        endpoint = interface_mapping.get("endpoint") if isinstance(interface_mapping.get("endpoint"), dict) else {}
+        log_excerpt = str(context.get("log_content") or "").strip()
+        log_excerpt = log_excerpt[:280] if log_excerpt else ""
+        evidence = {
+            "seed_sources": [
+                "incident_log",
+                "interface_mapping" if interface_mapping else "session_context",
+            ],
+            "log_excerpt": log_excerpt,
+            "mapping": {
+                "matched": bool(interface_mapping.get("matched")),
+                "confidence": interface_mapping.get("confidence"),
+                "method": endpoint.get("method"),
+                "path": endpoint.get("path"),
+                "service": endpoint.get("service"),
+                "owner_team": interface_mapping.get("owner_team"),
+                "owner": interface_mapping.get("owner"),
+            },
+        }
+        first_evidence_at = datetime.utcnow().isoformat()
+        session.context["first_evidence_at"] = first_evidence_at
+        session.updated_at = datetime.utcnow()
+        await self._repository.save_session(session)
+        await emit(
+            {
+                "type": "first_evidence_ready",
+                "phase": DebatePhase.ANALYSIS.value,
+                "session_id": session_id,
+                "first_evidence_at": first_evidence_at,
+                "evidence": evidence,
+            }
+        )
+
     async def cancel_session(self, session_id: str, reason: str = "manual_cancel") -> bool:
         session = await self._repository.get_session(session_id)
         if not session:
@@ -856,6 +945,8 @@ class DebateService:
             "design_assets": assets.get("design_assets", []),
             "interface_mapping": assets.get("interface_mapping", {}),
             "trace_id": context.get("trace_id"),
+            "execution_mode": context.get("execution_mode", "standard"),
+            "runtime_strategy": context.get("runtime_strategy", {}),
         }
         
         debate_config = context.get("debate_config") if isinstance(context.get("debate_config"), dict) else {}
@@ -890,16 +981,89 @@ class DebateService:
         )
 
         # 执行辩论流程
-        debate_timeout = max(30, min(int(settings.DEBATE_TIMEOUT), 300))
-        result = await asyncio.wait_for(
+        strategy = debate_context.get("runtime_strategy")
+        phase_mode = ""
+        if isinstance(strategy, dict):
+            phase_mode = str(strategy.get("phase_mode") or "").strip().lower()
+        timeout_cap = 420
+        if phase_mode == "economy":
+            timeout_cap = 420
+        elif phase_mode in {"fast_track", "failfast"}:
+            timeout_cap = 360
+        elif phase_mode == "standard":
+            timeout_cap = 300
+        debate_timeout = max(30, min(int(settings.DEBATE_TIMEOUT), timeout_cap))
+        debate_context["session_timeout_seconds"] = float(debate_timeout)
+        await self._emit_event(
+            event_callback,
+            {
+                "type": "debate_timeout_budget_applied",
+                "phase": "debating",
+                "timeout_seconds": debate_timeout,
+                "phase_mode": phase_mode or "standard",
+            },
+        )
+        execute_task = asyncio.create_task(
             orchestrator.execute(
                 debate_context,
                 event_callback=_forward_event,
-            ),
-            timeout=debate_timeout,
+            )
         )
+        try:
+            result = await asyncio.wait_for(execute_task, timeout=debate_timeout)
+        except asyncio.TimeoutError:
+            recovered = self._recover_timeout_result(orchestrator=orchestrator, max_rounds=max_rounds)
+            if recovered:
+                recovered = self._promote_judge_conclusion(
+                    recovered,
+                    allow_peer_fallback=True,
+                )
+                if self._has_effective_llm_conclusion(recovered):
+                    await self._emit_event(
+                        event_callback,
+                        {
+                            "type": "debate_timeout_recovered",
+                            "phase": "debating",
+                            "timeout_seconds": debate_timeout,
+                            "runtime_session_id": getattr(orchestrator, "session_id", None),
+                        },
+                    )
+                    logger.warning(
+                        "debate_timeout_recovered",
+                        runtime_session_id=getattr(orchestrator, "session_id", None),
+                        timeout_seconds=debate_timeout,
+                    )
+                    return recovered, getattr(orchestrator, "session_id", None)
+            if not execute_task.done():
+                execute_task.cancel()
+                with suppress(Exception):
+                    await execute_task
+            raise
 
         return result, getattr(orchestrator, "session_id", None)
+
+    def _recover_timeout_result(
+        self,
+        *,
+        orchestrator: Any,
+        max_rounds: int,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            history_cards = orchestrator._history_cards_snapshot(limit=20)
+            payload = orchestrator._build_final_payload(
+                history_cards=history_cards,
+                consensus_reached=False,
+                executed_rounds=max(1, int(max_rounds or 1)),
+            )
+            if not isinstance(payload, dict):
+                return None
+            debate_history = payload.get("debate_history")
+            if not isinstance(debate_history, list) or not debate_history:
+                return None
+            return payload
+        except Exception as exc:
+            logger.warning("debate_timeout_recovery_failed", error=str(exc))
+            return None
 
     @staticmethod
     def _is_placeholder_conclusion(text: str) -> bool:
@@ -907,6 +1071,7 @@ class DebateService:
         if not summary:
             return True
         lowered = summary.lower()
+        compact = lowered.replace(" ", "").replace("_", "")
         blocked_fragments = (
             "需要进一步分析",
             "further analysis",
@@ -921,7 +1086,15 @@ class DebateService:
             "待分析",
             "unknown",
         )
-        return any(fragment in lowered for fragment in blocked_fragments)
+        if any(fragment in lowered for fragment in blocked_fragments):
+            return True
+        if compact in {"timeouterror", "runtimeerror", "errorexception", "unknownerror", "none", "null"}:
+            return True
+        if " " not in summary and len(summary) <= 64:
+            token = summary.strip(":;,.").lower()
+            if token.endswith("error") or token.endswith("exception"):
+                return True
+        return False
 
     @staticmethod
     def _coerce_confidence(value: Any, default: float = 0.0) -> float:
@@ -972,6 +1145,7 @@ class DebateService:
 
         overall_confidence = self._coerce_confidence(debate_result.get("confidence"), default=0.0)
         has_effective_evidence = self._has_meaningful_evidence(final_judgment.get("evidence_chain"))
+        judge_confidence_from_history = 0.0
 
         history = debate_result.get("debate_history")
         if isinstance(history, list):
@@ -985,11 +1159,18 @@ class DebateService:
                     row.get("confidence") or output.get("confidence"),
                     default=0.0,
                 )
+                judge_confidence_from_history = max(judge_confidence_from_history, judge_confidence)
                 if has_effective_evidence and max(root_confidence, overall_confidence, judge_confidence) >= 0.45:
                     return True
                 break
 
         if has_effective_evidence and max(root_confidence, overall_confidence) >= 0.45:
+            return True
+
+        # Quick/background modes may intentionally skip verification planning.
+        # If Judge has produced a non-placeholder summary with moderate confidence,
+        # treat it as an effective conclusion even when evidence_chain is concise.
+        if max(root_confidence, overall_confidence, judge_confidence_from_history) >= 0.55:
             return True
 
         if max(root_confidence, overall_confidence) < 0.45:
@@ -1018,6 +1199,119 @@ class DebateService:
             if confidence >= 0.55:
                 return True
         return False
+
+    def _promote_judge_conclusion(
+        self,
+        debate_result: Dict[str, Any],
+        *,
+        allow_peer_fallback: bool = False,
+    ) -> Dict[str, Any]:
+        if not isinstance(debate_result, dict):
+            return debate_result
+        history = debate_result.get("debate_history")
+        if not isinstance(history, list):
+            return debate_result
+
+        final_judgment = debate_result.get("final_judgment")
+        final_judgment = final_judgment if isinstance(final_judgment, dict) else {}
+        root_cause = final_judgment.get("root_cause")
+        root_summary = ""
+        root_confidence = 0.0
+        if isinstance(root_cause, dict):
+            root_summary = str(root_cause.get("summary") or "").strip()
+            root_confidence = self._coerce_confidence(root_cause.get("confidence"), default=0.0)
+        elif isinstance(root_cause, str):
+            root_summary = root_cause.strip()
+        has_effective_evidence = self._has_meaningful_evidence(final_judgment.get("evidence_chain"))
+
+        has_effective_root = (
+            bool(root_summary)
+            and not self._is_placeholder_conclusion(root_summary)
+            and (root_confidence >= 0.45 or has_effective_evidence)
+        )
+        if has_effective_root:
+            return debate_result
+
+        for row in reversed(history):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("agent_name") or "").strip() != "JudgeAgent":
+                continue
+            output = row.get("output_content")
+            output = output if isinstance(output, dict) else {}
+            judge_judgment = output.get("final_judgment")
+            judge_judgment = judge_judgment if isinstance(judge_judgment, dict) else {}
+            judge_root = judge_judgment.get("root_cause")
+            judge_summary = ""
+            if isinstance(judge_root, dict):
+                judge_summary = str(judge_root.get("summary") or "").strip()
+            elif isinstance(judge_root, str):
+                judge_summary = judge_root.strip()
+            if not judge_summary or self._is_placeholder_conclusion(judge_summary):
+                continue
+            merged = dict(debate_result)
+            merged["final_judgment"] = judge_judgment
+            merged["confidence"] = max(
+                self._coerce_confidence(merged.get("confidence"), default=0.0),
+                self._coerce_confidence(
+                    row.get("confidence") or output.get("confidence"),
+                    default=0.0,
+                ),
+            )
+            return merged
+        if allow_peer_fallback:
+            for row in reversed(history):
+                if not isinstance(row, dict):
+                    continue
+                agent_name = str(row.get("agent_name") or "").strip()
+                if not agent_name or agent_name == "JudgeAgent":
+                    continue
+                output = row.get("output_content")
+                output = output if isinstance(output, dict) else {}
+                conclusion = str(output.get("conclusion") or "").strip()
+                if not conclusion or self._is_placeholder_conclusion(conclusion):
+                    continue
+                confidence = self._coerce_confidence(
+                    row.get("confidence") or output.get("confidence"),
+                    default=0.0,
+                )
+                if confidence < 0.55:
+                    continue
+                evidence_chain = output.get("evidence_chain")
+                if not isinstance(evidence_chain, list):
+                    evidence_chain = []
+                if not evidence_chain:
+                    analysis_text = str(output.get("analysis") or "").strip()
+                    if analysis_text:
+                        evidence_chain = [
+                            {
+                                "type": "analysis",
+                                "description": analysis_text[:220],
+                                "source": agent_name,
+                                "strength": "medium",
+                            }
+                        ]
+                merged = dict(debate_result)
+                merged["final_judgment"] = {
+                    "root_cause": {
+                        "summary": conclusion[:300],
+                        "category": "peer_promoted",
+                        "confidence": confidence,
+                    },
+                    "evidence_chain": evidence_chain,
+                    "fix_recommendation": output.get("fix_recommendation")
+                    if isinstance(output.get("fix_recommendation"), dict)
+                    else {
+                        "summary": "基于高置信专家结论先执行止血与验证，随后补充主裁决复核。",
+                        "steps": ["执行止血动作", "补充指标与日志证据", "复跑裁决验证结论"],
+                    },
+                }
+                merged["confidence"] = max(
+                    self._coerce_confidence(merged.get("confidence"), default=0.0),
+                    confidence,
+                )
+                return merged
+        return debate_result
 
     def _build_degraded_debate_result(
         self,
@@ -1357,8 +1651,10 @@ class DebateService:
         # 构建证据链（统一标准化模型）
         evidence_chain: List[EvidenceItem] = []
         normalized_evidence = normalize_evidence_items(final_judgment.get("evidence_chain"))
-        if not has_cross_source_evidence(normalized_evidence):
+        cross_source_passed = has_cross_source_evidence(normalized_evidence)
+        if not cross_source_passed:
             normalized_evidence.extend(self._fallback_cross_source_evidence(session))
+            cross_source_passed = has_cross_source_evidence(normalized_evidence)
         dedup_keys = set()
         deduped_evidence: List[Dict[str, Any]] = []
         for item in normalized_evidence:
@@ -1523,12 +1819,21 @@ class DebateService:
                     "causal_score": scoring,
                     "topology_score": topology_scoring,
                     "self_consistency": self_consistency,
-                    "cross_source_evidence": has_cross_source_evidence(
-                        [item.model_dump(mode="json") for item in evidence_chain]
-                    ),
+                    "cross_source_evidence": cross_source_passed,
                 },
             }
         )
+        if not cross_source_passed:
+            action_items.append(
+                {
+                    "type": "evidence_gate",
+                    "summary": "跨源证据不足：建议补充日志+代码/领域/指标证据后重跑分析",
+                    "details": {
+                        "required_sources": ["runtime_log", "code_repo|domain_asset|metrics_snapshot"],
+                        "status": "failed",
+                    },
+                }
+            )
 
         return DebateResult(
             session_id=session.id,
@@ -1536,6 +1841,7 @@ class DebateService:
             root_cause=root_cause_summary,
             root_cause_category=root_cause_category,
             confidence=confidence,
+            cross_source_passed=cross_source_passed,
             root_cause_candidates=root_cause_candidates,
             evidence_chain=evidence_chain,
             fix_recommendation=fix_recommendation,
@@ -1555,49 +1861,10 @@ class DebateService:
         session: DebateSession,
         evidence: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        assets = session.context.get("assets") if isinstance(session.context, dict) else {}
-        assets = assets if isinstance(assets, dict) else {}
-        mapping = assets.get("interface_mapping") if isinstance(assets.get("interface_mapping"), dict) else {}
-        endpoint = mapping.get("matched_endpoint") if isinstance(mapping.get("matched_endpoint"), dict) else {}
-
-        node_signals: List[str] = []
-        if str(endpoint.get("service") or "").strip():
-            node_signals.append(f"service:{str(endpoint.get('service')).strip()}")
-        if str(mapping.get("domain") or "").strip():
-            node_signals.append(f"domain:{str(mapping.get('domain')).strip()}")
-        if str(mapping.get("aggregate") or "").strip():
-            node_signals.append(f"aggregate:{str(mapping.get('aggregate')).strip()}")
-        if str(mapping.get("owner_team") or "").strip():
-            node_signals.append(f"team:{str(mapping.get('owner_team')).strip()}")
-
-        propagation_hits = 0
-        endpoint_path = str(endpoint.get("path") or "").strip().lower()
-        endpoint_service = str(endpoint.get("service") or "").strip().lower()
-        owner_team = str(mapping.get("owner_team") or "").strip().lower()
-        for row in evidence:
-            text = " ".join(
-                [
-                    str(row.get("description") or ""),
-                    str(row.get("source_ref") or ""),
-                    str(row.get("source") or ""),
-                ]
-            ).lower()
-            if endpoint_path and endpoint_path in text:
-                propagation_hits += 1
-            if endpoint_service and endpoint_service in text:
-                propagation_hits += 1
-            if owner_team and owner_team in text:
-                propagation_hits += 1
-
-        topology_score = 0.0
-        if node_signals:
-            topology_score += min(0.45, len(node_signals) * 0.12)
-        topology_score += min(0.55, propagation_hits * 0.1)
-        return {
-            "topology_score": round(max(0.0, min(1.0, topology_score)), 3),
-            "node_signals": node_signals,
-            "propagation_hits": propagation_hits,
-        }
+        return score_topology_propagation(
+            context=session.context if isinstance(session.context, dict) else {},
+            evidence=evidence,
+        )
 
     def _build_root_cause_candidates(
         self,
@@ -1619,6 +1886,12 @@ class DebateService:
         primary_summary = str(primary_root_cause or "").strip()
         if primary_summary:
             primary_adj = max(0.0, min(1.0, float(primary_confidence) * 0.8 + float(topology_score) * 0.2))
+            conflict_points: List[str] = []
+            uncertainty_sources: List[str] = []
+            if primary_adj < 0.7:
+                uncertainty_sources.append("主结论置信度仍在中等区间")
+            if topology_score < 0.4:
+                uncertainty_sources.append("拓扑传播证据偏弱")
             candidates.append(
                 RootCauseCandidate(
                     rank=1,
@@ -1627,6 +1900,9 @@ class DebateService:
                     confidence=round(primary_adj, 3),
                     confidence_interval=[round(max(0.0, primary_adj - 0.12), 3), round(min(1.0, primary_adj + 0.1), 3)],
                     evidence_refs=base_refs,
+                    evidence_coverage_count=len(base_refs),
+                    conflict_points=conflict_points,
+                    uncertainty_sources=uncertainty_sources,
                 )
             )
             seen.add(primary_summary.lower())
@@ -1669,6 +1945,13 @@ class DebateService:
                     confidence=float(row.get("confidence") or 0.0),
                     confidence_interval=list(row.get("interval") or []),
                     evidence_refs=base_refs,
+                    evidence_coverage_count=len(base_refs),
+                    conflict_points=[
+                        "与主结论存在竞争解释，尚需更多跨源证据"
+                    ],
+                    uncertainty_sources=[
+                        "来自单一Agent结论，尚未完成全链路交叉验证"
+                    ],
                 )
             )
         return candidates

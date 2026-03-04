@@ -249,8 +249,23 @@ class HybridRouter:
             str(agent_name).strip() in seen_agents
             for agent_name in list(orchestrator.PARALLEL_ANALYSIS_AGENTS)
         )
-        critique_enabled = True
+        critique_enabled = bool(getattr(orchestrator, "_enable_critique", True))
         if analysis_done and not judge_started:
+            if not critique_enabled:
+                decision = orchestrator._route_guardrail(
+                    state=state,
+                    round_cards=round_cards,
+                    route_decision={
+                        "next_step": "speak:JudgeAgent",
+                        "should_stop": False,
+                        "stop_reason": "",
+                        "reason": "分析阶段完成（无批判环节），直接进入 JudgeAgent 裁决",
+                    },
+                )
+                return StrategyResult(
+                    decision=decision,
+                    mode="langgraph_supervisor_post_analysis_judge",
+                )
             critic_done = int(round_counts.get("CriticAgent", 0)) >= 1
             rebuttal_done = int(round_counts.get("RebuttalAgent", 0)) >= 1
             if critique_enabled and not critic_done:

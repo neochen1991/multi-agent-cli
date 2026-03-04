@@ -89,6 +89,7 @@ export interface DebateResult {
   root_cause: string;
   root_cause_category?: string;
   confidence: number;
+  cross_source_passed?: boolean;
   root_cause_candidates?: Array<{
     rank: number;
     summary: string;
@@ -96,6 +97,9 @@ export interface DebateResult {
     confidence: number;
     confidence_interval?: number[];
     evidence_refs?: string[];
+    evidence_coverage_count?: number;
+    conflict_points?: string[];
+    uncertainty_sources?: string[];
   }>;
   evidence_chain?: Array<{
     evidence_id?: string;
@@ -244,23 +248,45 @@ export interface CMDBSourceConfig {
   verify_ssl: boolean;
 }
 
+export interface PrometheusSourceConfig {
+  enabled: boolean;
+  endpoint: string;
+  api_token: string;
+  timeout_seconds: number;
+  verify_ssl: boolean;
+}
+
+export interface LokiSourceConfig {
+  enabled: boolean;
+  endpoint: string;
+  api_token: string;
+  timeout_seconds: number;
+  verify_ssl: boolean;
+}
+
 export interface AgentToolingConfig {
   code_repo: CodeRepoToolConfig;
   log_file: LogFileToolConfig;
   domain_excel: DomainExcelToolConfig;
   telemetry_source?: TelemetrySourceConfig;
   cmdb_source?: CMDBSourceConfig;
+  prometheus_source?: PrometheusSourceConfig;
+  loki_source?: LokiSourceConfig;
   updated_at: string;
 }
 
 export interface BenchmarkSummary {
   cases: number;
   top1_rate: number;
+  top3_rate?: number;
   avg_overlap_score: number;
   avg_duration_ms: number;
+  avg_first_evidence_latency_ms?: number;
+  p95_first_evidence_latency_ms?: number;
   failure_rate: number;
   timeout_rate: number;
   empty_conclusion_rate: number;
+  cross_source_evidence_rate?: number;
 }
 
 export interface BenchmarkRunResult {
@@ -309,6 +335,7 @@ export interface ReplayResponse {
   rendered_steps: string[];
   summary: Record<string, unknown>;
   timeline: Array<Record<string, unknown>>;
+  filters?: Record<string, unknown>;
   key_decisions?: Array<Record<string, unknown>>;
   evidence_refs?: string[];
 }
@@ -326,6 +353,41 @@ export interface ToolAuditResponse {
   session_id: string;
   count: number;
   items: LineageRecord[];
+}
+
+export interface ToolConnector {
+  name: string;
+  resource: string;
+  tools: string[];
+  connected?: boolean;
+  healthy?: boolean;
+  status?: string;
+  last_probe_at?: string;
+  last_error?: string;
+  reconnect_attempts?: number;
+}
+
+export interface ToolTrialRunRequest {
+  tool_name: string;
+  use_tool?: boolean;
+  task?: string;
+  focus?: string;
+  expected_output?: string;
+  compact_context?: Record<string, unknown>;
+  incident_context?: Record<string, unknown>;
+}
+
+export interface ToolTrialRunResponse {
+  tool_name: string;
+  agent_name: string;
+  name: string;
+  enabled: boolean;
+  used: boolean;
+  status: string;
+  summary: string;
+  data: Record<string, unknown>;
+  command_gate: Record<string, unknown>;
+  audit_log: Array<Record<string, unknown>>;
 }
 
 export const authApi = {
@@ -378,11 +440,14 @@ export const incidentApi = {
 export const debateApi = {
   async createSession(
     incidentId: string,
-    options?: { maxRounds?: number },
+    options?: { maxRounds?: number; mode?: 'standard' | 'quick' | 'background' | 'async' },
   ): Promise<{ id: string; incident_id: string; status: string }> {
     const params: Record<string, string | number> = { incident_id: incidentId };
     if (typeof options?.maxRounds === 'number' && Number.isFinite(options.maxRounds)) {
       params.max_rounds = Math.max(1, Math.min(8, Math.trunc(options.maxRounds)));
+    }
+    if (options?.mode) {
+      params.mode = options.mode;
     }
     const { data } = await api.post('/debates/', null, { params });
     return data;
@@ -414,12 +479,35 @@ export const debateApi = {
     const { data } = await api.post(`/debates/${sessionId}/execute-async`, null, { params });
     return data;
   },
+  async executeBackground(
+    sessionId: string,
+    options?: { retryFailedOnly?: boolean },
+  ): Promise<{ task_id: string; status: string }> {
+    const params =
+      typeof options?.retryFailedOnly === 'boolean'
+        ? { retry_failed_only: options.retryFailedOnly }
+        : undefined;
+    const { data } = await api.post(`/debates/${sessionId}/execute-background`, null, { params });
+    return data;
+  },
   async cancel(sessionId: string): Promise<{ session_id: string; cancelled: boolean }> {
     const { data } = await api.post(`/debates/${sessionId}/cancel`);
     return data;
   },
   async getTask(taskId: string): Promise<{ task_id: string; status: string; result?: Record<string, unknown>; error?: string }> {
     const { data } = await api.get(`/debates/tasks/${taskId}`);
+    return data;
+  },
+  async getOutputRef(refId: string): Promise<{
+    ref_id: string;
+    found: boolean;
+    session_id: string;
+    category: string;
+    content: string;
+    metadata: Record<string, unknown>;
+    created_at: string;
+  }> {
+    const { data } = await api.get(`/debates/output-refs/${refId}`);
     return data;
   },
 };
@@ -452,6 +540,10 @@ export const assetApi = {
     const { data } = await api.get<AssetFusion>(`/assets/fusion/${incidentId}`);
     return data;
   },
+  async resources(): Promise<Record<string, unknown>> {
+    const { data } = await api.get<Record<string, unknown>>('/assets/resources');
+    return data;
+  },
   async locate(logContent: string, symptom?: string): Promise<InterfaceLocateResult> {
     const { data } = await api.post<InterfaceLocateResult>('/assets/locate', {
       log_content: logContent,
@@ -474,12 +566,49 @@ export const settingsApi = {
     const { data } = await api.get<ToolRegistryItem[]>('/settings/tooling/registry');
     return data;
   },
-  async getToolConnectors(): Promise<Array<Record<string, unknown>>> {
-    const { data } = await api.get<Array<Record<string, unknown>>>('/settings/tooling/connectors');
+  async getToolRegistryItem(toolName: string): Promise<ToolRegistryItem> {
+    const { data } = await api.get<ToolRegistryItem>(`/settings/tooling/registry/${encodeURIComponent(toolName)}`);
+    return data;
+  },
+  async getToolConnectors(): Promise<ToolConnector[]> {
+    const { data } = await api.get<ToolConnector[]>('/settings/tooling/connectors');
+    return data;
+  },
+  async connectToolConnector(connectorName: string): Promise<ToolConnector> {
+    const { data } = await api.post<ToolConnector>(
+      `/settings/tooling/connectors/${encodeURIComponent(connectorName)}/connect`,
+    );
+    return data;
+  },
+  async disconnectToolConnector(connectorName: string): Promise<ToolConnector> {
+    const { data } = await api.post<ToolConnector>(
+      `/settings/tooling/connectors/${encodeURIComponent(connectorName)}/disconnect`,
+    );
+    return data;
+  },
+  async listConnectorTools(connectorName: string): Promise<Record<string, unknown>> {
+    const { data } = await api.get<Record<string, unknown>>(
+      `/settings/tooling/connectors/${encodeURIComponent(connectorName)}/tools`,
+    );
+    return data;
+  },
+  async callConnectorTool(
+    connectorName: string,
+    toolName: string,
+    input: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const { data } = await api.post<Record<string, unknown>>(
+      `/settings/tooling/connectors/${encodeURIComponent(connectorName)}/call-tool/${encodeURIComponent(toolName)}`,
+      { input },
+    );
     return data;
   },
   async getToolAudit(sessionId: string): Promise<ToolAuditResponse> {
     const { data } = await api.get<ToolAuditResponse>(`/settings/tooling/audit/${sessionId}`);
+    return data;
+  },
+  async trialRunTool(payload: ToolTrialRunRequest): Promise<ToolTrialRunResponse> {
+    const { data } = await api.post<ToolTrialRunResponse>('/settings/tooling/trial-run', payload);
     return data;
   },
 };
@@ -506,8 +635,18 @@ export const lineageApi = {
     const { data } = await api.get<LineageResponse>(`/debates/${sessionId}/lineage`, { params: { limit } });
     return data;
   },
-  async replay(sessionId: string, limit = 120): Promise<ReplayResponse> {
-    const { data } = await api.get<ReplayResponse>(`/debates/${sessionId}/replay`, { params: { limit } });
+  async replay(
+    sessionId: string,
+    limit = 120,
+    filters?: { phase?: string; agent?: string },
+  ): Promise<ReplayResponse> {
+    const { data } = await api.get<ReplayResponse>(`/debates/${sessionId}/replay`, {
+      params: {
+        limit,
+        phase: filters?.phase || '',
+        agent: filters?.agent || '',
+      },
+    });
     return data;
   },
 };
@@ -602,8 +741,47 @@ export const governanceApi = {
     });
     return data;
   },
+  async externalSyncTemplates(): Promise<Record<string, unknown>> {
+    const { data } = await api.get<Record<string, unknown>>('/governance/external-sync/templates');
+    return data;
+  },
+  async externalSyncSettings(): Promise<Record<string, unknown>> {
+    const { data } = await api.get<Record<string, unknown>>('/governance/external-sync/settings');
+    return data;
+  },
+  async updateExternalSyncSettings(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const { data } = await api.put<Record<string, unknown>>('/governance/external-sync/settings', payload);
+    return data;
+  },
   async syncExternal(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     const { data } = await api.post<Record<string, unknown>>('/governance/external-sync', payload);
+    return data;
+  },
+  async teamMetrics(days = 7, limit = 50): Promise<{ window_days: number; generated_at: string; items: Array<Record<string, unknown>> }> {
+    const { data } = await api.get<{ window_days: number; generated_at: string; items: Array<Record<string, unknown>> }>(
+      '/governance/team-metrics',
+      { params: { days, limit } },
+    );
+    return data;
+  },
+  async sessionReplay(sessionId: string, limit = 120): Promise<Record<string, unknown>> {
+    const { data } = await api.get<Record<string, unknown>>(`/governance/session-replay/${sessionId}`, {
+      params: { limit },
+    });
+    return data;
+  },
+  async runtimeStrategies(): Promise<Record<string, unknown>> {
+    const { data } = await api.get<Record<string, unknown>>('/governance/runtime-strategies');
+    return data;
+  },
+  async runtimeStrategyActive(): Promise<Record<string, unknown>> {
+    const { data } = await api.get<Record<string, unknown>>('/governance/runtime-strategies/active');
+    return data;
+  },
+  async updateRuntimeStrategyActive(profile: string): Promise<Record<string, unknown>> {
+    const { data } = await api.put<Record<string, unknown>>('/governance/runtime-strategies/active', {
+      profile,
+    });
     return data;
   },
 };

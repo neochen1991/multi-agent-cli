@@ -113,9 +113,30 @@ def merge_round_and_message_cards(
     return merged[-max(1, int(limit or 1)) :]
 
 
+def prune_history_cards(
+    history_cards: Sequence[AgentEvidence],
+    *,
+    limit: int = 20,
+) -> tuple[List[AgentEvidence], dict[str, int]]:
+    cards = list(history_cards or [])
+    cap = max(1, int(limit or 1))
+    if len(cards) <= cap:
+        return cards, {"pruned_count": 0, "saved_chars": 0}
+    removed = cards[:-cap]
+    kept = cards[-cap:]
+    saved_chars = 0
+    for card in removed:
+        saved_chars += len(str(card.summary or ""))
+        saved_chars += len(str(card.conclusion or ""))
+        for item in list(card.evidence_chain or [])[:3]:
+            saved_chars += len(str(item or ""))
+    return kept, {"pruned_count": len(removed), "saved_chars": saved_chars}
+
+
 __all__ = [
     "message_signature",
     "dedupe_new_messages",
     "messages_to_cards",
     "merge_round_and_message_cards",
+    "prune_history_cards",
 ]

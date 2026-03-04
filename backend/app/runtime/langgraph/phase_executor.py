@@ -35,8 +35,13 @@ class PhaseExecutor:
         analysis_specs = {spec.name: spec for spec in orchestrator._agent_sequence() if spec.phase == "analysis"}
         if not analysis_specs:
             return
-        commanded_targets = [name for name in dict(agent_commands or {}).keys() if name in analysis_specs]
-        target_names = commanded_targets or [name for name in orchestrator.PARALLEL_ANALYSIS_AGENTS if name in analysis_specs]
+        allowed_targets = [
+            name for name in orchestrator.PARALLEL_ANALYSIS_AGENTS if name in analysis_specs
+        ]
+        commanded_targets = [
+            name for name in dict(agent_commands or {}).keys() if name in set(allowed_targets)
+        ]
+        target_names = commanded_targets or allowed_targets
         parallel_specs = [analysis_specs[name] for name in target_names]
         if not parallel_specs:
             return

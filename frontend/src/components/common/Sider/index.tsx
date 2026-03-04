@@ -5,7 +5,6 @@ import {
   ApartmentOutlined,
   DeploymentUnitOutlined,
   ExperimentOutlined,
-  FireOutlined,
   SafetyCertificateOutlined,
   ToolOutlined,
   HistoryOutlined,
@@ -47,11 +46,6 @@ const AppSider: React.FC = () => {
         key: '/workbench',
         icon: <DeploymentUnitOutlined />,
         label: '调查工作台',
-      },
-      {
-        key: '/war-room',
-        icon: <FireOutlined />,
-        label: '战情页',
       },
       {
         key: '/benchmark',

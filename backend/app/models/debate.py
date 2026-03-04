@@ -159,6 +159,9 @@ class RootCauseCandidate(BaseModel):
     confidence: float = Field(default=0.0, ge=0, le=1, description="候选置信度")
     confidence_interval: List[float] = Field(default_factory=list, description="置信区间 [low, high]")
     evidence_refs: List[str] = Field(default_factory=list, description="证据引用")
+    evidence_coverage_count: int = Field(default=0, ge=0, description="覆盖证据数")
+    conflict_points: List[str] = Field(default_factory=list, description="冲突点")
+    uncertainty_sources: List[str] = Field(default_factory=list, description="不确定性来源")
 
 
 class DebateResult(BaseModel):
@@ -170,6 +173,7 @@ class DebateResult(BaseModel):
     root_cause: str = Field(..., description="根因")
     root_cause_category: Optional[str] = Field(None, description="根因类别")
     confidence: float = Field(..., ge=0, le=1, description="置信度")
+    cross_source_passed: bool = Field(default=False, description="是否通过跨源证据门禁")
     root_cause_candidates: List[RootCauseCandidate] = Field(default_factory=list, description="Top-K 根因候选")
     
     # 证据链

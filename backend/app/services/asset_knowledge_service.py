@@ -221,6 +221,27 @@ class AssetKnowledgeService:
             "cases": cases,
         }
 
+    def list_resource_sources(self) -> Dict[str, Any]:
+        """列出资源源入口（本地优先，外部可插拔）。"""
+        files = {
+            "design": str((self._base_dir / self.DESIGN_FILE)),
+            "responsibility": str((self._base_dir / self.RESPONSIBILITY_FILE)),
+            "cases": str((self._base_dir / self.CASE_FILE)),
+        }
+        return {
+            "mode": "local-first",
+            "enabled_sources": [
+                {"name": "local_markdown_design", "path": files["design"]},
+                {"name": "local_markdown_responsibility", "path": files["responsibility"]},
+                {"name": "local_markdown_cases", "path": files["cases"]},
+            ],
+            "optional_external_sources": [
+                {"name": "cmdb_api", "enabled": False},
+                {"name": "telemetry_api", "enabled": False},
+                {"name": "git_repo_remote", "enabled": False},
+            ],
+        }
+
     def _is_changed(self, files: Dict[str, Path]) -> bool:
         for path in files.values():
             if not path.exists():

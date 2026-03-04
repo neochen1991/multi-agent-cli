@@ -10,6 +10,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
 from app.governance.system_card import build_system_card, estimate_cost
+from app.runtime.langgraph.strategy_center import runtime_strategy_center
 from app.services.feedback_service import feedback_service
 from app.services.governance_ops_service import governance_ops_service
 from app.services.remediation_service import remediation_service
@@ -78,6 +79,15 @@ class ExternalSyncRequest(BaseModel):
     direction: str = Field(default="outbound", pattern="^(outbound|inbound)$")
     action: str = Field(default="notify")
     payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ExternalSyncSettingsRequest(BaseModel):
+    enabled: bool = Field(default=False)
+    providers: List[str] = Field(default_factory=list)
+
+
+class RuntimeStrategyRequest(BaseModel):
+    profile: str = Field(default="balanced")
 
 
 def _metrics_dir() -> Path:
@@ -200,6 +210,56 @@ async def external_sync(payload: ExternalSyncRequest):
 async def list_external_sync(limit: int = Query(100, ge=1, le=1000)):
     items = await governance_ops_service.list_external_sync(limit=limit)
     return {"items": items}
+
+
+@router.get("/external-sync/templates", summary="外部协同字段映射模板")
+async def external_sync_templates():
+    return await governance_ops_service.external_sync_templates()
+
+
+@router.get("/external-sync/settings", summary="外部协同自动同步设置")
+async def external_sync_settings():
+    return await governance_ops_service.get_external_sync_settings()
+
+
+@router.put("/external-sync/settings", summary="更新外部协同自动同步设置")
+async def update_external_sync_settings(payload: ExternalSyncSettingsRequest):
+    return await governance_ops_service.update_external_sync_settings(payload.model_dump(mode="json"))
+
+
+@router.get("/runtime-strategies", summary="运行策略模板列表")
+async def runtime_strategies():
+    return {"items": runtime_strategy_center.list_profiles()}
+
+
+@router.get("/runtime-strategies/active", summary="当前运行策略")
+async def runtime_strategy_active():
+    active = runtime_strategy_center.get_active()
+    profile = runtime_strategy_center.get_profile(str(active.get("active_profile") or "balanced"))
+    return {**active, "profile": profile}
+
+
+@router.put("/runtime-strategies/active", summary="设置当前运行策略")
+async def update_runtime_strategy_active(payload: RuntimeStrategyRequest):
+    active = runtime_strategy_center.set_active(payload.profile)
+    profile = runtime_strategy_center.get_profile(str(active.get("active_profile") or "balanced"))
+    return {**active, "profile": profile}
+
+
+@router.get("/team-metrics", summary="团队治理指标")
+async def team_metrics(
+    days: int = Query(7, ge=1, le=90, description="统计时间窗（天）"),
+    limit: int = Query(50, ge=1, le=500, description="返回团队条目数"),
+):
+    return await governance_ops_service.team_metrics(days=days, limit=limit)
+
+
+@router.get("/session-replay/{session_id}", summary="按 session 回放关键决策路径")
+async def session_replay(
+    session_id: str,
+    limit: int = Query(120, ge=1, le=1000, description="回放步数上限"),
+):
+    return await governance_ops_service.session_replay(session_id=session_id, limit=limit)
 
 
 @router.post("/remediation/propose", summary="创建修复提案")

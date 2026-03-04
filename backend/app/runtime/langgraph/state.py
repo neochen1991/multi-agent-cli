@@ -217,6 +217,105 @@ class OutputState(TypedDict, total=False):
     final_payload: Dict[str, Any]
 
 
+_PHASE_KEY_MAP: Dict[str, str] = {
+    "current_round": "current_round",
+    "executed_rounds": "executed_rounds",
+    "consensus_reached": "consensus_reached",
+    "continue_next_round": "continue_next_round",
+}
+
+_ROUTING_KEY_MAP: Dict[str, str] = {
+    "next_step": "next_step",
+    "agent_commands": "agent_commands",
+    "discussion_step_count": "discussion_step_count",
+    "max_discussion_steps": "max_discussion_steps",
+    "round_start_turn_index": "round_start_turn_index",
+    "agent_mailbox": "agent_mailbox",
+    "supervisor_stop_requested": "supervisor_stop_requested",
+    "supervisor_stop_reason": "supervisor_stop_reason",
+    "supervisor_notes": "supervisor_notes",
+}
+
+_OUTPUT_KEY_MAP: Dict[str, str] = {
+    "history_cards": "history_cards",
+    "agent_outputs": "agent_outputs",
+    "evidence_chain": "evidence_chain",
+    "claims": "claims",
+    "open_questions": "open_questions",
+    "final_payload": "final_payload",
+}
+
+
+def _mapping_value(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    value = payload.get(key)
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
+def flatten_structured_state_view(state: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Build a flat state view from both flat + structured fields.
+
+    Precedence: structured fields (`phase_state/routing_state/output_state`)
+    override same-name flat fields when both exist.
+    """
+    payload = dict(state or {})
+    phase = _mapping_value(payload, "phase_state")
+    routing = _mapping_value(payload, "routing_state")
+    output = _mapping_value(payload, "output_state")
+
+    flat: Dict[str, Any] = {}
+    for flat_key, nested_key in _PHASE_KEY_MAP.items():
+        if nested_key in phase:
+            flat[flat_key] = phase.get(nested_key)
+        elif flat_key in payload:
+            flat[flat_key] = payload.get(flat_key)
+    for flat_key, nested_key in _ROUTING_KEY_MAP.items():
+        if nested_key in routing:
+            flat[flat_key] = routing.get(nested_key)
+        elif flat_key in payload:
+            flat[flat_key] = payload.get(flat_key)
+    for flat_key, nested_key in _OUTPUT_KEY_MAP.items():
+        if nested_key in output:
+            flat[flat_key] = output.get(nested_key)
+        elif flat_key in payload:
+            flat[flat_key] = payload.get(flat_key)
+    return flat
+
+
+def flatten_structured_overrides(update: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Extract explicitly provided flat overrides from partial updates.
+
+    Unlike flatten_structured_state_view, this helper only emits keys that are
+    explicitly present in the update payload (either flat or nested), so partial
+    node updates won't accidentally inject default values.
+    """
+    payload = dict(update or {})
+    phase = _mapping_value(payload, "phase_state")
+    routing = _mapping_value(payload, "routing_state")
+    output = _mapping_value(payload, "output_state")
+
+    overrides: Dict[str, Any] = {}
+    for flat_key, nested_key in _PHASE_KEY_MAP.items():
+        if flat_key in payload:
+            overrides[flat_key] = payload.get(flat_key)
+        elif nested_key in phase:
+            overrides[flat_key] = phase.get(nested_key)
+    for flat_key, nested_key in _ROUTING_KEY_MAP.items():
+        if flat_key in payload:
+            overrides[flat_key] = payload.get(flat_key)
+        elif nested_key in routing:
+            overrides[flat_key] = routing.get(nested_key)
+    for flat_key, nested_key in _OUTPUT_KEY_MAP.items():
+        if flat_key in payload:
+            overrides[flat_key] = payload.get(flat_key)
+        elif nested_key in output:
+            overrides[flat_key] = output.get(nested_key)
+    return overrides
+
+
 class DebateExecState(DebateMessagesState):
     """
     LangGraph 辩论执行状态定义。
@@ -623,30 +722,32 @@ def structured_state_snapshot(state: Mapping[str, Any]) -> Dict[str, Dict[str, A
     - 新代码可消费 phase_state/routing_state/output_state
     """
 
+    flat = flatten_structured_state_view(state)
+
     phase_state: PhaseState = {
-        "current_round": int(state.get("current_round") or 0),
-        "executed_rounds": int(state.get("executed_rounds") or 0),
-        "consensus_reached": bool(state.get("consensus_reached") or False),
-        "continue_next_round": bool(state.get("continue_next_round") or False),
+        "current_round": int(flat.get("current_round") or 0),
+        "executed_rounds": int(flat.get("executed_rounds") or 0),
+        "consensus_reached": bool(flat.get("consensus_reached") or False),
+        "continue_next_round": bool(flat.get("continue_next_round") or False),
     }
     routing_state: RoutingState = {
-        "next_step": str(state.get("next_step") or ""),
-        "agent_commands": dict(state.get("agent_commands") or {}),
-        "discussion_step_count": int(state.get("discussion_step_count") or 0),
-        "max_discussion_steps": int(state.get("max_discussion_steps") or 0),
-        "round_start_turn_index": int(state.get("round_start_turn_index") or 0),
-        "agent_mailbox": dict(state.get("agent_mailbox") or {}),
-        "supervisor_stop_requested": bool(state.get("supervisor_stop_requested") or False),
-        "supervisor_stop_reason": str(state.get("supervisor_stop_reason") or ""),
-        "supervisor_notes": list(state.get("supervisor_notes") or []),
+        "next_step": str(flat.get("next_step") or ""),
+        "agent_commands": dict(flat.get("agent_commands") or {}),
+        "discussion_step_count": int(flat.get("discussion_step_count") or 0),
+        "max_discussion_steps": int(flat.get("max_discussion_steps") or 0),
+        "round_start_turn_index": int(flat.get("round_start_turn_index") or 0),
+        "agent_mailbox": dict(flat.get("agent_mailbox") or {}),
+        "supervisor_stop_requested": bool(flat.get("supervisor_stop_requested") or False),
+        "supervisor_stop_reason": str(flat.get("supervisor_stop_reason") or ""),
+        "supervisor_notes": list(flat.get("supervisor_notes") or []),
     }
     output_state: OutputState = {
-        "history_cards": list(state.get("history_cards") or []),
-        "agent_outputs": dict(state.get("agent_outputs") or {}),
-        "evidence_chain": list(state.get("evidence_chain") or []),
-        "claims": list(state.get("claims") or []),
-        "open_questions": list(state.get("open_questions") or []),
-        "final_payload": dict(state.get("final_payload") or {}),
+        "history_cards": list(flat.get("history_cards") or []),
+        "agent_outputs": dict(flat.get("agent_outputs") or {}),
+        "evidence_chain": list(flat.get("evidence_chain") or []),
+        "claims": list(flat.get("claims") or []),
+        "open_questions": list(flat.get("open_questions") or []),
+        "final_payload": dict(flat.get("final_payload") or {}),
     }
     return {
         "phase_state": phase_state,
@@ -660,7 +761,35 @@ def sync_structured_state(state_update: Mapping[str, Any]) -> Dict[str, Any]:
     为状态更新结果附加分层状态快照字段。
     """
 
-    return {**dict(state_update), **structured_state_snapshot(state_update)}
+    payload = dict(state_update or {})
+    flat = flatten_structured_state_view(payload)
+    merged = {**payload, **flat}
+    return {**merged, **structured_state_snapshot(merged)}
+
+
+def build_session_init_update(max_discussion_steps: int) -> Dict[str, Any]:
+    """Build runtime init update payload with canonical defaults."""
+    seed = {
+        "history_cards": [],
+        "messages": [],
+        "claims": [],
+        "open_questions": [],
+        "agent_outputs": {},
+        "consensus_reached": False,
+        "executed_rounds": 0,
+        "current_round": 0,
+        "continue_next_round": False,
+        "agent_commands": {},
+        "next_step": "",
+        "round_start_turn_index": 0,
+        "agent_mailbox": {},
+        "discussion_step_count": 0,
+        "max_discussion_steps": int(max_discussion_steps or 12),
+        "supervisor_stop_requested": False,
+        "supervisor_stop_reason": "",
+        "supervisor_notes": [],
+    }
+    return sync_structured_state(seed)
 
 
 # ============================================================================
@@ -927,6 +1056,9 @@ __all__ = [
     "get_state_summary",
     "structured_state_snapshot",
     "sync_structured_state",
+    "flatten_structured_state_view",
+    "flatten_structured_overrides",
+    "build_session_init_update",
     # State Accessor
     "StateAccessor",
 ]

@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     LLM_CONNECT_TIMEOUT: Optional[int] = None
     LLM_REQUEST_TIMEOUT: Optional[int] = None
     LLM_TOTAL_TIMEOUT: Optional[int] = None
+    LLM_QUEUE_TIMEOUT: Optional[int] = None
     LLM_ASSET_TIMEOUT: Optional[int] = None
     LLM_ANALYSIS_TIMEOUT: Optional[int] = None
     LLM_REVIEW_TIMEOUT: Optional[int] = None
@@ -103,6 +104,8 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
     ALERT_ERROR_RATE_THRESHOLD: float = 0.2
+    TOOL_GIT_HOST_ALLOWLIST: List[str] = Field(default=["github.com", "gitlab.com", "gitee.com"])
+    TOOL_REMOTE_HTTP_ALLOWLIST: List[str] = Field(default=[])
 
     # Checkpointer 配置
     CHECKPOINT_BACKEND: str = Field(default="memory")  # memory | sqlite
@@ -113,6 +116,15 @@ class Settings(BaseSettings):
     def parse_cors_origins(cls, v):
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",")]
+        return v
+
+    @field_validator("TOOL_GIT_HOST_ALLOWLIST", "TOOL_REMOTE_HTTP_ALLOWLIST", mode="before")
+    @classmethod
+    def parse_host_allowlists(cls, v):
+        if isinstance(v, str):
+            return [item.strip().lower() for item in v.split(",") if item.strip()]
+        if isinstance(v, list):
+            return [str(item).strip().lower() for item in v if str(item).strip()]
         return v
 
     @field_validator("LOCAL_STORE_BACKEND", mode="before")
@@ -186,6 +198,10 @@ class Settings(BaseSettings):
     @property
     def llm_total_timeout(self) -> int:
         return self.LLM_TOTAL_TIMEOUT or max(25, min(self.llm_timeout, 60))
+
+    @property
+    def llm_queue_timeout(self) -> int:
+        return self.LLM_QUEUE_TIMEOUT or max(4, min(self.llm_total_timeout, 15))
 
     @property
     def llm_asset_timeout(self) -> int:

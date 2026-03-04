@@ -9,6 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
+from app.runtime.langgraph.state import (
+    flatten_structured_overrides,
+    flatten_structured_state_view,
+)
 from app.runtime.messages import AgentEvidence
 
 
@@ -28,12 +32,21 @@ class StateTransitionService:
         state: Dict[str, Any],
         result: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        base_state = flatten_structured_state_view(state or {})
+        result_payload = dict(result or {})
+        result_overrides = flatten_structured_overrides(result_payload)
+
         current_messages = list(state.get("messages") or [])
-        prev_history_cards = list(state.get("history_cards") or [])
-        next_history_cards = list((result or {}).get("history_cards") or state.get("history_cards") or [])
+        prev_history_cards = list(base_state.get("history_cards") or [])
+        has_history_update = "history_cards" in result_overrides
+        next_history_cards = (
+            list(result_overrides.get("history_cards") or [])
+            if has_history_update
+            else prev_history_cards
+        )
         new_cards = next_history_cards[len(prev_history_cards):]
 
-        explicit_messages = list((result or {}).get("messages") or [])
+        explicit_messages = list(result_payload.get("messages") or [])
         derived_messages = self.message_deltas_from_cards(new_cards) if not explicit_messages else []
         new_messages = explicit_messages or derived_messages
         deduped_messages = self.dedupe_new_messages(current_messages, new_messages)
@@ -51,17 +64,17 @@ class StateTransitionService:
         convo_state = self.derive_conversation_state(
             projected_history_cards,
             messages=merged_messages,
-            existing_agent_outputs=dict(state.get("agent_outputs") or {}),
+            existing_agent_outputs=dict(base_state.get("agent_outputs") or {}),
         )
 
         next_state = {
-            **(result or {}),
+            **result_payload,
+            **result_overrides,
             "next_step": "",
             "history_cards": projected_history_cards,
-            "discussion_step_count": int(state.get("discussion_step_count") or 0) + step_delta,
+            "discussion_step_count": int(base_state.get("discussion_step_count") or 0) + step_delta,
             **({"messages": deduped_messages} if deduped_messages else {}),
             **convo_state,
         }
         merged_preview = {**dict(state), **next_state}
         return {**next_state, **self.structured_snapshot(merged_preview)}
-

@@ -9,6 +9,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List
+from zoneinfo import ZoneInfo
 
 import structlog
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -16,6 +17,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.config import settings
 
 logger = structlog.get_logger()
+_BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def beijing_timestamp_processor(_, __, event_dict):
+    """Attach Beijing timestamp for unified cross-system time reading."""
+
+    event_dict.setdefault("timestamp_bj", datetime.now(_BEIJING_TZ).isoformat())
+    return event_dict
 
 
 class MetricsStore:
