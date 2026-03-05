@@ -1,0 +1,19 @@
+ORIGINAL REQUEST: "使用合适的skill 基于 当前的code-wiki 编写一个ppt"
+SOURCE DOCUMENT: docs/wiki/code-wiki.md
+
+ANSWERED QUESTIONS:
+- Topic scope: 基于当前 code-wiki 的项目架构与实现说明
+- Output preference: PPT（PowerPoint）
+
+DEFAULTED QUESTIONS:
+- Audience: 新加入项目的研发/测试/SRE（默认）
+- Duration: 20分钟（默认）
+- Slide count: 15页（含封面，默认）
+- Tone: 专业、清晰、可落地（默认）
+- Brand constraints: 无（默认中性风格）
+- Data files: 无外部数据文件（默认）
+
+ASSUMPTIONS:
+- 重点覆盖：架构、LangGraph调度、Agent流程、Skill配置与调用、可靠性治理、扩展方式
+- 图表以流程/架构图逻辑叙事为主，不使用统计型数据图
+- 需要产出完整交付：slides.md / notes.md / refs.md / presentation.pptx

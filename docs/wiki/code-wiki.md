@@ -127,23 +127,23 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    U[用户/SRE] --> FE[Frontend Incident 页面]
-    FE --> WS[WebSocket /ws/debates/{session_id}]
-    FE --> API[FastAPI REST]
+    U["用户/SRE"] --> FE["Frontend Incident 页面"]
+    FE --> WS["WebSocket /ws/debates/:session_id"]
+    FE --> API["FastAPI REST"]
 
-    WS --> DS[DebateService.execute_debate]
+    WS --> DS["DebateService.execute_debate"]
     API --> DS
 
-    DS --> ASSET[资产采集 + 责任田映射]
-    DS --> ORCH[LangGraphRuntimeOrchestrator]
+    DS --> ASSET["资产采集 + 责任田映射"]
+    DS --> ORCH["LangGraphRuntimeOrchestrator"]
 
-    ORCH --> GRAPH[GraphBuilder + Nodes]
-    GRAPH --> AGENTS[ProblemAnalysisAgent + Expert Agents]
-    AGENTS --> TOOLCTX[AgentToolContextService]
-    TOOLCTX --> SKILL[AgentSkillService]
-    AGENTS --> LLM[ChatOpenAI]
+    ORCH --> GRAPH["GraphBuilder + Nodes"]
+    GRAPH --> AGENTS["ProblemAnalysisAgent + Expert Agents"]
+    AGENTS --> TOOLCTX["AgentToolContextService"]
+    TOOLCTX --> SKILL["AgentSkillService"]
+    AGENTS --> LLM["ChatOpenAI"]
 
-    ORCH --> STORE[session_store/task_registry/lineage]
+    ORCH --> STORE["session_store/task_registry/lineage"]
     STORE --> WS
     WS --> FE
 ```

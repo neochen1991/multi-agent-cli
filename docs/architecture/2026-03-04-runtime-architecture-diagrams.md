@@ -17,7 +17,7 @@
 flowchart LR
     U["用户 / 值班SRE"] --> FE["Frontend (React + AntD)"]
     FE --> API["FastAPI REST API"]
-    FE --> WS["WebSocket /ws/debates/{session_id}"]
+    FE --> WS["WebSocket /ws/debates/:session_id"]
 
     WS --> WSM["DebateWebSocketManager"]
     API --> DS["DebateService"]
@@ -76,7 +76,7 @@ sequenceDiagram
     participant LG as LangGraphRuntime
     participant AG as Agents/Tools
 
-    FE->>WS: connect /ws/debates/{session_id}?auto_start=true
+    FE->>WS: connect /ws/debates/:session_id?auto_start=true
     WS-->>FE: snapshot
     WS->>DS: execute_debate(session_id)
     DS->>LG: orchestrator.execute(context, event_callback)
