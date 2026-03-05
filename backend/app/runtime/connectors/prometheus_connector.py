@@ -32,18 +32,35 @@ class PrometheusConnector:
             suffix = urlencode(query_params)
             url = f"{endpoint}{'&' if '?' in endpoint else '?'}{suffix}"
 
-        payload = await http_get_json(
-            url=url,
-            token=str(config.api_token or ""),
-            timeout_seconds=int(config.timeout_seconds or 8),
-        )
-        return {
-            "enabled": True,
-            "status": "ok",
-            "data": payload,
-            "message": "prometheus fetched",
-            "context_hint": {"service_name": service_name},
-        }
+        try:
+            payload = await http_get_json(
+                url=url,
+                token=str(config.api_token or ""),
+                timeout_seconds=int(config.timeout_seconds or 8),
+                include_meta=True,
+            )
+            return {
+                "enabled": True,
+                "status": "ok",
+                "data": dict(payload.get("data") or {}),
+                "request_meta": dict(payload.get("request_meta") or {}),
+                "message": "prometheus fetched",
+                "context_hint": {"service_name": service_name},
+            }
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "status": "degraded",
+                "data": {},
+                "request_meta": {
+                    "url": url,
+                    "method": "GET",
+                    "status": "error",
+                    "error": str(exc)[:240],
+                },
+                "message": f"prometheus fetch failed: {str(exc)[:180]}",
+                "context_hint": {"service_name": service_name},
+            }
 
 
 __all__ = ["PrometheusConnector"]

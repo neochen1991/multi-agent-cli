@@ -18,16 +18,32 @@ class TelemetryConnector:
         endpoint = str(config.endpoint or "").strip()
         if not endpoint:
             return {"enabled": True, "status": "unavailable", "data": {}, "message": "endpoint is empty"}
-        payload = await http_get_json(
-            url=endpoint,
-            token=str(config.api_token or ""),
-            timeout_seconds=int(config.timeout_seconds or 8),
-        )
-        return {
-            "enabled": True,
-            "status": "ok",
-            "data": payload,
-            "message": "telemetry fetched",
-            "context_hint": {"service_name": str(context.get("service_name") or "")},
-        }
-
+        try:
+            payload = await http_get_json(
+                url=endpoint,
+                token=str(config.api_token or ""),
+                timeout_seconds=int(config.timeout_seconds or 8),
+                include_meta=True,
+            )
+            return {
+                "enabled": True,
+                "status": "ok",
+                "data": dict(payload.get("data") or {}),
+                "request_meta": dict(payload.get("request_meta") or {}),
+                "message": "telemetry fetched",
+                "context_hint": {"service_name": str(context.get("service_name") or "")},
+            }
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "status": "degraded",
+                "data": {},
+                "request_meta": {
+                    "url": endpoint,
+                    "method": "GET",
+                    "status": "error",
+                    "error": str(exc)[:240],
+                },
+                "message": f"telemetry fetch failed: {str(exc)[:180]}",
+                "context_hint": {"service_name": str(context.get("service_name") or "")},
+            }

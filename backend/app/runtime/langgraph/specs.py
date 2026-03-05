@@ -54,6 +54,15 @@ _DEFAULT_SPECS: Dict[str, _SpecConfig] = {
         max_tokens=420,
         timeout=40,
     ),
+    "DatabaseAgent": _SpecConfig(
+        name="DatabaseAgent",
+        role="数据库取证专家",
+        phase="analysis",
+        system_prompt="你是数据库取证专家，重点分析表结构、索引、慢SQL、TopSQL、Session状态并给出可验证结论。",
+        tools=("db_tool",),
+        max_tokens=420,
+        timeout=40,
+    ),
     "MetricsAgent": _SpecConfig(
         name="MetricsAgent",
         role="监控指标专家",
@@ -202,6 +211,7 @@ def agent_sequence(*, enable_critique: bool) -> List[AgentSpec]:
         "LogAgent",
         "DomainAgent",
         "CodeAgent",
+        "DatabaseAgent",
         "MetricsAgent",
         "ChangeAgent",
         "RunbookAgent",

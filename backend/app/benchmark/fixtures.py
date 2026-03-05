@@ -19,6 +19,9 @@ class IncidentFixture:
     expected_root_cause: str
     expected_domain: str
     expected_aggregate: str
+    owner: str
+    tags: List[str]
+    golden: bool
 
 
 def _fixtures_dir() -> Path:
@@ -49,6 +52,13 @@ def load_fixtures(limit: int = 0) -> List[IncidentFixture]:
                 expected_root_cause=str(payload.get("expected_root_cause") or ""),
                 expected_domain=str(payload.get("expected_domain") or ""),
                 expected_aggregate=str(payload.get("expected_aggregate") or ""),
+                owner=str(payload.get("owner") or ""),
+                tags=[
+                    str(item).strip()
+                    for item in list(payload.get("tags") or [])
+                    if str(item).strip()
+                ],
+                golden=bool(payload.get("golden", False)),
             )
         )
     return fixtures

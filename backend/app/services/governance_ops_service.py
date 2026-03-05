@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from app.config import settings
+from app.runtime_ext.integrations import ADAPTERS
 from app.runtime.trace_lineage import replay_session_lineage
 
 
@@ -192,14 +193,27 @@ class GovernanceOpsService:
             return target
 
     async def sync_external(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        provider = str(payload.get("provider") or "unknown").strip().lower() or "unknown"
+        action = str(payload.get("action") or "notify")
+        adapter_payload: Dict[str, Any] | None = None
+        adapter = ADAPTERS.get(provider)
+        if adapter:
+            built = adapter.build(action=action, payload=dict(payload.get("payload") or {}))
+            adapter_payload = {
+                "provider": built.provider,
+                "action": built.action,
+                "dry_run": bool(built.dry_run),
+                "request_payload": dict(built.payload or {}),
+            }
         record = {
             "id": f"sync_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}",
             "at": datetime.utcnow().isoformat(),
-            "provider": str(payload.get("provider") or "unknown"),
+            "provider": provider,
             "direction": str(payload.get("direction") or "outbound"),
-            "action": str(payload.get("action") or "notify"),
+            "action": action,
             "status": "success",
             "payload": dict(payload.get("payload") or {}),
+            "adapter_payload": adapter_payload,
         }
         async with self._lock:
             rows = self._read_json(self._sync_file, [])

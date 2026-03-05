@@ -18,7 +18,7 @@ def coordinator_command_schema() -> Dict[str, Any]:
         "conclusion": "",
         "next_mode": "parallel_analysis|single|judge|stop",
         "next_agent": (
-            "LogAgent|DomainAgent|CodeAgent|MetricsAgent|ChangeAgent|RunbookAgent|RuleSuggestionAgent|"
+            "LogAgent|DomainAgent|CodeAgent|DatabaseAgent|MetricsAgent|ChangeAgent|RunbookAgent|RuleSuggestionAgent|"
             "CriticAgent|RebuttalAgent|JudgeAgent|VerificationAgent"
         ),
         "should_stop": False,
@@ -26,13 +26,14 @@ def coordinator_command_schema() -> Dict[str, Any]:
         "commands": [
             {
                 "target_agent": (
-                    "LogAgent|DomainAgent|CodeAgent|MetricsAgent|ChangeAgent|RunbookAgent|RuleSuggestionAgent|"
+                    "LogAgent|DomainAgent|CodeAgent|DatabaseAgent|MetricsAgent|ChangeAgent|RunbookAgent|RuleSuggestionAgent|"
                     "CriticAgent|RebuttalAgent|JudgeAgent|VerificationAgent"
                 ),
                 "task": "",
                 "focus": "",
                 "expected_output": "",
                 "use_tool": True,
+                "database_tables": [],
             }
         ],
         "evidence_chain": [""],
@@ -110,16 +111,27 @@ def build_problem_analysis_commander_prompt(
     to_json: ToJsonFn,
 ) -> str:
     if peer_items is None:
-        peer_items = [
-            {
-                "agent": card.agent_name,
-                "phase": card.phase,
-                "summary": card.summary[:100],
-                "conclusion": card.conclusion[:120],
-                "confidence": round(float(card.confidence or 0.0), 3),
-            }
-            for card in (history_cards or [])[-6:]
-        ]
+        if dialogue_items:
+            peer_items = [
+                {
+                    "agent": str(item.get("agent_name") or item.get("agent") or "unknown"),
+                    "phase": str(item.get("phase") or ""),
+                    "summary": str(item.get("message") or item.get("summary") or "")[:120],
+                    "confidence": round(float(item.get("confidence") or 0.0), 3),
+                }
+                for item in (dialogue_items or [])[-8:]
+                if isinstance(item, dict)
+            ]
+        else:
+            peer_items = [
+                {
+                    "agent": card.agent_name,
+                    "phase": card.phase,
+                    "summary": card.summary[:100],
+                    "confidence": round(float(card.confidence or 0.0), 3),
+                }
+                for card in (history_cards or [])[-4:]
+            ]
     schema = coordinator_command_schema()
     dialogue_block = ""
     if dialogue_items:
@@ -136,12 +148,13 @@ def build_problem_analysis_commander_prompt(
         "同时你需要决定下一步调度：next_mode/next_agent；如果你判断证据充分可以停止，设置 should_stop=true 并给出 stop_reason。\n"
         "请优先覆盖故障上下文中的 available_analysis_agents；"
         "若已存在历史结论，可补充 CriticAgent/RebuttalAgent/JudgeAgent/VerificationAgent 命令。\n"
+        "若 context.interface_mapping.database_tables 非空，必须把这些表名填入 DatabaseAgent 命令的 database_tables 字段。\n"
         "命令要具体到分析重点，不要泛泛而谈。\n\n"
         f"故障上下文:\n```json\n{to_json(context)}\n```\n\n"
         f"{dialogue_block}"
         f"{skill_block}"
         f"{work_log_block}"
-        f"已有观点卡片:\n```json\n{to_json(peer_items)}\n```\n\n"
+        f"最近发言摘要:\n```json\n{to_json(peer_items)}\n```\n\n"
         f"仅输出 JSON，格式:\n```json\n{to_json(schema)}\n```"
     )
 
@@ -162,15 +175,27 @@ def build_problem_analysis_supervisor_prompt(
     to_json: ToJsonFn,
 ) -> str:
     if recent_messages is None:
-        recent_messages = [
-            {
-                "agent": card.agent_name,
-                "phase": card.phase,
-                "conclusion": card.conclusion[:160],
-                "confidence": round(float(card.confidence or 0.0), 3),
-            }
-            for card in (round_history_cards or [])[-8:]
-        ]
+        if dialogue_items:
+            recent_messages = [
+                {
+                    "agent": str(item.get("agent_name") or item.get("agent") or "unknown"),
+                    "phase": str(item.get("phase") or ""),
+                    "conclusion": str(item.get("message") or item.get("conclusion") or "")[:160],
+                    "confidence": round(float(item.get("confidence") or 0.0), 3),
+                }
+                for item in (dialogue_items or [])[-10:]
+                if isinstance(item, dict)
+            ]
+        else:
+            recent_messages = [
+                {
+                    "agent": card.agent_name,
+                    "phase": card.phase,
+                    "conclusion": card.conclusion[:160],
+                    "confidence": round(float(card.confidence or 0.0), 3),
+                }
+                for card in (round_history_cards or [])[-6:]
+            ]
     schema = coordinator_command_schema()
     dialogue_block = ""
     if dialogue_items:
@@ -189,6 +214,7 @@ def build_problem_analysis_supervisor_prompt(
         "2) 若证据不足，继续调度某个专家发言并下达具体命令；\n"
         "3) 若你判断结论已充分，设置 should_stop=true；但若尚未形成裁决，next_agent 应为 JudgeAgent。\n"
         "4) commands 只需给本步计划执行的Agent（1-3个）下命令。\n\n"
+        "5) 若 context.interface_mapping.database_tables 非空，DatabaseAgent 命令必须带 database_tables。\n\n"
         f"讨论步数预算: {discussion_step_count}/{max_discussion_steps}\n"
         f"故障上下文:\n```json\n{to_json(context)}\n```\n\n"
         f"{dialogue_block}"
@@ -217,17 +243,29 @@ def build_agent_prompt(
     to_json: ToJsonFn,
 ) -> str:
     if history_items is None:
-        history_items = [
-            {
-                "agent": card.agent_name,
-                "phase": card.phase,
-                "summary": card.summary[:120],
-                "conclusion": card.conclusion[:140],
-                "evidence": card.evidence_chain[:2],
-                "confidence": round(float(card.confidence), 3),
-            }
-            for card in (history_cards or [])[-max_history_items:]
-        ]
+        history_items = []
+        for item in (dialogue_items or [])[-8:]:
+            if not isinstance(item, dict):
+                continue
+            history_items.append(
+                {
+                    "agent": str(item.get("agent_name") or item.get("agent") or "unknown"),
+                    "phase": str(item.get("phase") or ""),
+                    "summary": str(item.get("message") or item.get("summary") or "")[:140],
+                    "confidence": round(float(item.get("confidence") or 0.0), 3),
+                }
+            )
+        if not history_items:
+            history_items = [
+                {
+                    "agent": card.agent_name,
+                    "phase": card.phase,
+                    "summary": card.summary[:120],
+                    "conclusion": card.conclusion[:140],
+                    "confidence": round(float(card.confidence or 0.0), 3),
+                }
+                for card in (history_cards or [])[-min(max_history_items, 4):]
+            ]
     output_schema = (
         judge_output_schema()
         if spec.name == "JudgeAgent"
@@ -269,7 +307,7 @@ def build_agent_prompt(
         f"{skill_block}"
         f"{work_log_block}"
         f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
-        f"最近结论卡片：\n```json\n{to_json(history_items)}\n```\n\n"
+        f"最近交互摘要：\n```json\n{to_json(history_items)}\n```\n\n"
         f"请仅输出 JSON，格式示例：\n```json\n{to_json(output_schema)}\n```"
     )
 

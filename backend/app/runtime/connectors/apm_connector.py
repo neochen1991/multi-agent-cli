@@ -1,21 +1,21 @@
-"""Loki connector entrypoint (disabled by default)."""
+"""APM tracing connector entrypoint (disabled by default)."""
 
 from __future__ import annotations
 
 from typing import Any, Dict
 from urllib.parse import urlencode
 
-from app.models.tooling import LokiSourceConfig
+from app.models.tooling import APMSourceConfig
 from app.runtime.connectors.http_utils import http_get_json
 
 
-class LokiConnector:
-    name = "LokiConnector"
-    resource_type = "loki"
+class APMConnector:
+    name = "APMConnector"
+    resource_type = "apm"
 
-    async def fetch(self, config: LokiSourceConfig, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def fetch(self, config: APMSourceConfig, context: Dict[str, Any]) -> Dict[str, Any]:
         if not bool(config.enabled):
-            return {"enabled": False, "status": "disabled", "data": {}, "message": "loki source disabled"}
+            return {"enabled": False, "status": "disabled", "data": {}, "message": "apm source disabled"}
         endpoint = str(config.endpoint or "").strip()
         if not endpoint:
             return {"enabled": True, "status": "unavailable", "data": {}, "message": "endpoint is empty"}
@@ -47,7 +47,7 @@ class LokiConnector:
                 "status": "ok",
                 "data": dict(payload.get("data") or {}),
                 "request_meta": dict(payload.get("request_meta") or {}),
-                "message": "loki fetched",
+                "message": "apm fetched",
                 "context_hint": {"service_name": service_name, "trace_id": trace_id},
             }
         except Exception as exc:
@@ -61,9 +61,10 @@ class LokiConnector:
                     "status": "error",
                     "error": str(exc)[:240],
                 },
-                "message": f"loki fetch failed: {str(exc)[:180]}",
+                "message": f"apm fetch failed: {str(exc)[:180]}",
                 "context_hint": {"service_name": service_name, "trace_id": trace_id},
             }
 
 
-__all__ = ["LokiConnector"]
+__all__ = ["APMConnector"]
+

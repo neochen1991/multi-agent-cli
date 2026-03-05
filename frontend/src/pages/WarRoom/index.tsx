@@ -129,6 +129,20 @@ const WarRoomPage: React.FC = () => {
     [sessionId, sessionOptions],
   );
 
+  const firstEvidenceLatencyMs = useMemo(() => {
+    if (!Array.isArray(timeline) || timeline.length === 0) return null;
+    const sorted = [...timeline].sort(
+      (a, b) => new Date(String(a.timestamp || '')).getTime() - new Date(String(b.timestamp || '')).getTime(),
+    );
+    const start = sorted.find((row) => String(row.event_type || '').includes('session_started')) || sorted[0];
+    const firstEvidence = sorted.find((row) => String(row.event_type || '').includes('first_evidence_ready'));
+    if (!start?.timestamp || !firstEvidence?.timestamp) return null;
+    const startMs = new Date(String(start.timestamp)).getTime();
+    const evMs = new Date(String(firstEvidence.timestamp)).getTime();
+    if (!Number.isFinite(startMs) || !Number.isFinite(evMs) || evMs < startMs) return null;
+    return Math.max(0, Math.round(evMs - startMs));
+  }, [timeline]);
+
   return (
     <div className="war-room-page">
       <Card className="module-card">
@@ -176,6 +190,13 @@ const WarRoomPage: React.FC = () => {
               <Tag color="blue">状态: {currentSessionMeta.status}</Tag>
             </Space>
           ) : null}
+          {timeline.length > 0 && firstEvidenceLatencyMs === null ? (
+            <Alert
+              type="info"
+              showIcon
+              message="调查已启动，等待首批证据（目标 10 秒内）..."
+            />
+          ) : null}
         </Space>
       </Card>
 
@@ -183,6 +204,15 @@ const WarRoomPage: React.FC = () => {
         <Col xs={12} md={6}>
           <Card className="module-card compact-card">
             <Statistic title="时间线事件" value={timeline.length} />
+          </Card>
+        </Col>
+        <Col xs={12} md={6}>
+          <Card className="module-card compact-card">
+            <Statistic
+              title="首证据时延"
+              value={firstEvidenceLatencyMs ?? 0}
+              suffix="ms"
+            />
           </Card>
         </Col>
         <Col xs={12} md={6}>

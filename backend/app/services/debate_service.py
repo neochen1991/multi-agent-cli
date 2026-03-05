@@ -1564,6 +1564,7 @@ class DebateService:
             "CodeAgent": "code_or_resource",
             "LogAgent": "runtime_log",
             "DomainAgent": "domain_mapping",
+            "DatabaseAgent": "database_signal",
             "CriticAgent": "peer_review",
             "RebuttalAgent": "peer_review",
         }
@@ -1968,6 +1969,8 @@ class DebateService:
                 source = "runtime_log"
             elif round_.agent_name in {"CodeAgent", "ChangeAgent"}:
                 source = "code_repo"
+            elif round_.agent_name == "DatabaseAgent":
+                source = "database_snapshot"
             elif round_.agent_name == "DomainAgent":
                 source = "domain_asset"
             elif round_.agent_name == "MetricsAgent":

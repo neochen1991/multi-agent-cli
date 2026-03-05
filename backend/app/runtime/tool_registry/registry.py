@@ -54,6 +54,25 @@ class ToolRegistryService:
                 ),
             ),
             ToolRegistryItem(
+                tool_name="db_snapshot_reader",
+                category="database",
+                owner_agent="DatabaseAgent",
+                input_schema={
+                    "engine": "string",
+                    "db_path": "string",
+                    "postgres_dsn": "string",
+                    "pg_schema": "string",
+                    "max_rows": "int",
+                    "keywords": ["string"],
+                },
+                policy=ToolPolicy(
+                    timeout_seconds=25,
+                    audit_level="full",
+                    command_whitelist=[],
+                    path_whitelist=base_paths,
+                ),
+            ),
+            ToolRegistryItem(
                 tool_name="metrics_snapshot_analyzer",
                 category="telemetry",
                 owner_agent="MetricsAgent",
@@ -72,6 +91,34 @@ class ToolRegistryService:
                 category="telemetry",
                 owner_agent="MetricsAgent",
                 input_schema={"endpoint": "string", "query": "string", "trace_id": "string"},
+                policy=ToolPolicy(timeout_seconds=20, audit_level="summary"),
+            ),
+            ToolRegistryItem(
+                tool_name="grafana_connector",
+                category="telemetry",
+                owner_agent="MetricsAgent",
+                input_schema={"endpoint": "string", "query": "string", "service": "string"},
+                policy=ToolPolicy(timeout_seconds=20, audit_level="summary"),
+            ),
+            ToolRegistryItem(
+                tool_name="apm_connector",
+                category="telemetry",
+                owner_agent="MetricsAgent",
+                input_schema={"endpoint": "string", "trace_id": "string", "service": "string"},
+                policy=ToolPolicy(timeout_seconds=20, audit_level="summary"),
+            ),
+            ToolRegistryItem(
+                tool_name="logcloud_connector",
+                category="telemetry",
+                owner_agent="LogAgent",
+                input_schema={"endpoint": "string", "query": "string", "trace_id": "string"},
+                policy=ToolPolicy(timeout_seconds=20, audit_level="summary"),
+            ),
+            ToolRegistryItem(
+                tool_name="alert_platform_connector",
+                category="alert",
+                owner_agent="ProblemAnalysisAgent",
+                input_schema={"endpoint": "string", "alert_id": "string", "service": "string"},
                 policy=ToolPolicy(timeout_seconds=20, audit_level="summary"),
             ),
             ToolRegistryItem(
@@ -101,15 +148,31 @@ class ToolRegistryService:
             },
             "TelemetryConnector": {
                 "resource": "log_file",
-                "tools": ["local_log_reader", "metrics_snapshot_analyzer", "prometheus_connector", "loki_connector"],
+                "tools": [
+                    "local_log_reader",
+                    "metrics_snapshot_analyzer",
+                    "prometheus_connector",
+                    "loki_connector",
+                    "grafana_connector",
+                    "apm_connector",
+                    "logcloud_connector",
+                ],
             },
             "AssetConnector": {
                 "resource": "domain_excel",
                 "tools": ["domain_excel_lookup"],
             },
+            "DatabaseConnector": {
+                "resource": "sqlite_snapshot",
+                "tools": ["db_snapshot_reader"],
+            },
             "TicketConnector": {
                 "resource": "case_library",
                 "tools": ["runbook_case_library"],
+            },
+            "AlertConnector": {
+                "resource": "alert_platform",
+                "tools": ["alert_platform_connector"],
             },
         }
         self._connector_state: Dict[str, Dict[str, Any]] = {

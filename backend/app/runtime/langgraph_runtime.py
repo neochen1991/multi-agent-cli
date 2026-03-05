@@ -101,6 +101,7 @@ class LangGraphRuntimeOrchestrator:
         "LogAgent",
         "DomainAgent",
         "CodeAgent",
+        "DatabaseAgent",
         "MetricsAgent",
         "ChangeAgent",
         "RunbookAgent",
@@ -175,9 +176,9 @@ class LangGraphRuntimeOrchestrator:
         if isinstance(runtime_strategy, dict):
             phase_mode = str(runtime_strategy.get("phase_mode") or "").strip().lower()
 
-        core_agents = ("LogAgent", "DomainAgent", "CodeAgent")
-        balanced_agents = ("LogAgent", "DomainAgent", "CodeAgent", "MetricsAgent")
-        fast_agents = ("LogAgent", "DomainAgent", "CodeAgent", "MetricsAgent", "ChangeAgent")
+        core_agents = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent")
+        balanced_agents = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent")
+        fast_agents = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent", "ChangeAgent")
 
         if phase_mode in {"economy", "failfast"} or execution_mode == "quick":
             selected_agents = core_agents
@@ -984,6 +985,18 @@ class LangGraphRuntimeOrchestrator:
         fill_defaults: bool,
         targets_hint: Optional[List[str]] = None,
     ) -> Dict[str, Dict[str, Any]]:
+        def _normalize_tables(value: Any) -> List[str]:
+            if not isinstance(value, list):
+                return []
+            picks: List[str] = []
+            for item in value:
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                picks.append(text[:120])
+            # preserve order while deduplicating
+            return list(dict.fromkeys(picks))[:20]
+
         raw_commands = payload.get("commands")
         commands: Dict[str, Dict[str, Any]] = {}
         if isinstance(raw_commands, list):
@@ -999,12 +1012,14 @@ class LangGraphRuntimeOrchestrator:
                     "focus": str(item.get("focus") or "").strip(),
                     "expected_output": str(item.get("expected_output") or "").strip(),
                     "use_tool": item.get("use_tool"),
+                    "database_tables": _normalize_tables(item.get("database_tables")),
                 }
 
         defaults = {
             "LogAgent": "分析错误日志、502 与 CPU 异常的直接证据链",
             "DomainAgent": "根据接口 URL 映射领域/聚合根/责任田并确认负责团队",
             "CodeAgent": "定位可能代码瓶颈、连接池/线程池/慢SQL风险点",
+            "DatabaseAgent": "读取数据库表结构/索引/慢SQL/TopSQL/session状态并给出瓶颈判断",
             "MetricsAgent": "提取 CPU/线程/连接池/错误率指标异常窗口，给出关键时间点与阈值",
             "ChangeAgent": "分析故障时间窗前后的发布/提交变更，给出可疑变更候选",
             "RunbookAgent": "检索相似故障案例与SOP，给出可执行处置步骤和差异点",
@@ -1023,6 +1038,7 @@ class LangGraphRuntimeOrchestrator:
                         "focus": "",
                         "expected_output": "",
                         "use_tool": None,
+                        "database_tables": [],
                     },
                 )
         elif targets_hint:
@@ -1034,7 +1050,44 @@ class LangGraphRuntimeOrchestrator:
                         "focus": "",
                         "expected_output": "",
                         "use_tool": None,
+                        "database_tables": [],
                     }
+        return commands
+
+    @staticmethod
+    def _normalize_database_tables(value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        picks: List[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            picks.append(text[:120])
+        return list(dict.fromkeys(picks))[:20]
+
+    def _enrich_agent_commands_with_asset_mapping(
+        self,
+        commands: Dict[str, Dict[str, Any]],
+        compact_context: Dict[str, Any],
+    ) -> Dict[str, Dict[str, Any]]:
+        if not isinstance(commands, dict):
+            return {}
+        interface_mapping = compact_context.get("interface_mapping") if isinstance(compact_context, dict) else {}
+        mapping_tables = self._normalize_database_tables(
+            (interface_mapping or {}).get("database_tables") if isinstance(interface_mapping, dict) else []
+        )
+        if not mapping_tables:
+            return commands
+        db_cmd = dict(commands.get("DatabaseAgent") or {})
+        if not db_cmd:
+            return commands
+        db_cmd["database_tables"] = self._normalize_database_tables(db_cmd.get("database_tables")) or mapping_tables
+        if not str(db_cmd.get("focus") or "").strip():
+            db_cmd["focus"] = f"优先检查责任田映射表: {', '.join(db_cmd['database_tables'][:8])}"
+        if not str(db_cmd.get("expected_output") or "").strip():
+            db_cmd["expected_output"] = "输出各目标表的索引、字段定义、疑似慢SQL与会话阻塞信号"
+        commands["DatabaseAgent"] = db_cmd
         return commands
 
     async def _run_problem_analysis_commander(
@@ -1081,6 +1134,7 @@ class LangGraphRuntimeOrchestrator:
 
         payload = turn.output_content if isinstance(turn.output_content, dict) else {}
         commands = self._extract_agent_commands_from_payload(payload, fill_defaults=True)
+        commands = self._enrich_agent_commands_with_asset_mapping(commands, compact_context)
         return {
             "commands": commands,
             "next_mode": str(payload.get("next_mode") or "").strip().lower(),
@@ -1152,6 +1206,7 @@ class LangGraphRuntimeOrchestrator:
             fill_defaults=False,
             targets_hint=targets_hint,
         )
+        commands = self._enrich_agent_commands_with_asset_mapping(commands, compact_context)
         return {
             "commands": commands,
             "next_mode": next_mode,
@@ -1172,11 +1227,14 @@ class LangGraphRuntimeOrchestrator:
         focus = str(command.get("focus") or "").strip()
         expected = str(command.get("expected_output") or "").strip()
         use_tool = command.get("use_tool")
+        database_tables = self._normalize_database_tables(command.get("database_tables"))
         message_parts = [f"{commander} 指令 {target}: {command_text}"]
         if focus:
             message_parts.append(f"重点: {focus}")
         if expected:
             message_parts.append(f"输出: {expected}")
+        if database_tables:
+            message_parts.append(f"目标表: {', '.join(database_tables[:8])}")
         if isinstance(use_tool, bool):
             message_parts.append(f"工具调用: {'允许' if use_tool else '禁止'}")
         agent_message = AgentMessage(
@@ -1188,6 +1246,7 @@ class LangGraphRuntimeOrchestrator:
                 "focus": focus,
                 "expected_output": expected,
                 "use_tool": use_tool,
+                "database_tables": database_tables,
             },
         )
         await self._emit_event(
@@ -1200,6 +1259,7 @@ class LangGraphRuntimeOrchestrator:
                 "round_number": round_number,
                 "command": command_text,
                 "use_tool": use_tool,
+                "database_tables": database_tables,
                 "message": "\n".join(message_parts),
                 "agent_message": agent_message.model_dump(mode="json"),
                 "session_id": self.session_id,
@@ -1885,6 +1945,7 @@ class LangGraphRuntimeOrchestrator:
             "LogAgent",
             "DomainAgent",
             "CodeAgent",
+            "DatabaseAgent",
             "MetricsAgent",
             "ChangeAgent",
             "RunbookAgent",
@@ -2082,6 +2143,7 @@ class LangGraphRuntimeOrchestrator:
 
         category_map = {
             "CodeAgent": "code_or_resource",
+            "DatabaseAgent": "database_signal",
             "LogAgent": "runtime_log",
             "DomainAgent": "domain_mapping",
             "MetricsAgent": "metrics_signal",

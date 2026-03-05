@@ -24,7 +24,12 @@ TOOL_AGENT_MAP: Dict[str, str] = {
     "git_change_window": "ChangeAgent",
     "local_log_reader": "LogAgent",
     "domain_excel_lookup": "DomainAgent",
+    "db_snapshot_reader": "DatabaseAgent",
     "metrics_snapshot_analyzer": "MetricsAgent",
+    "grafana_connector": "MetricsAgent",
+    "apm_connector": "MetricsAgent",
+    "logcloud_connector": "LogAgent",
+    "alert_platform_connector": "ProblemAnalysisAgent",
     "runbook_case_library": "RunbookAgent",
     "rule_suggestion_toolkit": "RuleSuggestionAgent",
 }

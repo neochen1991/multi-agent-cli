@@ -232,6 +232,16 @@ export interface DomainExcelToolConfig {
   max_matches: number;
 }
 
+export interface DatabaseToolConfig {
+  enabled: boolean;
+  engine: string;
+  db_path: string;
+  postgres_dsn: string;
+  pg_schema: string;
+  connect_timeout_seconds: number;
+  max_rows: number;
+}
+
 export interface TelemetrySourceConfig {
   enabled: boolean;
   endpoint: string;
@@ -264,14 +274,51 @@ export interface LokiSourceConfig {
   verify_ssl: boolean;
 }
 
+export interface GrafanaSourceConfig {
+  enabled: boolean;
+  endpoint: string;
+  api_token: string;
+  timeout_seconds: number;
+  verify_ssl: boolean;
+}
+
+export interface APMSourceConfig {
+  enabled: boolean;
+  endpoint: string;
+  api_token: string;
+  timeout_seconds: number;
+  verify_ssl: boolean;
+}
+
+export interface LogCloudSourceConfig {
+  enabled: boolean;
+  endpoint: string;
+  api_token: string;
+  timeout_seconds: number;
+  verify_ssl: boolean;
+}
+
+export interface AlertPlatformSourceConfig {
+  enabled: boolean;
+  endpoint: string;
+  api_token: string;
+  timeout_seconds: number;
+  verify_ssl: boolean;
+}
+
 export interface AgentToolingConfig {
   code_repo: CodeRepoToolConfig;
   log_file: LogFileToolConfig;
   domain_excel: DomainExcelToolConfig;
+  database?: DatabaseToolConfig;
   telemetry_source?: TelemetrySourceConfig;
   cmdb_source?: CMDBSourceConfig;
   prometheus_source?: PrometheusSourceConfig;
   loki_source?: LokiSourceConfig;
+  grafana_source?: GrafanaSourceConfig;
+  apm_source?: APMSourceConfig;
+  logcloud_source?: LogCloudSourceConfig;
+  alert_platform_source?: AlertPlatformSourceConfig;
   updated_at: string;
 }
 

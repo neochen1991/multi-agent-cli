@@ -31,6 +31,16 @@ class DomainExcelToolConfig(BaseModel):
     max_matches: int = Field(default=20, ge=1, le=200, description="最大命中行数")
 
 
+class DatabaseToolConfig(BaseModel):
+    enabled: bool = Field(default=False, description="是否启用 DatabaseAgent 数据库工具")
+    engine: str = Field(default="sqlite", description="数据库引擎类型：sqlite/postgresql")
+    db_path: str = Field(default="", description="SQLite 数据库文件路径")
+    postgres_dsn: str = Field(default="", description="PostgreSQL 连接串，例如 postgresql://user:pass@host:5432/db")
+    pg_schema: str = Field(default="public", description="PostgreSQL schema")
+    connect_timeout_seconds: int = Field(default=8, ge=2, le=60, description="数据库连接超时（秒）")
+    max_rows: int = Field(default=50, ge=1, le=500, description="慢 SQL / Top SQL 最大返回条数")
+
+
 class TelemetrySourceConfig(BaseModel):
     enabled: bool = Field(default=False, description="是否启用远程遥测数据源入口")
     endpoint: str = Field(default="", description="遥测平台 API 地址（占位）")
@@ -63,12 +73,49 @@ class LokiSourceConfig(BaseModel):
     verify_ssl: bool = Field(default=True, description="是否校验证书")
 
 
+class GrafanaSourceConfig(BaseModel):
+    enabled: bool = Field(default=False, description="是否启用 Grafana 入口")
+    endpoint: str = Field(default="", description="Grafana API 地址")
+    api_token: str = Field(default="", description="Grafana 访问 Token（可选）")
+    timeout_seconds: int = Field(default=8, ge=2, le=60, description="请求超时时间")
+    verify_ssl: bool = Field(default=True, description="是否校验证书")
+
+
+class APMSourceConfig(BaseModel):
+    enabled: bool = Field(default=False, description="是否启用 APM 链路平台入口")
+    endpoint: str = Field(default="", description="APM API 地址")
+    api_token: str = Field(default="", description="APM 访问 Token（可选）")
+    timeout_seconds: int = Field(default=8, ge=2, le=60, description="请求超时时间")
+    verify_ssl: bool = Field(default=True, description="是否校验证书")
+
+
+class LogCloudSourceConfig(BaseModel):
+    enabled: bool = Field(default=False, description="是否启用日志云平台入口")
+    endpoint: str = Field(default="", description="日志云 API 地址")
+    api_token: str = Field(default="", description="日志云访问 Token（可选）")
+    timeout_seconds: int = Field(default=8, ge=2, le=60, description="请求超时时间")
+    verify_ssl: bool = Field(default=True, description="是否校验证书")
+
+
+class AlertPlatformSourceConfig(BaseModel):
+    enabled: bool = Field(default=False, description="是否启用监控告警平台入口")
+    endpoint: str = Field(default="", description="告警平台 API 地址")
+    api_token: str = Field(default="", description="告警平台访问 Token（可选）")
+    timeout_seconds: int = Field(default=8, ge=2, le=60, description="请求超时时间")
+    verify_ssl: bool = Field(default=True, description="是否校验证书")
+
+
 class AgentToolingConfig(BaseModel):
     code_repo: CodeRepoToolConfig = Field(default_factory=CodeRepoToolConfig)
     log_file: LogFileToolConfig = Field(default_factory=LogFileToolConfig)
     domain_excel: DomainExcelToolConfig = Field(default_factory=DomainExcelToolConfig)
+    database: DatabaseToolConfig = Field(default_factory=DatabaseToolConfig)
     telemetry_source: TelemetrySourceConfig = Field(default_factory=TelemetrySourceConfig)
     cmdb_source: CMDBSourceConfig = Field(default_factory=CMDBSourceConfig)
     prometheus_source: PrometheusSourceConfig = Field(default_factory=PrometheusSourceConfig)
     loki_source: LokiSourceConfig = Field(default_factory=LokiSourceConfig)
+    grafana_source: GrafanaSourceConfig = Field(default_factory=GrafanaSourceConfig)
+    apm_source: APMSourceConfig = Field(default_factory=APMSourceConfig)
+    logcloud_source: LogCloudSourceConfig = Field(default_factory=LogCloudSourceConfig)
+    alert_platform_source: AlertPlatformSourceConfig = Field(default_factory=AlertPlatformSourceConfig)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

@@ -129,16 +129,46 @@ class RuntimeTaskRegistry:
 
     async def get(self, session_id: str) -> Optional[TaskRecord]:
         async with self._lock:
+            self._sweep_stale_running_locked()
             record = self._tasks.get(session_id)
             return TaskRecord.from_dict(record.to_dict()) if record else None
 
     async def list_running(self) -> Dict[str, Dict[str, Any]]:
         async with self._lock:
+            self._sweep_stale_running_locked()
             return {
                 key: value.to_dict()
                 for key, value in self._tasks.items()
                 if value.status == "running"
             }
+
+    async def sweep_stale_running(self, max_idle_seconds: int | None = None) -> int:
+        async with self._lock:
+            return self._sweep_stale_running_locked(max_idle_seconds=max_idle_seconds)
+
+    def _sweep_stale_running_locked(self, max_idle_seconds: int | None = None) -> int:
+        timeout_seconds = int(max_idle_seconds or max(60, int(settings.DEBATE_TIMEOUT or 600) + 30))
+        now_ts = datetime.utcnow().timestamp()
+        updated = 0
+        for item in self._tasks.values():
+            if str(item.status or "") != "running":
+                continue
+            checkpoint = str(item.updated_at or item.started_at or "")
+            if not checkpoint:
+                continue
+            try:
+                cp_ts = datetime.fromisoformat(checkpoint).timestamp()
+            except Exception:
+                continue
+            if (now_ts - cp_ts) <= timeout_seconds:
+                continue
+            item.status = "failed"
+            item.error = "runtime_task_watchdog_timeout"
+            item.updated_at = datetime.utcnow().isoformat()
+            updated += 1
+        if updated > 0:
+            self._persist_locked()
+        return updated
 
     def _load_from_disk(self) -> None:
         if not self._file.exists():

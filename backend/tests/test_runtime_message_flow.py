@@ -271,3 +271,27 @@ def test_commander_prompt_can_use_existing_agent_outputs():
 
     assert "LogAgent" in prompt
     assert "线程池阻塞" in prompt
+
+
+def test_enrich_agent_commands_passes_mapped_tables_to_database_agent():
+    orchestrator = _orchestrator()
+    commands = {
+        "DatabaseAgent": {
+            "target_agent": "DatabaseAgent",
+            "task": "读取数据库结构",
+            "focus": "",
+            "expected_output": "",
+            "use_tool": True,
+        }
+    }
+    compact_context = {
+        "interface_mapping": {
+            "matched": True,
+            "database_tables": ["public.t_order", "t_order_item"],
+        }
+    }
+    enriched = orchestrator._enrich_agent_commands_with_asset_mapping(commands, compact_context)
+    db_cmd = enriched["DatabaseAgent"]
+
+    assert db_cmd["database_tables"] == ["public.t_order", "t_order_item"]
+    assert "责任田映射表" in str(db_cmd["focus"] or "")

@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="2100" height="1350" viewBox="0 0 1680 1080" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1080" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F7FAFF"/>
+      <stop offset="1" stop-color="#EEF4FF"/>
+    </linearGradient>
+    <linearGradient id="roof" x1="840" y1="80" x2="840" y2="230" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1F3A8A"/>
+      <stop offset="1" stop-color="#2563EB"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#F8FBFF"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3B82F6"/>
+    </marker>
+    <style>
+      .title { font: 700 34px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #0F172A; }
+      .subtitle { font: 500 18px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #334155; }
+      .layer-title { font: 700 20px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #0F172A; }
+      .card-title { font: 700 16px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #0F172A; }
+      .card-text { font: 500 13px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #334155; }
+      .agent-title { font: 700 14px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #0F172A; }
+      .agent-sub { font: 500 12px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #475569; }
+      .label { font: 600 12px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #1E3A8A; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1680" height="1080" fill="url(#bg)"/>
+
+  <text x="840" y="52" text-anchor="middle" class="title">生产问题根因分析系统 - 总体架构图</text>
+  <text x="840" y="82" text-anchor="middle" class="subtitle">Frontend + LangGraph Multi-Agent + Tooling Connectors + LLM(Kimi-k2.5)</text>
+
+  <!-- House roof -->
+  <polygon points="300,220 840,95 1380,220" fill="url(#roof)" opacity="0.96"/>
+  <text x="840" y="178" text-anchor="middle" style="font:700 22px 'IBM Plex Sans','PingFang SC',sans-serif; fill:#FFFFFF;">用户入口层（Web UI）</text>
+
+  <!-- House body -->
+  <rect x="300" y="220" width="1080" height="760" rx="16" fill="#FFFFFF" stroke="#C7D7F5" stroke-width="2"/>
+
+  <!-- Layer separators -->
+  <line x1="300" y1="360" x2="1380" y2="360" stroke="#D7E3FA" stroke-width="2"/>
+  <line x1="300" y1="575" x2="1380" y2="575" stroke="#D7E3FA" stroke-width="2"/>
+  <line x1="300" y1="820" x2="1380" y2="820" stroke="#D7E3FA" stroke-width="2"/>
+
+  <!-- Layer labels -->
+  <text x="325" y="255" class="layer-title">A. 前端交互层</text>
+  <text x="325" y="395" class="layer-title">B. 后端接入层（FastAPI + WebSocket）</text>
+  <text x="325" y="610" class="layer-title">C. 多 Agent 编排层（LangGraph Runtime）</text>
+  <text x="325" y="855" class="layer-title">D. 工具与外部系统层</text>
+
+  <!-- A layer cards -->
+  <rect x="340" y="275" width="240" height="68" rx="10" fill="url(#panel)" stroke="#D9E6FC"/>
+  <text x="360" y="300" class="card-title">首页 / 故障录入</text>
+  <text x="360" y="322" class="card-text">上传日志 + 输入现象 + 启动分析</text>
+
+  <rect x="600" y="275" width="250" height="68" rx="10" fill="url(#panel)" stroke="#D9E6FC"/>
+  <text x="620" y="300" class="card-title">资产映射页</text>
+  <text x="620" y="322" class="card-text">接口 → 领域/聚合根/责任田/表</text>
+
+  <rect x="870" y="275" width="250" height="68" rx="10" fill="url(#panel)" stroke="#D9E6FC"/>
+  <text x="890" y="300" class="card-title">辩论过程页</text>
+  <text x="890" y="322" class="card-text">实时对话流 + 工具调用审计</text>
+
+  <rect x="1140" y="275" width="220" height="68" rx="10" fill="url(#panel)" stroke="#D9E6FC"/>
+  <text x="1160" y="300" class="card-title">辩论结果页</text>
+  <text x="1160" y="322" class="card-text">Top-K 根因 + 证据链 + 报告</text>
+
+  <!-- B layer cards -->
+  <rect x="340" y="425" width="300" height="125" rx="12" fill="#F8FBFF" stroke="#CFE0FC"/>
+  <text x="360" y="452" class="card-title">API 网关与会话服务</text>
+  <text x="360" y="475" class="card-text">/incidents /debates /reports</text>
+  <text x="360" y="495" class="card-text">历史任务、重跑、取消、恢复</text>
+  <text x="360" y="515" class="card-text">北京时间标准化时间戳输出</text>
+
+  <rect x="660" y="425" width="360" height="125" rx="12" fill="#F8FBFF" stroke="#CFE0FC"/>
+  <text x="680" y="452" class="card-title">实时事件总线（WebSocket/SSE）</text>
+  <text x="680" y="475" class="card-text">phase_changed / agent_chat_message</text>
+  <text x="680" y="495" class="card-text">agent_tool_context_prepared / agent_tool_io</text>
+  <text x="680" y="515" class="card-text">llm_call_started/completed/failed</text>
+
+  <rect x="1040" y="425" width="320" height="125" rx="12" fill="#F8FBFF" stroke="#CFE0FC"/>
+  <text x="1060" y="452" class="card-title">报告聚合与可视化接口</text>
+  <text x="1060" y="475" class="card-text">Top-K 根因候选、证据链、修复建议</text>
+  <text x="1060" y="495" class="card-text">调查回放、版本对比、治理指标</text>
+  <text x="1060" y="515" class="card-text">可导出结构化 RCA 报告</text>
+
+  <!-- C layer: Orchestrator + Agents -->
+  <rect x="340" y="645" width="210" height="140" rx="12" fill="#F5F8FF" stroke="#C9DBFA"/>
+  <text x="360" y="667" class="card-title">LangGraph Orchestrator</text>
+  <text x="360" y="690" class="card-text">StateGraph + Routing Strategy</text>
+  <text x="360" y="710" class="card-text">超时重试 + 降级收敛 + 防循环</text>
+  <text x="360" y="730" class="card-text">命令分发与会话状态管理</text>
+
+  <rect x="560" y="625" width="800" height="185" rx="14" fill="#F9FBFF" stroke="#D1E0FA"/>
+  <text x="585" y="652" class="card-title">Multi-Agent 协作域（分组视图）</text>
+
+  <!-- Main agent -->
+  <rect x="860" y="660" width="200" height="72" rx="10" fill="#FFF3D9" stroke="#F2B960"/>
+  <text x="876" y="684" class="agent-title">ProblemAnalysisAgent</text>
+  <text x="876" y="702" class="agent-sub">主Agent / 指挥调度中心</text>
+  <text x="876" y="719" class="agent-sub">任务拆解、命令分发、结论收敛</text>
+
+  <!-- Group cards -->
+  <rect x="590" y="738" width="240" height="64" rx="10" fill="#EEF5FF" stroke="#BDD2FA"/>
+  <text x="608" y="762" class="card-title">分析组</text>
+  <text x="608" y="782" class="card-text">Log / Domain / Code / Change</text>
+  <text x="608" y="798" class="card-text">日志、代码、变更证据采集</text>
+
+  <rect x="840" y="738" width="240" height="64" rx="10" fill="#ECFDF5" stroke="#BBE7D0"/>
+  <text x="858" y="762" class="card-title">数据与指标组</text>
+  <text x="858" y="782" class="card-text">Database / Metrics</text>
+  <text x="858" y="798" class="card-text">表结构、索引、慢SQL、系统指标</text>
+
+  <rect x="1090" y="738" width="240" height="64" rx="10" fill="#F8F4FF" stroke="#D8CBFF"/>
+  <text x="1108" y="762" class="card-title">裁决组</text>
+  <text x="1108" y="782" class="card-text">Critic/Rebuttal / Judge / Runbook</text>
+  <text x="1108" y="798" class="card-text">质疑、裁决、处置建议输出</text>
+
+  <!-- D layer cards -->
+  <rect x="340" y="865" width="300" height="110" rx="12" fill="#F8FBFF" stroke="#CCE0FA"/>
+  <text x="360" y="872" class="card-title">模型服务</text>
+  <text x="360" y="894" class="card-text">Volcengine Ark OpenAI 接口</text>
+  <text x="360" y="912" class="card-text">Model: kimi-k2.5</text>
+  <text x="360" y="930" class="card-text">流式调用 + 请求/响应日志</text>
+  <text x="360" y="948" class="card-text">超时重试与降级策略</text>
+
+  <rect x="660" y="865" width="350" height="110" rx="12" fill="#F8FBFF" stroke="#CCE0FA"/>
+  <text x="680" y="872" class="card-title">Agent 工具连接器（可开关）</text>
+  <text x="680" y="894" class="card-text">Git / Local Log / Domain Excel / PostgreSQL</text>
+  <text x="680" y="912" class="card-text">Grafana / APM / LogCloud / Alert(预留)</text>
+  <text x="680" y="930" class="card-text">工具调用审计</text>
+  <text x="680" y="948" class="card-text">I/O 过程透出前端</text>
+
+  <rect x="1030" y="865" width="330" height="110" rx="12" fill="#F8FBFF" stroke="#CCE0FA"/>
+  <text x="1050" y="872" class="card-title">数据与资产来源</text>
+  <text x="1050" y="894" class="card-text">本地资产库（MD / JSON / 案例）</text>
+  <text x="1050" y="912" class="card-text">责任田映射（接口→领域→表）</text>
+  <text x="1050" y="930" class="card-text">数据库元信息（表结构 / 索引）</text>
+  <text x="1050" y="948" class="card-text">慢SQL / TopSQL / Session</text>
+
+  <!-- Arrows -->
+  <line x1="840" y1="345" x2="840" y2="360" stroke="#3B82F6" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <line x1="840" y1="550" x2="840" y2="575" stroke="#3B82F6" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <line x1="840" y1="810" x2="840" y2="820" stroke="#3B82F6" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- Orchestrator -> MultiAgent boundary -->
+  <line x1="550" y1="715" x2="560" y2="715" stroke="#3B82F6" stroke-width="2.2" marker-end="url(#arrow)"/>
+
+  <!-- Multi-Agent internal links removed for a cleaner overview style -->
+
+  <!-- Legend -->
+  <rect x="40" y="860" width="220" height="160" rx="10" fill="#FFFFFF" stroke="#D6E3FA"/>
+  <text x="60" y="890" class="card-title">图例</text>
+  <rect x="60" y="905" width="14" height="14" rx="2" fill="#FFF3D9" stroke="#F2B960"/>
+  <text x="84" y="917" class="card-text">主Agent协调节点</text>
+  <rect x="60" y="930" width="14" height="14" rx="2" fill="#EEF5FF" stroke="#BDD2FA"/>
+  <text x="84" y="942" class="card-text">Agent分组节点</text>
+  <rect x="60" y="955" width="14" height="14" rx="2" fill="#F8FBFF" stroke="#CCE0FA"/>
+  <text x="84" y="967" class="card-text">平台/服务模块</text>
+  <line x1="60" y1="988" x2="78" y2="988" stroke="#3B82F6" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="84" y="992" class="card-text">调用/数据流向</text>
+
+  <!-- Footer -->
+  <text x="840" y="1035" text-anchor="middle" class="label">版本: 2026-03-05 · 与当前 LangGraph 多Agent实现对齐（不含外部DB持久化）</text>
+</svg>

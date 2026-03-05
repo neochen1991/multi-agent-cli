@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Form, Input, InputNumber, Space, Switch, Typography, message } from 'antd';
+import { Alert, Button, Card, Form, Input, InputNumber, Select, Space, Switch, Typography, message } from 'antd';
 import { authApi, settingsApi, type AgentToolingConfig } from '@/services/api';
 
 const { Paragraph, Text, Title } = Typography;
@@ -18,8 +18,18 @@ const SettingsPage: React.FC = () => {
     settingsApi
       .getTooling()
       .then((res) => {
+        const defaultDatabase = {
+          enabled: false,
+          engine: 'sqlite',
+          db_path: '',
+          postgres_dsn: '',
+          pg_schema: 'public',
+          connect_timeout_seconds: 8,
+          max_rows: 50,
+        };
         const normalized: AgentToolingConfig = {
           ...res,
+          database: { ...defaultDatabase, ...(res.database || {}) },
           telemetry_source: res.telemetry_source || {
             enabled: false,
             endpoint: '',
@@ -28,6 +38,48 @@ const SettingsPage: React.FC = () => {
             verify_ssl: true,
           },
           cmdb_source: res.cmdb_source || {
+            enabled: false,
+            endpoint: '',
+            api_token: '',
+            timeout_seconds: 8,
+            verify_ssl: true,
+          },
+          prometheus_source: res.prometheus_source || {
+            enabled: false,
+            endpoint: '',
+            api_token: '',
+            timeout_seconds: 8,
+            verify_ssl: true,
+          },
+          loki_source: res.loki_source || {
+            enabled: false,
+            endpoint: '',
+            api_token: '',
+            timeout_seconds: 8,
+            verify_ssl: true,
+          },
+          grafana_source: res.grafana_source || {
+            enabled: false,
+            endpoint: '',
+            api_token: '',
+            timeout_seconds: 8,
+            verify_ssl: true,
+          },
+          apm_source: res.apm_source || {
+            enabled: false,
+            endpoint: '',
+            api_token: '',
+            timeout_seconds: 8,
+            verify_ssl: true,
+          },
+          logcloud_source: res.logcloud_source || {
+            enabled: false,
+            endpoint: '',
+            api_token: '',
+            timeout_seconds: 8,
+            verify_ssl: true,
+          },
+          alert_platform_source: res.alert_platform_source || {
             enabled: false,
             endpoint: '',
             api_token: '',
@@ -191,6 +243,38 @@ const SettingsPage: React.FC = () => {
               </Space>
             </Card>
 
+            <Card size="small" title="DatabaseAgent - 数据库取证" style={{ marginTop: 12 }}>
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Form.Item name={['database', 'enabled']} label="启用数据库工具" valuePropName="checked">
+                  <Switch />
+                </Form.Item>
+                <Form.Item name={['database', 'engine']} label="数据库类型">
+                  <Select
+                    style={{ width: 220 }}
+                    options={[
+                      { label: 'SQLite（本地文件）', value: 'sqlite' },
+                      { label: 'PostgreSQL', value: 'postgresql' },
+                    ]}
+                  />
+                </Form.Item>
+                <Form.Item name={['database', 'db_path']} label="SQLite 数据库文件路径">
+                  <Input placeholder="/path/to/ops_snapshot.db" />
+                </Form.Item>
+                <Form.Item name={['database', 'postgres_dsn']} label="PostgreSQL DSN">
+                  <Input.Password placeholder="postgresql://user:password@host:5432/dbname" />
+                </Form.Item>
+                <Form.Item name={['database', 'pg_schema']} label="PostgreSQL Schema">
+                  <Input placeholder="public" />
+                </Form.Item>
+                <Form.Item name={['database', 'connect_timeout_seconds']} label="连接超时（秒）">
+                  <InputNumber min={2} max={60} style={{ width: 180 }} />
+                </Form.Item>
+                <Form.Item name={['database', 'max_rows']} label="慢SQL/TopSQL最大返回条数">
+                  <InputNumber min={1} max={500} style={{ width: 180 }} />
+                </Form.Item>
+              </Space>
+            </Card>
+
             <Card size="small" title="远程数据源入口（默认关闭，不影响本地文件模式）" style={{ marginTop: 12 }}>
               <Space direction="vertical" style={{ width: '100%' }}>
                 <Card size="small" title="Telemetry Source（遥测平台入口）">
@@ -297,6 +381,118 @@ const SettingsPage: React.FC = () => {
                     </Form.Item>
                     <Form.Item
                       name={['loki_source', 'verify_ssl']}
+                      label="校验证书"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                  </Space>
+                </Card>
+
+                <Card size="small" title="Grafana Source（监控看板入口）">
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Form.Item
+                      name={['grafana_source', 'enabled']}
+                      label="启用 Grafana 入口（默认关闭）"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item name={['grafana_source', 'endpoint']} label="Grafana API Endpoint">
+                      <Input placeholder="https://grafana.example.com/api/ds/query" />
+                    </Form.Item>
+                    <Form.Item name={['grafana_source', 'api_token']} label="Grafana API Token">
+                      <Input.Password placeholder="可选，启用后填写" />
+                    </Form.Item>
+                    <Form.Item name={['grafana_source', 'timeout_seconds']} label="超时（秒）">
+                      <InputNumber min={2} max={60} style={{ width: 180 }} />
+                    </Form.Item>
+                    <Form.Item
+                      name={['grafana_source', 'verify_ssl']}
+                      label="校验证书"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                  </Space>
+                </Card>
+
+                <Card size="small" title="APM Source（链路分析平台入口）">
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Form.Item
+                      name={['apm_source', 'enabled']}
+                      label="启用 APM 入口（默认关闭）"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item name={['apm_source', 'endpoint']} label="APM API Endpoint">
+                      <Input placeholder="https://apm.example.com/api/v1/traces" />
+                    </Form.Item>
+                    <Form.Item name={['apm_source', 'api_token']} label="APM API Token">
+                      <Input.Password placeholder="可选，启用后填写" />
+                    </Form.Item>
+                    <Form.Item name={['apm_source', 'timeout_seconds']} label="超时（秒）">
+                      <InputNumber min={2} max={60} style={{ width: 180 }} />
+                    </Form.Item>
+                    <Form.Item
+                      name={['apm_source', 'verify_ssl']}
+                      label="校验证书"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                  </Space>
+                </Card>
+
+                <Card size="small" title="Log Cloud Source（日志云平台入口）">
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Form.Item
+                      name={['logcloud_source', 'enabled']}
+                      label="启用日志云入口（默认关闭）"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item name={['logcloud_source', 'endpoint']} label="日志云 API Endpoint">
+                      <Input placeholder="https://logcloud.example.com/api/v1/search" />
+                    </Form.Item>
+                    <Form.Item name={['logcloud_source', 'api_token']} label="日志云 API Token">
+                      <Input.Password placeholder="可选，启用后填写" />
+                    </Form.Item>
+                    <Form.Item name={['logcloud_source', 'timeout_seconds']} label="超时（秒）">
+                      <InputNumber min={2} max={60} style={{ width: 180 }} />
+                    </Form.Item>
+                    <Form.Item
+                      name={['logcloud_source', 'verify_ssl']}
+                      label="校验证书"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                  </Space>
+                </Card>
+
+                <Card size="small" title="Alert Platform Source（监控告警平台入口）">
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Form.Item
+                      name={['alert_platform_source', 'enabled']}
+                      label="启用告警平台入口（默认关闭）"
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item name={['alert_platform_source', 'endpoint']} label="告警平台 API Endpoint">
+                      <Input placeholder="https://alert.example.com/api/v1/alerts" />
+                    </Form.Item>
+                    <Form.Item name={['alert_platform_source', 'api_token']} label="告警平台 API Token">
+                      <Input.Password placeholder="可选，启用后填写" />
+                    </Form.Item>
+                    <Form.Item name={['alert_platform_source', 'timeout_seconds']} label="超时（秒）">
+                      <InputNumber min={2} max={60} style={{ width: 180 }} />
+                    </Form.Item>
+                    <Form.Item
+                      name={['alert_platform_source', 'verify_ssl']}
                       label="校验证书"
                       valuePropName="checked"
                     >

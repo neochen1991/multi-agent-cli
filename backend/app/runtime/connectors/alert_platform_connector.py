@@ -1,35 +1,35 @@
-"""Loki connector entrypoint (disabled by default)."""
+"""Alert platform connector entrypoint (disabled by default)."""
 
 from __future__ import annotations
 
 from typing import Any, Dict
 from urllib.parse import urlencode
 
-from app.models.tooling import LokiSourceConfig
+from app.models.tooling import AlertPlatformSourceConfig
 from app.runtime.connectors.http_utils import http_get_json
 
 
-class LokiConnector:
-    name = "LokiConnector"
-    resource_type = "loki"
+class AlertPlatformConnector:
+    name = "AlertPlatformConnector"
+    resource_type = "alert_platform"
 
-    async def fetch(self, config: LokiSourceConfig, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def fetch(self, config: AlertPlatformSourceConfig, context: Dict[str, Any]) -> Dict[str, Any]:
         if not bool(config.enabled):
-            return {"enabled": False, "status": "disabled", "data": {}, "message": "loki source disabled"}
+            return {"enabled": False, "status": "disabled", "data": {}, "message": "alert platform source disabled"}
         endpoint = str(config.endpoint or "").strip()
         if not endpoint:
             return {"enabled": True, "status": "unavailable", "data": {}, "message": "endpoint is empty"}
 
         service_name = str(context.get("service_name") or "").strip()
-        trace_id = str(context.get("trace_id") or "").strip()
-        query = str(context.get("query") or "").strip()
+        severity = str(context.get("severity") or "").strip()
+        alert_id = str(context.get("alarm_id") or context.get("alert_id") or "").strip()
         query_params = {}
         if service_name:
             query_params["service"] = service_name
-        if trace_id:
-            query_params["trace_id"] = trace_id
-        if query:
-            query_params["query"] = query
+        if severity:
+            query_params["severity"] = severity
+        if alert_id:
+            query_params["alert_id"] = alert_id
         url = endpoint
         if query_params:
             suffix = urlencode(query_params)
@@ -47,8 +47,8 @@ class LokiConnector:
                 "status": "ok",
                 "data": dict(payload.get("data") or {}),
                 "request_meta": dict(payload.get("request_meta") or {}),
-                "message": "loki fetched",
-                "context_hint": {"service_name": service_name, "trace_id": trace_id},
+                "message": "alert platform fetched",
+                "context_hint": {"service_name": service_name, "alert_id": alert_id},
             }
         except Exception as exc:
             return {
@@ -61,9 +61,10 @@ class LokiConnector:
                     "status": "error",
                     "error": str(exc)[:240],
                 },
-                "message": f"loki fetch failed: {str(exc)[:180]}",
-                "context_hint": {"service_name": service_name, "trace_id": trace_id},
+                "message": f"alert platform fetch failed: {str(exc)[:180]}",
+                "context_hint": {"service_name": service_name, "alert_id": alert_id},
             }
 
 
-__all__ = ["LokiConnector"]
+__all__ = ["AlertPlatformConnector"]
+

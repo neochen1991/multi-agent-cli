@@ -107,6 +107,34 @@ def create_agent_subgraph_node(
     return _execute_agent
 
 
+def _agent_to_node_name(agent_name: str) -> str:
+    """Map agent name to graph node name."""
+    node_name = f"{agent_name.lower().replace('agent', '')}_agent_node"
+    if agent_name == "LogAgent":
+        node_name = "log_agent_node"
+    elif agent_name == "DomainAgent":
+        node_name = "domain_agent_node"
+    elif agent_name == "CodeAgent":
+        node_name = "code_agent_node"
+    elif agent_name == "DatabaseAgent":
+        node_name = "database_agent_node"
+    elif agent_name == "MetricsAgent":
+        node_name = "metrics_agent_node"
+    elif agent_name == "ChangeAgent":
+        node_name = "change_agent_node"
+    elif agent_name == "RunbookAgent":
+        node_name = "runbook_agent_node"
+    elif agent_name == "CriticAgent":
+        node_name = "critic_agent_node"
+    elif agent_name == "RebuttalAgent":
+        node_name = "rebuttal_agent_node"
+    elif agent_name == "JudgeAgent":
+        node_name = "judge_agent_node"
+    elif agent_name == "VerificationAgent":
+        node_name = "verification_agent_node"
+    return node_name
+
+
 def build_parallel_route_function(
     orchestrator: Any,
     parallel_agents: List[str],
@@ -137,7 +165,7 @@ def build_parallel_route_function(
         Returns:
             A list of Send objects (or single destination string for backward compat).
         """
-        from langgraph.constants import Send
+        from langgraph.types import Send
 
         next_step = str(state.get("next_step") or "").strip()
         agent_commands = dict(state.get("agent_commands") or {})
@@ -147,38 +175,21 @@ def build_parallel_route_function(
             from app.runtime.langgraph.routing import agent_from_step
             agent_name = agent_from_step(next_step)
             if agent_name:
-                node_name = f"{agent_name.lower().replace('agent', '')}_agent_node"
-                if agent_name == "LogAgent":
-                    node_name = "log_agent_node"
-                elif agent_name == "DomainAgent":
-                    node_name = "domain_agent_node"
-                elif agent_name == "CodeAgent":
-                    node_name = "code_agent_node"
-                elif agent_name == "MetricsAgent":
-                    node_name = "metrics_agent_node"
-                elif agent_name == "ChangeAgent":
-                    node_name = "change_agent_node"
-                elif agent_name == "RunbookAgent":
-                    node_name = "runbook_agent_node"
-                elif agent_name == "CriticAgent":
-                    node_name = "critic_agent_node"
-                elif agent_name == "RebuttalAgent":
-                    node_name = "rebuttal_agent_node"
-                elif agent_name == "JudgeAgent":
-                    node_name = "judge_agent_node"
-                elif agent_name == "VerificationAgent":
-                    node_name = "verification_agent_node"
-                return node_name
+                return _agent_to_node_name(agent_name)
 
         # If next_step is parallel analysis, use Send API for true parallelism
         if next_step in ("analysis_parallel", "parallel_analysis"):
             # Determine which agents to dispatch
             target_agents = list(agent_commands.keys()) if agent_commands else parallel_agents
-
-            # For now, we return a single node name since parallel execution
-            # is handled internally by the phase_executor
-            # True Send-based parallelism would require restructuring the graph
-            return "analysis_parallel_node"
+            base_state = {
+                "messages": list(state.get("messages") or []),
+                "context_summary": dict(state.get("context_summary") or {}),
+                "current_round": int(state.get("current_round") or 1),
+                "agent_commands": dict(agent_commands),
+                "agent_mailbox": dict(state.get("agent_mailbox") or {}),
+                "history_cards": list(state.get("history_cards") or []),
+            }
+            return create_parallel_agent_sends(state=state, agent_names=target_agents, base_state=base_state)
 
         # Check for other routing targets
         if next_step == "analysis_collaboration":
@@ -211,7 +222,7 @@ def create_parallel_agent_sends(
     Returns:
         List of Send objects.
     """
-    from langgraph.constants import Send
+    from langgraph.types import Send
 
     sends = []
     for agent_name in agent_names:
@@ -222,30 +233,7 @@ def create_parallel_agent_sends(
             "agent_command": (state.get("agent_commands") or {}).get(agent_name),
         }
 
-        # Determine node name
-        node_name = f"{agent_name.lower().replace('agent', '')}_agent_node"
-        if agent_name == "LogAgent":
-            node_name = "log_agent_node"
-        elif agent_name == "DomainAgent":
-            node_name = "domain_agent_node"
-        elif agent_name == "CodeAgent":
-            node_name = "code_agent_node"
-        elif agent_name == "MetricsAgent":
-            node_name = "metrics_agent_node"
-        elif agent_name == "ChangeAgent":
-            node_name = "change_agent_node"
-        elif agent_name == "RunbookAgent":
-            node_name = "runbook_agent_node"
-        elif agent_name == "CriticAgent":
-            node_name = "critic_agent_node"
-        elif agent_name == "RebuttalAgent":
-            node_name = "rebuttal_agent_node"
-        elif agent_name == "JudgeAgent":
-            node_name = "judge_agent_node"
-        elif agent_name == "VerificationAgent":
-            node_name = "verification_agent_node"
-
-        sends.append(Send(node_name, agent_state))
+        sends.append(Send(_agent_to_node_name(agent_name), agent_state))
 
     return sends
 

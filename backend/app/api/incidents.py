@@ -384,13 +384,17 @@ async def auto_investigate_incident(
                 "session_id": session_id,
                 "confidence": float(result.confidence or 0.0),
             }
-        except Exception as exc:
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                reason = "task cancelled by timeout watchdog"
+            else:
+                reason = str(exc)
             await incident_service.update_incident(
                 incident_id,
                 IncidentUpdate(
                     status=IncidentStatus.CLOSED,
                     debate_session_id=session_id,
-                    fix_suggestion=str(exc)[:260],
+                    fix_suggestion=reason[:260],
                 ),
             )
             raise
@@ -457,13 +461,17 @@ async def ingest_alert(payload: AlertIngestRequest):
                 "session_id": session.id,
                 "confidence": float(result.confidence or 0.0),
             }
-        except Exception as exc:
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                reason = "task cancelled by timeout watchdog"
+            else:
+                reason = str(exc)
             await incident_service.update_incident(
                 incident.id,
                 IncidentUpdate(
                     status=IncidentStatus.CLOSED,
                     debate_session_id=session.id,
-                    fix_suggestion=str(exc)[:260],
+                    fix_suggestion=reason[:260],
                 ),
             )
             raise

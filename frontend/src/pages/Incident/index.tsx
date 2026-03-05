@@ -14,6 +14,8 @@ import {
   Steps,
   Tag,
   Typography,
+  Upload,
+  type UploadProps,
   message,
 } from 'antd';
 import { useParams, useSearchParams } from 'react-router-dom';
@@ -92,6 +94,7 @@ const IncidentPage: React.FC = () => {
   const [running, setRunning] = useState(false);
   const [debateMaxRounds, setDebateMaxRounds] = useState<number>(1);
   const [executionMode, setExecutionMode] = useState<'standard' | 'quick' | 'background' | 'async'>('standard');
+  const [logUploadMeta, setLogUploadMeta] = useState<{ name: string; size: number; lines: number } | null>(null);
   const [bootstrapping, setBootstrapping] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const pollingRef = useRef(false);
@@ -623,11 +626,17 @@ const IncidentPage: React.FC = () => {
       kind === 'session_failed';
 
     const side: 'agent' | 'system' = agentRaw ? 'agent' : 'system';
+    const isMainAgent = ['problemanalysisagent', 'mainagent', 'commanderagent', 'orchestratoragent'].includes(
+      String(agentName || '').toLowerCase(),
+    );
+    let messageKind: 'chat' | 'tool' | 'command' | 'status' = 'status';
     let status: 'streaming' | 'done' | 'error' = 'done';
     let summary = normalizeInlineText(messageText || kind);
     let detail = '';
+    let toolPayload: DialogueMessage['toolPayload'] | undefined;
 
     if (kind === 'agent_chat_message') {
+      messageKind = 'chat';
       status = 'done';
       const replyTo = firstTextValue(data, ['reply_to']);
       summary = replyTo && replyTo !== 'all' ? `${agentName} 回复 ${replyTo}` : `${agentName} 发言`;
@@ -644,6 +653,7 @@ const IncidentPage: React.FC = () => {
         detail = normalizeMarkdownText(speechText);
       }
     } else if (kind === 'agent_tool_context_prepared') {
+      messageKind = 'tool';
       const toolName = firstTextValue(data, ['tool_name']) || 'unknown_tool';
       const enabled = Boolean(data.enabled);
       const used = Boolean(data.used);
@@ -683,6 +693,21 @@ const IncidentPage: React.FC = () => {
       const auditText = formatToolAuditLog(auditLog);
       status = toolStatus === 'error' ? 'error' : 'done';
       summary = `${agentName} 工具调用：${toolLabel}（${statusLabel}）`;
+      toolPayload = {
+        toolName: toolLabel,
+        statusLabel,
+        requestText: [
+          `开关状态：${enabled ? '开启' : '关闭'}`,
+          `是否实际调用：${used ? '是' : '否'}`,
+          `命令门禁：允许调用=${commandGateAllow}，原因=${commandGateReason}，来源=${commandGateSource}`,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        responseText: [`工具反馈：${toolSummary}`, `数据摘要：${dataSummaryText}`, `返回详情：${dataDetailText}`]
+          .filter(Boolean)
+          .join('\n\n'),
+        auditText,
+      };
       detail = normalizeMarkdownText(
         [
           `我使用了工具：${toolLabel}`,
@@ -699,6 +724,7 @@ const IncidentPage: React.FC = () => {
           .join('\n'),
       );
     } else if (kind === 'agent_tool_io') {
+      messageKind = 'tool';
       const action = firstTextValue(data, ['io_action']) || '-';
       const ioStatus = firstTextValue(data, ['io_status']) || '-';
       const ioCallId = firstTextValue(data, ['io_call_id']) || '-';
@@ -709,6 +735,15 @@ const IncidentPage: React.FC = () => {
       const ioDetail = toDisplayText(data.io_detail);
       status = ioStatus === 'error' ? 'error' : 'done';
       summary = `${agentName} 工具I/O：${action}（${ioStatus}）`;
+      toolPayload = {
+        toolName: `工具I/O ${action}`,
+        statusLabel: ioStatus,
+        requestText: [ioRequest ? `请求摘要：${ioRequest}` : '', `调用ID：${ioCallId}`].filter(Boolean).join('\n'),
+        responseText: [ioResponse ? `响应摘要：${ioResponse}` : '', ioDetail ? `I/O详情：${ioDetail}` : '']
+          .filter(Boolean)
+          .join('\n\n'),
+        auditText: [`时间：${ioTs}`, ioDuration ? `耗时：${ioDuration} ms` : ''].filter(Boolean).join('\n'),
+      };
       detail = normalizeMarkdownText(
         [
           `调用ID：${ioCallId}`,
@@ -722,8 +757,15 @@ const IncidentPage: React.FC = () => {
           .join('\n'),
       );
     } else if (kind === 'agent_tool_context_failed') {
+      messageKind = 'tool';
       status = 'error';
       summary = `${agentName} 工具调用失败`;
+      toolPayload = {
+        toolName: '工具调用',
+        statusLabel: '失败',
+        requestText: '调用过程中发生异常',
+        responseText: `错误信息：${firstTextValue(data, ['error']) || messageText || '未知错误'}`,
+      };
       detail = normalizeMarkdownText(
         `我尝试调用工具时发生异常。\n错误信息：${firstTextValue(data, ['error']) || messageText || '未知错误'}`,
       );
@@ -778,6 +820,7 @@ const IncidentPage: React.FC = () => {
       summary = normalizeInlineText(messageText || '状态更新');
       detail = normalizeMarkdownText(messageText || '');
     } else if (kind === 'agent_command_feedback') {
+      messageKind = 'command';
       status = 'done';
       summary = `${agentName} 向主Agent反馈`;
       const feedback = extractChatMessageText(firstTextValue(data, ['feedback']));
@@ -791,6 +834,7 @@ const IncidentPage: React.FC = () => {
           .join('\n'),
       );
     } else if (kind === 'agent_command_issued') {
+      messageKind = 'command';
       status = 'done';
       summary = normalizeInlineText(messageText || '主Agent指令');
       detail = normalizeMarkdownText(
@@ -806,6 +850,8 @@ const IncidentPage: React.FC = () => {
       eventTsMs: parseEventTimestampMs(data),
       agentName,
       side,
+      isMainAgent,
+      messageKind,
       phase,
       eventType: kind,
       traceId: firstTextValue(data, ['trace_id']) || '-',
@@ -813,6 +859,7 @@ const IncidentPage: React.FC = () => {
       status,
       summary,
       detail,
+      toolPayload,
     };
   };
 
@@ -2031,7 +2078,39 @@ const IncidentPage: React.FC = () => {
         '2026-02-20T14:02:01.122+08:00 WARN mysql lock wait timeout exceeded table=t_order_item',
       ].join('\n'),
     }));
+    setLogUploadMeta(null);
     message.success('已填充示例故障，可直接启动分析');
+  };
+
+  const handleLogFileUpload: UploadProps['beforeUpload'] = async (file) => {
+    try {
+      if (file.size > 5 * 1024 * 1024) {
+        message.error('日志文件过大，请上传 5MB 以内文件');
+        return Upload.LIST_IGNORE;
+      }
+      const text = await file.text();
+      if (!text.trim()) {
+        message.warning('上传文件内容为空');
+        return Upload.LIST_IGNORE;
+      }
+      const maxChars = 50000;
+      const clipped = text.length > maxChars ? text.slice(0, maxChars) : text;
+      const lineCount = clipped.split(/\r?\n/).length;
+      if (text.length > maxChars) {
+        message.warning(`日志内容超过 ${maxChars} 字符，已自动截断`);
+      }
+      setIncidentForm((prev) => {
+        const merged = prev.log_content
+          ? `${prev.log_content}\n\n# 上传文件: ${file.name}\n${clipped}`
+          : clipped;
+        return { ...prev, log_content: merged };
+      });
+      setLogUploadMeta({ name: file.name, size: file.size, lines: lineCount });
+      message.success(`已加载日志文件：${file.name}`);
+    } catch (error: any) {
+      message.error(error?.message || '读取日志文件失败');
+    }
+    return Upload.LIST_IGNORE;
   };
 
   return (
@@ -2174,12 +2253,34 @@ const IncidentPage: React.FC = () => {
               </Row>
 
               <Divider style={{ margin: 0 }} />
+              <Space wrap>
+                <Upload
+                  accept=".log,.txt,.out,.err,.trace,.stack,.json,.md"
+                  beforeUpload={handleLogFileUpload}
+                  showUploadList={false}
+                  maxCount={1}
+                >
+                  <Button>上传错误日志文件</Button>
+                </Upload>
+                {logUploadMeta && (
+                  <Text type="secondary">
+                    已上传：{logUploadMeta.name}（{Math.max(1, Math.round(logUploadMeta.size / 1024))}KB，
+                    {logUploadMeta.lines} 行）
+                  </Text>
+                )}
+              </Space>
               <TextArea
                 rows={10}
                 className="log-input-area"
                 placeholder="粘贴日志内容、报错堆栈、监控现象。建议包含 traceId / URL / 状态码。"
                 value={incidentForm.log_content}
-                onChange={(e) => setIncidentForm((s) => ({ ...s, log_content: e.target.value }))}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setIncidentForm((s) => ({ ...s, log_content: value }));
+                  if (!value.trim()) {
+                    setLogUploadMeta(null);
+                  }
+                }}
               />
               {!incidentId && (
                 <Space>

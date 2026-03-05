@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="2500" height="1750" viewBox="0 0 2000 1400" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1400" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F6FAFF"/>
+      <stop offset="1" stop-color="#EDF4FF"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563EB"/>
+    </marker>
+    <style>
+      .title { font: 700 34px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #0F172A; }
+      .subtitle { font: 500 18px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #334155; }
+      .laneTitle { font: 700 18px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #0F172A; }
+      .boxTitle { font: 700 14px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #0F172A; }
+      .boxText { font: 500 12px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #334155; }
+      .label { font: 600 12px 'IBM Plex Sans', 'PingFang SC', sans-serif; fill: #1E3A8A; }
+    </style>
+  </defs>
+
+  <rect width="2000" height="1400" fill="url(#bg)"/>
+  <text x="1000" y="52" text-anchor="middle" class="title">生产问题根因分析系统 - 业务流程图</text>
+  <text x="1000" y="82" text-anchor="middle" class="subtitle">从故障录入到 RCA 报告、修复建议与验证回放</text>
+
+  <!-- Swim lanes -->
+  <rect x="80" y="120" width="1840" height="210" rx="12" fill="#F8FBFF" stroke="#CEDCF7"/>
+  <rect x="80" y="340" width="1840" height="240" rx="12" fill="#F4F9FF" stroke="#C7DAFA"/>
+  <rect x="80" y="590" width="1840" height="300" rx="12" fill="#F7F8FF" stroke="#D9D8FF"/>
+  <rect x="80" y="900" width="1840" height="220" rx="12" fill="#F8FFFA" stroke="#CBEBD7"/>
+
+  <text x="105" y="150" class="laneTitle">L1 用户与会话层（Frontend + API）</text>
+  <text x="105" y="370" class="laneTitle">L2 资产映射与调度层（LangGraph Orchestrator）</text>
+  <text x="105" y="620" class="laneTitle">L3 多Agent分析与辩论层</text>
+  <text x="105" y="930" class="laneTitle">L4 报告输出与治理层</text>
+
+  <!-- L1 -->
+  <rect x="180" y="185" width="250" height="95" rx="10" fill="#FFFFFF" stroke="#BFD2F7"/>
+  <text x="200" y="215" class="boxTitle">1. 故障录入</text>
+  <text x="200" y="236" class="boxText">填写标题、现象、接口URL</text>
+  <text x="200" y="256" class="boxText">上传报错日志/堆栈</text>
+
+  <rect x="500" y="185" width="250" height="95" rx="10" fill="#FFFFFF" stroke="#BFD2F7"/>
+  <text x="520" y="215" class="boxTitle">2. 创建会话</text>
+  <text x="520" y="236" class="boxText">创建 Incident + Debate Session</text>
+  <text x="520" y="256" class="boxText">初始化运行参数</text>
+
+  <rect x="820" y="185" width="250" height="95" rx="10" fill="#FFFFFF" stroke="#BFD2F7"/>
+  <text x="840" y="215" class="boxTitle">3. 启动实时分析</text>
+  <text x="840" y="236" class="boxText">WebSocket 建连</text>
+  <text x="840" y="256" class="boxText">进入实时事件流</text>
+
+  <!-- L2 -->
+  <rect x="180" y="420" width="280" height="110" rx="10" fill="#FFFFFF" stroke="#B8D5FF"/>
+  <text x="200" y="452" class="boxTitle">4. 责任田资产映射</text>
+  <text x="200" y="474" class="boxText">接口 -> 领域/聚合根/责任团队</text>
+  <text x="200" y="494" class="boxText">输出数据库表清单</text>
+
+  <polygon points="540,430 640,475 540,520 440,475" fill="#FFF8E8" stroke="#F2C66A"/>
+  <text x="505" y="472" class="boxTitle">命中</text>
+  <text x="486" y="492" class="boxText">责任田?</text>
+
+  <rect x="700" y="420" width="300" height="110" rx="10" fill="#FFFFFF" stroke="#B8D5FF"/>
+  <text x="720" y="452" class="boxTitle">5. 主Agent任务拆解</text>
+  <text x="720" y="474" class="boxText">ProblemAnalysisAgent 下发命令</text>
+  <text x="720" y="494" class="boxText">将映射表信息传给 DatabaseAgent</text>
+
+  <rect x="1080" y="420" width="320" height="110" rx="10" fill="#FFFFFF" stroke="#B8D5FF"/>
+  <text x="1100" y="452" class="boxTitle">6. 工具门禁与上下文组装</text>
+  <text x="1100" y="474" class="boxText">按开关/命令决定是否调用工具</text>
+  <text x="1100" y="494" class="boxText">生成每个Agent的执行上下文</text>
+
+  <!-- L3 -->
+  <rect x="160" y="680" width="260" height="150" rx="10" fill="#FFFFFF" stroke="#D2CEFF"/>
+  <text x="180" y="712" class="boxTitle">7. 分析组并行取证</text>
+  <text x="180" y="735" class="boxText">Log / Domain / Code / Change</text>
+  <text x="180" y="756" class="boxText">提取日志、代码、变更证据</text>
+  <text x="180" y="777" class="boxText">形成初始根因候选</text>
+
+  <rect x="460" y="680" width="280" height="150" rx="10" fill="#FFFFFF" stroke="#D2CEFF"/>
+  <text x="480" y="712" class="boxTitle">8. 数据组专项分析</text>
+  <text x="480" y="735" class="boxText">DatabaseAgent: 表结构/索引/慢SQL</text>
+  <text x="480" y="756" class="boxText">MetricsAgent: CPU/线程/连接池/5xx</text>
+  <text x="480" y="777" class="boxText">输出性能与容量证据</text>
+
+  <rect x="780" y="680" width="280" height="150" rx="10" fill="#FFFFFF" stroke="#D2CEFF"/>
+  <text x="800" y="712" class="boxTitle">9. 交叉辩论与质疑</text>
+  <text x="800" y="735" class="boxText">Critic/Rebuttal 多轮交锋</text>
+  <text x="800" y="756" class="boxText">主Agent收集反馈并再分发任务</text>
+  <text x="800" y="777" class="boxText">补齐证据链缺口</text>
+
+  <rect x="1100" y="680" width="300" height="150" rx="10" fill="#FFFFFF" stroke="#D2CEFF"/>
+  <text x="1120" y="712" class="boxTitle">10. Judge裁决收敛</text>
+  <text x="1120" y="735" class="boxText">输出 Top-K 根因候选 + 置信度</text>
+  <text x="1120" y="756" class="boxText">给出处置建议与验证计划</text>
+  <text x="1120" y="777" class="boxText">必要时触发再辩论/降级策略</text>
+
+  <polygon points="1490,700 1590,755 1490,810 1390,755" fill="#FFF8E8" stroke="#F2C66A"/>
+  <text x="1438" y="752" class="boxTitle">证据充分?</text>
+  <text x="1458" y="773" class="boxText">可收敛</text>
+
+  <!-- L4 -->
+  <rect x="260" y="975" width="300" height="110" rx="10" fill="#FFFFFF" stroke="#BFE5CB"/>
+  <text x="280" y="1007" class="boxTitle">11. 生成 RCA 报告</text>
+  <text x="280" y="1029" class="boxText">根因、证据链、Top-K、修复建议</text>
+  <text x="280" y="1049" class="boxText">前端可视化展示</text>
+
+  <rect x="620" y="975" width="300" height="110" rx="10" fill="#FFFFFF" stroke="#BFE5CB"/>
+  <text x="640" y="1007" class="boxTitle">12. 人工评审与执行</text>
+  <text x="640" y="1029" class="boxText">负责人确认建议</text>
+  <text x="640" y="1049" class="boxText">执行修复/回滚/变更控制</text>
+
+  <rect x="980" y="975" width="300" height="110" rx="10" fill="#FFFFFF" stroke="#BFE5CB"/>
+  <text x="1000" y="1007" class="boxTitle">13. 验证与回放</text>
+  <text x="1000" y="1029" class="boxText">No-Regression 校验</text>
+  <text x="1000" y="1049" class="boxText">调查回放 + 反馈学习</text>
+
+  <rect x="1340" y="975" width="250" height="110" rx="10" fill="#FFFFFF" stroke="#BFE5CB"/>
+  <text x="1360" y="1007" class="boxTitle">14. 关闭 Incident</text>
+  <text x="1360" y="1029" class="boxText">同步历史、治理指标</text>
+  <text x="1360" y="1049" class="boxText">沉淀案例库</text>
+
+  <!-- Main arrows -->
+  <line x1="430" y1="232" x2="500" y2="232" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+  <line x1="750" y1="232" x2="820" y2="232" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+  <line x1="945" y1="280" x2="945" y2="420" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+
+  <line x1="460" y1="475" x2="440" y2="475" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+  <line x1="640" y1="475" x2="700" y2="475" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+  <line x1="1000" y1="475" x2="1080" y2="475" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+
+  <line x1="1240" y1="530" x2="1240" y2="680" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+  <line x1="420" y1="755" x2="460" y2="755" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+  <line x1="740" y1="755" x2="780" y2="755" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+  <line x1="1060" y1="755" x2="1100" y2="755" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+  <line x1="1400" y1="755" x2="1390" y2="755" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+
+  <line x1="1490" y1="810" x2="1490" y2="975" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+  <line x1="560" y1="1030" x2="620" y2="1030" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+  <line x1="920" y1="1030" x2="980" y2="1030" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+  <line x1="1280" y1="1030" x2="1340" y2="1030" stroke="#2563EB" stroke-width="2.4" marker-end="url(#arrow)"/>
+
+  <!-- Decision branches -->
+  <line x1="540" y1="520" x2="540" y2="560" stroke="#2563EB" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="540" y1="560" x2="260" y2="560" stroke="#2563EB" stroke-width="2"/>
+  <line x1="260" y1="560" x2="260" y2="232" stroke="#2563EB" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="552" y="548" class="label">否：补充信息后重试</text>
+
+  <line x1="1590" y1="755" x2="1760" y2="755" stroke="#2563EB" stroke-width="2"/>
+  <line x1="1760" y1="755" x2="1760" y2="620" stroke="#2563EB" stroke-width="2"/>
+  <line x1="1760" y1="620" x2="900" y2="620" stroke="#2563EB" stroke-width="2"/>
+  <line x1="900" y1="620" x2="900" y2="680" stroke="#2563EB" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="1675" y="742" class="label">否：继续辩论/重试/降级</text>
+  <text x="1502" y="845" class="label">是：进入报告与执行</text>
+</svg>

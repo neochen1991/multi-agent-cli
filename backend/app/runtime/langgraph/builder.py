@@ -253,6 +253,7 @@ class GraphBuilder:
             "LogAgent": "log_agent_node",
             "DomainAgent": "domain_agent_node",
             "CodeAgent": "code_agent_node",
+            "DatabaseAgent": "database_agent_node",
             "MetricsAgent": "metrics_agent_node",
             "ChangeAgent": "change_agent_node",
             "RunbookAgent": "runbook_agent_node",

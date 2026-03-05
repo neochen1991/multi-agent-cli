@@ -4,17 +4,28 @@ import { debateApi } from '@/services/api';
 
 const { Paragraph, Text } = Typography;
 
+type ToolAuditPayload = {
+  toolName: string;
+  statusLabel?: string;
+  requestText?: string;
+  responseText?: string;
+  auditText?: string;
+};
+
 export type DialogueViewMessage = {
   id: string;
   timeText: string;
   agentName: string;
   side: 'agent' | 'system';
+  isMainAgent?: boolean;
+  messageKind: 'chat' | 'tool' | 'command' | 'status';
   phase: string;
   eventType: string;
   latencyMs?: number;
   status: 'streaming' | 'done' | 'error';
   summary: string;
   detail: string;
+  toolPayload?: ToolAuditPayload;
 };
 
 type Props = {
@@ -62,6 +73,12 @@ const DialogueStream: React.FC<Props> = ({
   expandedDialogueIds,
   onToggleExpanded,
 }) => {
+  const kindLabelMap: Record<DialogueViewMessage['messageKind'], string> = {
+    chat: '对话',
+    tool: '工具调用',
+    command: '命令协作',
+    status: '状态',
+  };
   const [outputRefContent, setOutputRefContent] = useState<Record<string, string>>({});
   const [loadingOutputRef, setLoadingOutputRef] = useState<Record<string, boolean>>({});
 
@@ -78,40 +95,82 @@ const DialogueStream: React.FC<Props> = ({
         const compactText = compactView.text;
         const showCursor = msg.status === 'streaming' && renderedText.length < (msg.detail || '').length;
         const isExpanded = Boolean(expandedDialogueIds[msg.id]);
-        const canExpand = compactView.truncated;
+        const canExpand = msg.messageKind === 'tool' ? Boolean((msg.detail || '').trim()) : compactView.truncated;
         const outputRefs = extractOutputRefs(fullText || msg.detail);
         const hasLoadedOutputRef = outputRefs.some((refId) => Boolean(outputRefContent[refId]));
+        const kindLabel = kindLabelMap[msg.messageKind] || '消息';
         return (
           <div
             key={msg.id}
-            className={`dialogue-row ${msg.side === 'agent' ? 'dialogue-row-agent' : 'dialogue-row-system'}`}
+            className={`dialogue-row dialogue-row-${msg.messageKind} ${msg.side === 'agent' ? 'dialogue-row-agent' : 'dialogue-row-system'} ${
+              msg.isMainAgent ? 'dialogue-row-main-agent' : ''
+            }`}
           >
-            <Avatar size="small" className="dialogue-avatar">
+            <Avatar size="small" className={`dialogue-avatar dialogue-avatar-${msg.messageKind}`}>
               {msg.agentName.slice(0, 1).toUpperCase()}
             </Avatar>
             <div className={`dialogue-message dialogue-status-${msg.status}`}>
               <div className="dialogue-meta">
                 <Text className="dialogue-username">{msg.agentName}</Text>
+                {msg.isMainAgent ? <Tag className="dialogue-main-badge">主Agent</Tag> : null}
                 <Text className="dialogue-time">{msg.timeText}</Text>
+                <Tag className={`dialogue-kind-tag dialogue-kind-tag-${msg.messageKind}`}>{kindLabel}</Tag>
                 {msg.phase && <Tag className="dialogue-tag">{msg.phase}</Tag>}
-                <Tag className="dialogue-tag">{msg.eventType}</Tag>
+                <Tag className={`dialogue-tag dialogue-tag-${msg.messageKind}`}>{msg.eventType}</Tag>
                 {msg.latencyMs ? <Tag className="dialogue-tag">{`${msg.latencyMs}ms`}</Tag> : null}
               </div>
               <Paragraph className="dialogue-summary">{msg.summary}</Paragraph>
-              {isExpanded ? (
-                <pre className="dialogue-content">
+              {msg.messageKind === 'tool' && msg.toolPayload ? (
+                <div className="tool-audit-card">
+                  <div className="tool-audit-head">
+                    <Text className="tool-audit-title">{msg.toolPayload.toolName}</Text>
+                    {msg.toolPayload.statusLabel ? <Tag className="tool-audit-status">{msg.toolPayload.statusLabel}</Tag> : null}
+                  </div>
+                  <div className="tool-audit-grid">
+                    <div className="tool-audit-col">
+                      <Text className="tool-audit-col-title">请求信息</Text>
+                      <pre className="tool-audit-pre">{msg.toolPayload.requestText || '无'}</pre>
+                    </div>
+                    <div className="tool-audit-col">
+                      <Text className="tool-audit-col-title">返回信息</Text>
+                      <pre className="tool-audit-pre">{msg.toolPayload.responseText || '无'}</pre>
+                    </div>
+                  </div>
+                  {msg.toolPayload.auditText ? (
+                    <div className="tool-audit-foot">
+                      <Text className="tool-audit-col-title">调用审计</Text>
+                      <pre className="tool-audit-pre">{msg.toolPayload.auditText}</pre>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              {msg.messageKind === 'tool' ? (
+                isExpanded ? (
+                  <pre className={`dialogue-content dialogue-content-${msg.messageKind}`}>
+                    {fullText}
+                    {showCursor ? <span className="dialogue-cursor">▋</span> : ''}
+                  </pre>
+                ) : null
+              ) : isExpanded ? (
+                <pre className={`dialogue-content dialogue-content-${msg.messageKind}`}>
                   {fullText}
                   {showCursor ? <span className="dialogue-cursor">▋</span> : ''}
                 </pre>
               ) : (
-                <pre className="dialogue-content dialogue-content-compact">
+                <pre className={`dialogue-content dialogue-content-${msg.messageKind} dialogue-content-compact`}>
                   {compactText || '暂无关键信息'}
                   {showCursor ? <span className="dialogue-cursor">▋</span> : ''}
                 </pre>
               )}
               {canExpand && (
-                <Button type="link" size="small" style={{ paddingInline: 0, marginTop: 6 }} onClick={() => onToggleExpanded(msg.id)}>
-                  {isExpanded ? '收起详情' : '展开详情'}
+                <Button
+                  type="link"
+                  size="small"
+                  className="dialogue-expand-btn"
+                  style={{ paddingInline: 0, marginTop: 6 }}
+                  onClick={() => onToggleExpanded(msg.id)}
+                >
+                  {isExpanded ? '收起详情' : msg.messageKind === 'tool' ? '查看原始记录' : '展开详情'}
                 </Button>
               )}
               {outputRefs.length > 0 && (

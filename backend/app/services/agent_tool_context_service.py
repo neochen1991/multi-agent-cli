@@ -15,16 +15,25 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import subprocess
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import structlog
+try:
+    import asyncpg
+except Exception:  # pragma: no cover - optional dependency
+    asyncpg = None  # type: ignore[assignment]
 
 from app.config import settings
 from app.models.tooling import AgentToolingConfig
 from app.runtime.connectors import (
+    APMConnector,
+    AlertPlatformConnector,
     CMDBConnector,
+    GrafanaConnector,
+    LogCloudConnector,
     LokiConnector,
     PrometheusConnector,
     TelemetryConnector,
@@ -94,6 +103,10 @@ class AgentToolContextService:
         self._cmdb_connector = CMDBConnector()
         self._prometheus_connector = PrometheusConnector()
         self._loki_connector = LokiConnector()
+        self._grafana_connector = GrafanaConnector()
+        self._apm_connector = APMConnector()
+        self._logcloud_connector = LogCloudConnector()
+        self._alert_platform_connector = AlertPlatformConnector()
         self._audit_seq = 0
 
     async def build_context(
@@ -181,6 +194,10 @@ class AgentToolContextService:
             result = await self._build_domain_context(
                 cfg, compact_context, incident_context, assigned_command, command_gate
             )
+        elif agent_name == "DatabaseAgent":
+            result = await self._build_database_context(
+                cfg, compact_context, incident_context, assigned_command, command_gate
+            )
         else:
             result = ToolContextResult(
                 name="none",
@@ -207,7 +224,13 @@ class AgentToolContextService:
         if not result.execution_path:
             if result.name in {"telemetry_connector", "cmdb_connector"}:
                 result.execution_path = "remote"
-            elif result.name in {"git_repo_search", "git_change_window", "local_log_reader", "domain_excel_lookup"}:
+            elif result.name in {
+                "git_repo_search",
+                "git_change_window",
+                "local_log_reader",
+                "domain_excel_lookup",
+                "db_snapshot_reader",
+            }:
                 result.execution_path = "local"
             else:
                 result.execution_path = "none"
@@ -412,6 +435,33 @@ class AgentToolContextService:
             )
         try:
             keywords = self._extract_keywords(compact_context, incident_context, assigned_command)
+            remote_logcloud_payload: Dict[str, Any] = {}
+            if bool(getattr(cfg, "logcloud_source", None) and cfg.logcloud_source.enabled):
+                logcloud_result = await self._logcloud_connector.fetch(
+                    cfg.logcloud_source,
+                    {
+                        "service_name": str(incident_context.get("service_name") or ""),
+                        "trace_id": str(incident_context.get("trace_id") or ""),
+                        "query": " ".join(keywords[:6]),
+                    },
+                )
+                logcloud_status = str(logcloud_result.get("status") or "unknown")
+                logcloud_request_meta = dict(logcloud_result.get("request_meta") or {})
+                audit_log.append(
+                    self._audit(
+                        tool_name="logcloud_connector",
+                        action="remote_fetch",
+                        status=logcloud_status,
+                        detail={
+                            "enabled": bool(cfg.logcloud_source.enabled),
+                            "endpoint": str(cfg.logcloud_source.endpoint or "")[:180],
+                            "message": str(logcloud_result.get("message") or "")[:180],
+                            "request_meta": logcloud_request_meta,
+                        },
+                    )
+                )
+                if logcloud_status == "ok" and isinstance(logcloud_result.get("data"), dict):
+                    remote_logcloud_payload = dict(logcloud_result.get("data") or {})
             excerpt, line_count, read_meta = await asyncio.to_thread(
                 self._read_log_excerpt,
                 path,
@@ -437,6 +487,11 @@ class AgentToolContextService:
                     "line_count": line_count,
                     "keywords": keywords,
                     "excerpt": excerpt,
+                    "remote_logcloud": {
+                        "enabled": bool(getattr(cfg, "logcloud_source", None) and cfg.logcloud_source.enabled),
+                        "status": "ok" if remote_logcloud_payload else "disabled_or_unavailable",
+                        "payload": remote_logcloud_payload,
+                    },
                 },
                 command_gate=command_gate,
                 audit_log=audit_log,
@@ -555,6 +610,7 @@ class AgentToolContextService:
                     },
                 )
                 cmdb_status = str(cmdb_result.get("status") or "unknown")
+                cmdb_request_meta = dict(cmdb_result.get("request_meta") or {})
                 audit_log.append(
                     self._audit(
                         tool_name="cmdb_connector",
@@ -564,6 +620,7 @@ class AgentToolContextService:
                             "enabled": bool(cfg.cmdb_source.enabled),
                             "endpoint": str(cfg.cmdb_source.endpoint or "")[:180],
                             "message": str(cmdb_result.get("message") or "")[:180],
+                            "request_meta": cmdb_request_meta,
                         },
                     )
                 )
@@ -659,6 +716,8 @@ class AgentToolContextService:
         remote_telemetry_payload: Dict[str, Any] = {}
         remote_prometheus_payload: Dict[str, Any] = {}
         remote_loki_payload: Dict[str, Any] = {}
+        remote_grafana_payload: Dict[str, Any] = {}
+        remote_apm_payload: Dict[str, Any] = {}
         if bool(cfg.telemetry_source.enabled):
             telemetry_result = await self._telemetry_connector.fetch(
                 cfg.telemetry_source,
@@ -668,6 +727,7 @@ class AgentToolContextService:
                 },
             )
             telemetry_status = str(telemetry_result.get("status") or "unknown")
+            telemetry_request_meta = dict(telemetry_result.get("request_meta") or {})
             audit_log.append(
                 self._audit(
                     tool_name="telemetry_connector",
@@ -677,6 +737,7 @@ class AgentToolContextService:
                         "enabled": bool(cfg.telemetry_source.enabled),
                         "endpoint": str(cfg.telemetry_source.endpoint or "")[:180],
                         "message": str(telemetry_result.get("message") or "")[:180],
+                        "request_meta": telemetry_request_meta,
                     },
                 )
             )
@@ -691,6 +752,7 @@ class AgentToolContextService:
                 },
             )
             prometheus_status = str(prometheus_result.get("status") or "unknown")
+            prometheus_request_meta = dict(prometheus_result.get("request_meta") or {})
             audit_log.append(
                 self._audit(
                     tool_name="prometheus_connector",
@@ -700,6 +762,7 @@ class AgentToolContextService:
                         "enabled": bool(cfg.prometheus_source.enabled),
                         "endpoint": str(cfg.prometheus_source.endpoint or "")[:180],
                         "message": str(prometheus_result.get("message") or "")[:180],
+                        "request_meta": prometheus_request_meta,
                     },
                 )
             )
@@ -715,6 +778,7 @@ class AgentToolContextService:
                 },
             )
             loki_status = str(loki_result.get("status") or "unknown")
+            loki_request_meta = dict(loki_result.get("request_meta") or {})
             audit_log.append(
                 self._audit(
                     tool_name="loki_connector",
@@ -724,11 +788,63 @@ class AgentToolContextService:
                         "enabled": bool(cfg.loki_source.enabled),
                         "endpoint": str(cfg.loki_source.endpoint or "")[:180],
                         "message": str(loki_result.get("message") or "")[:180],
+                        "request_meta": loki_request_meta,
                     },
                 )
             )
             if loki_status == "ok" and isinstance(loki_result.get("data"), dict):
                 remote_loki_payload = dict(loki_result.get("data") or {})
+        if bool(getattr(cfg, "grafana_source", None) and cfg.grafana_source.enabled):
+            grafana_result = await self._grafana_connector.fetch(
+                cfg.grafana_source,
+                {
+                    "service_name": str(incident_context.get("service_name") or ""),
+                    "query": str(assigned_command.get("focus") if isinstance(assigned_command, dict) else ""),
+                },
+            )
+            grafana_status = str(grafana_result.get("status") or "unknown")
+            grafana_request_meta = dict(grafana_result.get("request_meta") or {})
+            audit_log.append(
+                self._audit(
+                    tool_name="grafana_connector",
+                    action="remote_fetch",
+                    status=grafana_status,
+                    detail={
+                        "enabled": bool(cfg.grafana_source.enabled),
+                        "endpoint": str(cfg.grafana_source.endpoint or "")[:180],
+                        "message": str(grafana_result.get("message") or "")[:180],
+                        "request_meta": grafana_request_meta,
+                    },
+                )
+            )
+            if grafana_status == "ok" and isinstance(grafana_result.get("data"), dict):
+                remote_grafana_payload = dict(grafana_result.get("data") or {})
+        if bool(getattr(cfg, "apm_source", None) and cfg.apm_source.enabled):
+            apm_result = await self._apm_connector.fetch(
+                cfg.apm_source,
+                {
+                    "service_name": str(incident_context.get("service_name") or ""),
+                    "trace_id": str(incident_context.get("trace_id") or ""),
+                    "query": str(assigned_command.get("focus") if isinstance(assigned_command, dict) else ""),
+                },
+            )
+            apm_status = str(apm_result.get("status") or "unknown")
+            apm_request_meta = dict(apm_result.get("request_meta") or {})
+            audit_log.append(
+                self._audit(
+                    tool_name="apm_connector",
+                    action="remote_fetch",
+                    status=apm_status,
+                    detail={
+                        "enabled": bool(cfg.apm_source.enabled),
+                        "endpoint": str(cfg.apm_source.endpoint or "")[:180],
+                        "message": str(apm_result.get("message") or "")[:180],
+                        "request_meta": apm_request_meta,
+                    },
+                )
+            )
+            if apm_status == "ok" and isinstance(apm_result.get("data"), dict):
+                remote_apm_payload = dict(apm_result.get("data") or {})
         metrics_context = dict(incident_context or {})
         if remote_telemetry_payload:
             metrics_context["remote_telemetry_payload"] = remote_telemetry_payload
@@ -736,6 +852,10 @@ class AgentToolContextService:
             metrics_context["remote_prometheus_payload"] = remote_prometheus_payload
         if remote_loki_payload:
             metrics_context["remote_loki_payload"] = remote_loki_payload
+        if remote_grafana_payload:
+            metrics_context["remote_grafana_payload"] = remote_grafana_payload
+        if remote_apm_payload:
+            metrics_context["remote_apm_payload"] = remote_apm_payload
         signals = self._collect_metrics_signals(compact_context, metrics_context)
         audit_log.append(
             self._audit(
@@ -768,6 +888,14 @@ class AgentToolContextService:
                         "enabled": bool(getattr(cfg, "loki_source", None) and cfg.loki_source.enabled),
                         "status": "ok" if remote_loki_payload else "disabled_or_unavailable",
                     },
+                    "remote_grafana": {
+                        "enabled": bool(getattr(cfg, "grafana_source", None) and cfg.grafana_source.enabled),
+                        "status": "ok" if remote_grafana_payload else "disabled_or_unavailable",
+                    },
+                    "remote_apm": {
+                        "enabled": bool(getattr(cfg, "apm_source", None) and cfg.apm_source.enabled),
+                        "status": "ok" if remote_apm_payload else "disabled_or_unavailable",
+                    },
                 },
                 command_gate=command_gate,
                 audit_log=audit_log,
@@ -794,6 +922,16 @@ class AgentToolContextService:
                     "enabled": bool(getattr(cfg, "loki_source", None) and cfg.loki_source.enabled),
                     "status": "ok" if remote_loki_payload else "disabled_or_unavailable",
                     "payload": remote_loki_payload,
+                },
+                "remote_grafana": {
+                    "enabled": bool(getattr(cfg, "grafana_source", None) and cfg.grafana_source.enabled),
+                    "status": "ok" if remote_grafana_payload else "disabled_or_unavailable",
+                    "payload": remote_grafana_payload,
+                },
+                "remote_apm": {
+                    "enabled": bool(getattr(cfg, "apm_source", None) and cfg.apm_source.enabled),
+                    "status": "ok" if remote_apm_payload else "disabled_or_unavailable",
+                    "payload": remote_apm_payload,
                 },
             },
             command_gate=command_gate,
@@ -920,6 +1058,206 @@ class AgentToolContextService:
                 ],
             )
 
+    async def _build_database_context(
+        self,
+        cfg: AgentToolingConfig,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+        command_gate: Dict[str, Any],
+    ) -> ToolContextResult:
+        tool_cfg = getattr(cfg, "database", None)
+        audit_log: List[Dict[str, Any]] = [
+            self._audit(
+                tool_name="db_snapshot_reader",
+                action="command_gate",
+                status="ok" if command_gate.get("allow_tool") else "skipped",
+                detail={
+                    "reason": str(command_gate.get("reason") or ""),
+                    "has_command": bool(command_gate.get("has_command")),
+                    "decision_source": str(command_gate.get("decision_source") or ""),
+                    "command_preview": self._command_preview(assigned_command),
+                },
+            )
+        ]
+        if not tool_cfg or not bool(getattr(tool_cfg, "enabled", False)):
+            return ToolContextResult(
+                name="db_snapshot_reader",
+                enabled=False,
+                used=False,
+                status="disabled",
+                summary="DatabaseAgent 数据库工具开关已关闭，使用默认分析逻辑。",
+                data={},
+                command_gate=command_gate,
+                audit_log=[
+                    *audit_log,
+                    self._audit(
+                        tool_name="db_snapshot_reader",
+                        action="config_check",
+                        status="disabled",
+                        detail={"enabled": False},
+                    ),
+                ],
+            )
+        if not bool(command_gate.get("allow_tool")):
+            return ToolContextResult(
+                name="db_snapshot_reader",
+                enabled=True,
+                used=False,
+                status="skipped_by_command",
+                summary=f"主Agent命令未要求 DatabaseAgent 调用数据库工具：{str(command_gate.get('reason') or '未授权工具调用')}",
+                data={"command_preview": self._command_preview(assigned_command)},
+                command_gate=command_gate,
+                audit_log=audit_log,
+            )
+        try:
+            engine = str(getattr(tool_cfg, "engine", "sqlite") or "sqlite").strip().lower()
+            max_rows = int(getattr(tool_cfg, "max_rows", 50) or 50)
+            timeout_seconds = int(getattr(tool_cfg, "connect_timeout_seconds", 8) or 8)
+            keywords = self._extract_keywords(compact_context, incident_context, assigned_command)
+            mapped_tables = self._extract_database_tables(compact_context, incident_context, assigned_command)
+            if engine in {"postgresql", "postgres", "pg"}:
+                dsn = str(getattr(tool_cfg, "postgres_dsn", "") or "").strip()
+                schema = str(getattr(tool_cfg, "pg_schema", "public") or "public").strip() or "public"
+                if not dsn:
+                    return ToolContextResult(
+                        name="db_snapshot_reader",
+                        enabled=True,
+                        used=False,
+                        status="unavailable",
+                        summary="PostgreSQL DSN 未配置，已回退默认分析逻辑。",
+                        data={"engine": "postgresql"},
+                        command_gate=command_gate,
+                        audit_log=[
+                            *audit_log,
+                            self._audit(
+                                tool_name="db_snapshot_reader",
+                                action="config_check",
+                                status="unavailable",
+                                detail={"engine": "postgresql", "reason": "postgres_dsn empty"},
+                            ),
+                        ],
+                    )
+                if asyncpg is None:
+                    return ToolContextResult(
+                        name="db_snapshot_reader",
+                        enabled=True,
+                        used=False,
+                        status="error",
+                        summary="未安装 asyncpg，无法连接 PostgreSQL，请先安装依赖。",
+                        data={"engine": "postgresql", "error": "asyncpg not installed"},
+                        command_gate=command_gate,
+                        audit_log=[
+                            *audit_log,
+                            self._audit(
+                                tool_name="db_snapshot_reader",
+                                action="dependency_check",
+                                status="error",
+                                detail={"engine": "postgresql", "reason": "asyncpg missing"},
+                            ),
+                        ],
+                    )
+                snapshot = await self._collect_postgres_snapshot(
+                    dsn=dsn,
+                    schema=schema,
+                    max_rows=max_rows,
+                    keywords=keywords,
+                    target_tables=mapped_tables,
+                    timeout_seconds=timeout_seconds,
+                )
+                query_action = "postgres_query"
+                query_detail: Dict[str, Any] = {
+                    "engine": "postgresql",
+                    "schema": schema,
+                    "max_rows": max_rows,
+                    "requested_tables": mapped_tables[:12],
+                    "table_count": int(snapshot.get("table_count") or 0),
+                    "slow_sql_count": len(list(snapshot.get("slow_sql") or [])),
+                    "top_sql_count": len(list(snapshot.get("top_sql") or [])),
+                    "session_count": len(list(snapshot.get("session_status") or [])),
+                }
+            else:
+                db_path = Path(str(getattr(tool_cfg, "db_path", "") or "").strip())
+                if not db_path.exists() or not db_path.is_file():
+                    return ToolContextResult(
+                        name="db_snapshot_reader",
+                        enabled=True,
+                        used=False,
+                        status="unavailable",
+                        summary="SQLite 快照文件路径不可用，已回退默认分析逻辑。",
+                        data={"engine": "sqlite", "db_path": str(db_path)},
+                        command_gate=command_gate,
+                        audit_log=[
+                            *audit_log,
+                            self._audit(
+                                tool_name="db_snapshot_reader",
+                                action="file_check",
+                                status="unavailable",
+                                detail={"engine": "sqlite", "db_path": str(db_path)},
+                            ),
+                        ],
+                    )
+                snapshot = await asyncio.to_thread(
+                    self._collect_database_snapshot,
+                    db_path,
+                    max_rows,
+                    keywords,
+                    mapped_tables,
+                )
+                query_action = "sqlite_query"
+                query_detail = {
+                    "engine": "sqlite",
+                    "db_path": str(db_path),
+                    "max_rows": max_rows,
+                    "requested_tables": mapped_tables[:12],
+                    "table_count": int(snapshot.get("table_count") or 0),
+                    "slow_sql_count": len(list(snapshot.get("slow_sql") or [])),
+                    "top_sql_count": len(list(snapshot.get("top_sql") or [])),
+                    "session_count": len(list(snapshot.get("session_status") or [])),
+                }
+            audit_log.append(
+                self._audit(
+                    tool_name="db_snapshot_reader",
+                    action=query_action,
+                    status="ok",
+                    detail=query_detail,
+                )
+            )
+            return ToolContextResult(
+                name="db_snapshot_reader",
+                enabled=True,
+                used=True,
+                status="ok",
+                summary=(
+                    f"数据库快照读取完成，表 {snapshot.get('table_count', 0)} 个，"
+                    f"慢SQL {len(list(snapshot.get('slow_sql') or []))} 条。"
+                ),
+                data=snapshot,
+                command_gate=command_gate,
+                audit_log=audit_log,
+            )
+        except Exception as exc:
+            error_text = str(exc).strip() or exc.__class__.__name__
+            logger.warning("database_tool_context_failed", error=error_text)
+            return ToolContextResult(
+                name="db_snapshot_reader",
+                enabled=True,
+                used=False,
+                status="error",
+                summary=f"数据库快照读取失败：{error_text}，已回退默认分析逻辑。",
+                data={"error": error_text},
+                command_gate=command_gate,
+                audit_log=[
+                    *audit_log,
+                    self._audit(
+                        tool_name="db_snapshot_reader",
+                        action="database_query",
+                        status="error",
+                        detail={"error": error_text},
+                    ),
+                ],
+            )
+
     async def _build_runbook_context(
         self,
         compact_context: Dict[str, Any],
@@ -1030,6 +1368,34 @@ class AgentToolContextService:
             assigned_command=assigned_command,
             command_gate=command_gate,
         )
+        alert_payload: Dict[str, Any] = {}
+        alert_audit_log: List[Dict[str, Any]] = []
+        if bool(getattr(cfg, "alert_platform_source", None) and cfg.alert_platform_source.enabled):
+            alert_result = await self._alert_platform_connector.fetch(
+                cfg.alert_platform_source,
+                {
+                    "service_name": str(incident_context.get("service_name") or ""),
+                    "severity": str(incident_context.get("severity") or ""),
+                    "alert_id": str(incident_context.get("alarm_id") or incident_context.get("alert_id") or ""),
+                },
+            )
+            alert_status = str(alert_result.get("status") or "unknown")
+            alert_request_meta = dict(alert_result.get("request_meta") or {})
+            alert_audit_log.append(
+                self._audit(
+                    tool_name="alert_platform_connector",
+                    action="remote_fetch",
+                    status=alert_status,
+                    detail={
+                        "enabled": bool(cfg.alert_platform_source.enabled),
+                        "endpoint": str(cfg.alert_platform_source.endpoint or "")[:180],
+                        "message": str(alert_result.get("message") or "")[:180],
+                        "request_meta": alert_request_meta,
+                    },
+                )
+            )
+            if alert_status == "ok" and isinstance(alert_result.get("data"), dict):
+                alert_payload = dict(alert_result.get("data") or {})
         used = bool(metrics.used or runbook.used)
         status = "ok" if used else ("skipped_by_command" if metrics.status == "skipped_by_command" else "unavailable")
         return ToolContextResult(
@@ -1046,9 +1412,14 @@ class AgentToolContextService:
                 "metrics_signals": ((metrics.data or {}).get("signals") or [])[:20],
                 "runbook_items": ((runbook.data or {}).get("items") or [])[:8],
                 "query": (runbook.data or {}).get("query") or "",
+                "remote_alert_platform": {
+                    "enabled": bool(getattr(cfg, "alert_platform_source", None) and cfg.alert_platform_source.enabled),
+                    "status": "ok" if alert_payload else "disabled_or_unavailable",
+                    "payload": alert_payload,
+                },
             },
             command_gate=command_gate,
-            audit_log=[*(metrics.audit_log or []), *(runbook.audit_log or [])],
+            audit_log=[*(metrics.audit_log or []), *(runbook.audit_log or []), *alert_audit_log],
         )
 
     def _resolve_repo_path(
@@ -1513,6 +1884,290 @@ class AgentToolContextService:
             dedup.append(item)
         return dedup[:40]
 
+    async def _collect_postgres_snapshot(
+        self,
+        *,
+        dsn: str,
+        schema: str,
+        max_rows: int,
+        keywords: List[str],
+        target_tables: List[str],
+        timeout_seconds: int,
+    ) -> Dict[str, Any]:
+        conn = await asyncpg.connect(dsn=dsn, timeout=timeout_seconds)  # type: ignore[union-attr]
+        try:
+            table_records = await conn.fetch(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+                """,
+                schema,
+            )
+            all_table_rows = [str(row["table_name"]) for row in table_records]
+            normalized_targets = {self._normalize_table_name(value) for value in (target_tables or []) if self._normalize_table_name(value)}
+            table_rows = [name for name in all_table_rows if self._normalize_table_name(name) in normalized_targets] if normalized_targets else list(all_table_rows)
+            used_target_tables = bool(normalized_targets)
+            fallback_reason = ""
+            if used_target_tables and not table_rows:
+                table_rows = list(all_table_rows)
+                fallback_reason = "mapped_tables_not_found_fallback_all"
+
+            table_structures: List[Dict[str, Any]] = []
+            indexes: Dict[str, List[Dict[str, Any]]] = {}
+            for table_name in table_rows[:50]:
+                column_rows = await conn.fetch(
+                    """
+                    SELECT column_name, data_type, is_nullable, column_default, ordinal_position
+                    FROM information_schema.columns
+                    WHERE table_schema = $1 AND table_name = $2
+                    ORDER BY ordinal_position
+                    """,
+                    schema,
+                    table_name,
+                )
+                columns = [
+                    {
+                        "name": str(row["column_name"]),
+                        "type": str(row["data_type"] or ""),
+                        "notnull": str(row["is_nullable"] or "").upper() == "NO",
+                        "default": row["column_default"],
+                    }
+                    for row in column_rows
+                ]
+                table_structures.append({"table": table_name, "columns": columns})
+
+                index_rows = await conn.fetch(
+                    """
+                    SELECT indexname, indexdef
+                    FROM pg_indexes
+                    WHERE schemaname = $1 AND tablename = $2
+                    ORDER BY indexname
+                    """,
+                    schema,
+                    table_name,
+                )
+                indexes[table_name] = [
+                    {
+                        "index": str(row["indexname"]),
+                        "definition": str(row["indexdef"] or ""),
+                        "unique": " UNIQUE " in str(row["indexdef"] or "").upper(),
+                    }
+                    for row in index_rows
+                ]
+
+            slow_sql = await self._pg_fetch_rows(
+                conn,
+                [
+                    "SELECT query, calls, total_exec_time, mean_exec_time, rows FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT $1",
+                    "SELECT query, calls, mean_exec_time FROM pg_stat_statements ORDER BY mean_exec_time DESC LIMIT $1",
+                ],
+                max_rows,
+            )
+            top_sql = await self._pg_fetch_rows(
+                conn,
+                [
+                    "SELECT query, calls, total_exec_time, mean_exec_time, rows FROM pg_stat_statements ORDER BY calls DESC LIMIT $1",
+                    "SELECT query, calls FROM pg_stat_statements ORDER BY calls DESC LIMIT $1",
+                ],
+                max_rows,
+            )
+            session_status = await self._pg_fetch_rows(
+                conn,
+                [
+                    """
+                    SELECT COALESCE(state, 'unknown') AS state,
+                           COALESCE(wait_event_type, '') AS wait_event_type,
+                           COALESCE(wait_event, '') AS wait_event,
+                           COUNT(*)::int AS sessions
+                    FROM pg_stat_activity
+                    GROUP BY state, wait_event_type, wait_event
+                    ORDER BY sessions DESC
+                    LIMIT $1
+                    """,
+                    """
+                    SELECT COALESCE(state, 'unknown') AS state,
+                           COUNT(*)::int AS sessions
+                    FROM pg_stat_activity
+                    GROUP BY state
+                    ORDER BY sessions DESC
+                    LIMIT $1
+                    """,
+                ],
+                max_rows,
+            )
+
+            keyword_hits: List[Dict[str, Any]] = []
+            lowered_keywords = [str(word or "").lower().strip() for word in (keywords or []) if str(word or "").strip()]
+            if lowered_keywords:
+                for row in (slow_sql + top_sql)[:200]:
+                    text = json.dumps(row, ensure_ascii=False).lower()
+                    if any(k and k in text for k in lowered_keywords):
+                        keyword_hits.append(row)
+                        if len(keyword_hits) >= max_rows:
+                            break
+
+            return {
+                "engine": "postgresql",
+                "schema": schema,
+                "requested_tables": list(target_tables or [])[:20],
+                "used_target_tables": used_target_tables,
+                "fallback_reason": fallback_reason,
+                "total_table_count": len(all_table_rows),
+                "table_count": len(table_rows),
+                "tables": table_rows[:80],
+                "table_structures": table_structures[:20],
+                "indexes": indexes,
+                "slow_sql": slow_sql[:max_rows],
+                "top_sql": top_sql[:max_rows],
+                "session_status": session_status[:max_rows],
+                "keyword_hits": keyword_hits[:max_rows],
+            }
+        finally:
+            await conn.close()
+
+    def _collect_database_snapshot(
+        self,
+        db_path: Path,
+        max_rows: int,
+        keywords: List[str],
+        target_tables: List[str],
+    ) -> Dict[str, Any]:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            all_table_rows = [str(row["name"]) for row in cur.fetchall()]
+            normalized_targets = {self._normalize_table_name(value) for value in (target_tables or []) if self._normalize_table_name(value)}
+            table_rows = [name for name in all_table_rows if self._normalize_table_name(name) in normalized_targets] if normalized_targets else list(all_table_rows)
+            used_target_tables = bool(normalized_targets)
+            fallback_reason = ""
+            if used_target_tables and not table_rows:
+                table_rows = list(all_table_rows)
+                fallback_reason = "mapped_tables_not_found_fallback_all"
+
+            table_structures: List[Dict[str, Any]] = []
+            indexes: Dict[str, List[Dict[str, Any]]] = {}
+            for table_name in table_rows[:50]:
+                safe = self._escape_sql_identifier(table_name)
+                cur.execute(f"PRAGMA table_info('{safe}')")
+                columns = [
+                    {
+                        "name": str(r["name"]),
+                        "type": str(r["type"] or ""),
+                        "notnull": bool(r["notnull"]),
+                        "default": r["dflt_value"],
+                        "pk": bool(r["pk"]),
+                    }
+                    for r in cur.fetchall()
+                ]
+                table_structures.append({"table": table_name, "columns": columns})
+                cur.execute(f"PRAGMA index_list('{safe}')")
+                idx_rows = []
+                for idx in cur.fetchall():
+                    idx_name = str(idx["name"])
+                    unique = bool(idx["unique"])
+                    cur.execute(f"PRAGMA index_info('{self._escape_sql_identifier(idx_name)}')")
+                    cols = [str(x["name"]) for x in cur.fetchall()]
+                    idx_rows.append({"index": idx_name, "unique": unique, "columns": cols})
+                indexes[table_name] = idx_rows
+
+            slow_sql = self._query_first_existing(
+                cur,
+                [
+                    "SELECT * FROM slow_sql ORDER BY duration_ms DESC LIMIT ?",
+                    "SELECT * FROM slow_sql ORDER BY elapsed_ms DESC LIMIT ?",
+                    "SELECT * FROM slow_sql ORDER BY cost_ms DESC LIMIT ?",
+                    "SELECT * FROM slow_sql LIMIT ?",
+                    "SELECT * FROM t_slow_sql ORDER BY duration_ms DESC LIMIT ?",
+                    "SELECT * FROM t_slow_sql ORDER BY elapsed_ms DESC LIMIT ?",
+                    "SELECT * FROM t_slow_sql ORDER BY cost_ms DESC LIMIT ?",
+                    "SELECT * FROM t_slow_sql LIMIT ?",
+                ],
+                [max_rows],
+            )
+            top_sql = self._query_first_existing(
+                cur,
+                [
+                    "SELECT * FROM top_sql ORDER BY exec_count DESC LIMIT ?",
+                    "SELECT * FROM top_sql ORDER BY qps DESC LIMIT ?",
+                    "SELECT * FROM top_sql ORDER BY calls DESC LIMIT ?",
+                    "SELECT * FROM top_sql LIMIT ?",
+                    "SELECT * FROM t_top_sql ORDER BY exec_count DESC LIMIT ?",
+                    "SELECT * FROM t_top_sql ORDER BY qps DESC LIMIT ?",
+                    "SELECT * FROM t_top_sql ORDER BY calls DESC LIMIT ?",
+                    "SELECT * FROM t_top_sql LIMIT ?",
+                ],
+                [max_rows],
+            )
+            session_status = self._query_first_existing(
+                cur,
+                [
+                    "SELECT * FROM session_status ORDER BY active_sessions DESC LIMIT ?",
+                    "SELECT * FROM session_status ORDER BY running DESC LIMIT ?",
+                    "SELECT * FROM session_status LIMIT ?",
+                    "SELECT * FROM db_session_status ORDER BY active_sessions DESC LIMIT ?",
+                    "SELECT * FROM db_session_status ORDER BY running DESC LIMIT ?",
+                    "SELECT * FROM db_session_status LIMIT ?",
+                ],
+                [max_rows],
+            )
+
+            keyword_hits: List[Dict[str, Any]] = []
+            lowered_keywords = [str(word or "").lower().strip() for word in (keywords or []) if str(word or "").strip()]
+            if lowered_keywords:
+                for row in (slow_sql + top_sql)[:200]:
+                    text = json.dumps(row, ensure_ascii=False).lower()
+                    if any(k and k in text for k in lowered_keywords):
+                        keyword_hits.append(row)
+                        if len(keyword_hits) >= max_rows:
+                            break
+
+            return {
+                "engine": "sqlite",
+                "db_path": str(db_path),
+                "requested_tables": list(target_tables or [])[:20],
+                "used_target_tables": used_target_tables,
+                "fallback_reason": fallback_reason,
+                "total_table_count": len(all_table_rows),
+                "table_count": len(table_rows),
+                "tables": table_rows[:80],
+                "table_structures": table_structures[:20],
+                "indexes": indexes,
+                "slow_sql": slow_sql[:max_rows],
+                "top_sql": top_sql[:max_rows],
+                "session_status": session_status[:max_rows],
+                "keyword_hits": keyword_hits[:max_rows],
+            }
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _query_first_existing(cur: sqlite3.Cursor, queries: List[str], params: List[Any]) -> List[Dict[str, Any]]:
+        for sql in queries:
+            try:
+                cur.execute(sql, params)
+                return [dict(row) for row in cur.fetchall()]
+            except Exception:
+                continue
+        return []
+
+    @staticmethod
+    async def _pg_fetch_rows(conn: Any, queries: List[str], max_rows: int) -> List[Dict[str, Any]]:
+        for sql in queries:
+            try:
+                rows = await conn.fetch(sql, max_rows)
+                return [dict(row) for row in rows]
+            except Exception:
+                continue
+        return []
+
+    @staticmethod
+    def _escape_sql_identifier(name: str) -> str:
+        return str(name or "").replace("'", "''")
+
     def _decide_tool_invocation(
         self,
         *,
@@ -1571,12 +2226,26 @@ class AgentToolContextService:
             "cpu",
             "线程",
             "连接池",
+            "grafana",
+            "apm",
+            "trace",
+            "链路",
             "变更",
             "发布",
             "commit",
             "runbook",
             "案例库",
             "sop",
+            "日志云",
+            "logcloud",
+            "告警平台",
+            "alert",
+            "数据库",
+            "慢sql",
+            "top sql",
+            "索引",
+            "表结构",
+            "session",
         )
         if any(term in merged for term in enable_terms):
             return {
@@ -1715,6 +2384,8 @@ class AgentToolContextService:
             value = str(endpoint.get(key) or "").strip()
             if value:
                 bucket.append(value)
+        for table in self._extract_database_tables(compact_context, incident_context, assigned_command):
+            bucket.append(table)
         parsed = compact_context.get("parsed_data") or {}
         if isinstance(parsed, dict):
             for key in ("error_type", "error_message", "exception_class", "trace_id"):
@@ -1745,6 +2416,40 @@ class AgentToolContextService:
                 tokens.append(tk[:80])
         deduped = list(dict.fromkeys(tokens))
         return deduped[:12]
+
+    def _extract_database_tables(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> List[str]:
+        picks: List[str] = []
+        command = dict(assigned_command or {})
+        for table in command.get("database_tables") or []:
+            text = str(table or "").strip()
+            if text:
+                picks.append(text[:120])
+        interface_mapping = compact_context.get("interface_mapping")
+        if isinstance(interface_mapping, dict):
+            for table in interface_mapping.get("database_tables") or []:
+                text = str(table or "").strip()
+                if text:
+                    picks.append(text[:120])
+        incident_mapping = incident_context.get("interface_mapping")
+        if isinstance(incident_mapping, dict):
+            for table in incident_mapping.get("database_tables") or []:
+                text = str(table or "").strip()
+                if text:
+                    picks.append(text[:120])
+        # keep order and unique
+        return list(dict.fromkeys(picks))[:20]
+
+    @staticmethod
+    def _normalize_table_name(name: str) -> str:
+        text = str(name or "").strip().lower().strip('"')
+        if "." in text:
+            return text.split(".")[-1].strip('"')
+        return text
 
     def _search_repo(
         self,
