@@ -181,7 +181,7 @@ const HistoryPage: React.FC = () => {
   ];
 
   return (
-    <div className="history-page">
+    <div className="history-page history-page-fixed">
       <Card className="module-card" style={{ marginBottom: 16 }}>
         <Space style={{ justifyContent: 'space-between', width: '100%' }}>
           <Title level={4} style={{ margin: 0 }}>
@@ -193,7 +193,7 @@ const HistoryPage: React.FC = () => {
         </Space>
       </Card>
 
-      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+      <Row gutter={[12, 12]} style={{ marginBottom: 16 }} className="history-summary-row">
         <Col xs={12} md={6}>
           <Card className="module-card compact-card">
             <Statistic title="总任务" value={summary.total} />
@@ -216,12 +216,13 @@ const HistoryPage: React.FC = () => {
         </Col>
       </Row>
 
-      <Card className="module-card">
+      <Card className="module-card history-table-card">
         <Table
           columns={columns}
           dataSource={items}
           rowKey="id"
           loading={loading}
+          scroll={{ y: 'calc(100vh - 430px)', x: 1200 }}
           pagination={{ pageSize: 10 }}
           locale={{ emptyText: '暂无历史记录，请先在故障分析页创建任务。' }}
         />

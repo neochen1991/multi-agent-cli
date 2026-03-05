@@ -39,6 +39,7 @@ from app.runtime.connectors import (
     TelemetryConnector,
 )
 from app.services.tooling_service import tooling_service
+from app.services.agent_skill_service import agent_skill_service
 from app.tools.case_library import CaseLibraryTool
 
 logger = structlog.get_logger()
@@ -216,6 +217,14 @@ class AgentToolContextService:
                     )
                 ],
             )
+        result = self._merge_skill_context(
+            result=result,
+            cfg=cfg,
+            agent_name=agent_name,
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
+        )
         result.permission_decision = {
             "allow_tool": bool(command_gate.get("allow_tool")),
             "reason": str(command_gate.get("reason") or ""),
@@ -235,6 +244,101 @@ class AgentToolContextService:
             else:
                 result.execution_path = "none"
         return result.to_dict()
+
+    def _merge_skill_context(
+        self,
+        *,
+        result: ToolContextResult,
+        cfg: AgentToolingConfig,
+        agent_name: str,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> ToolContextResult:
+        gate = dict(result.command_gate or {})
+        if not bool(gate.get("has_command")):
+            return result
+        if bool(gate.get("has_command")) and not bool(gate.get("allow_tool")):
+            return result
+
+        skill_result = agent_skill_service.select_skills(
+            agent_name=agent_name,
+            cfg=cfg.skills,
+            assigned_command=assigned_command,
+            compact_context=compact_context,
+            incident_context=incident_context,
+        )
+        if not bool(skill_result.get("enabled")):
+            return result
+        if not bool(skill_result.get("used")):
+            return result
+
+        skill_payload = {
+            "status": str(skill_result.get("status") or ""),
+            "summary": str(skill_result.get("summary") or ""),
+            "items": list(skill_result.get("skills") or []),
+        }
+        combined_data = dict(result.data or {})
+        combined_data["skill_context"] = skill_payload
+
+        normalized_skill_audit: List[Dict[str, Any]] = []
+        for entry in list(skill_result.get("audit_log") or []):
+            if not isinstance(entry, dict):
+                continue
+            normalized_skill_audit.append(
+                self._audit(
+                    tool_name="agent_skill_router",
+                    action=str(entry.get("action") or "skill_call"),
+                    status=str(entry.get("status") or "ok"),
+                    detail=dict(entry.get("detail") or {}),
+                )
+            )
+
+        if result.name in {"none", ""}:
+            return ToolContextResult(
+                name="agent_skill_router",
+                enabled=True,
+                used=True,
+                status="ok",
+                summary=str(skill_result.get("summary") or "Skill 调用成功。"),
+                data=combined_data,
+                command_gate=dict(result.command_gate or {}),
+                audit_log=[*list(result.audit_log or []), *normalized_skill_audit],
+                execution_path="local",
+                permission_decision=dict(result.permission_decision or {}),
+            )
+
+        if not bool(result.used):
+            base_snapshot = {
+                "name": result.name,
+                "enabled": bool(result.enabled),
+                "used": bool(result.used),
+                "status": str(result.status or ""),
+                "summary": str(result.summary or ""),
+            }
+            combined_data["base_tool_context"] = base_snapshot
+            return ToolContextResult(
+                name="agent_skill_router",
+                enabled=True,
+                used=True,
+                status="ok",
+                summary=(
+                    f"{str(skill_result.get('summary') or '').strip()}；"
+                    f"原工具状态={base_snapshot['status'] or 'unknown'}"
+                ).strip("；"),
+                data=combined_data,
+                command_gate=dict(result.command_gate or {}),
+                audit_log=[*list(result.audit_log or []), *normalized_skill_audit],
+                execution_path="local",
+                permission_decision=dict(result.permission_decision or {}),
+            )
+
+        result.data = combined_data
+        result.summary = f"{result.summary}；{str(skill_result.get('summary') or '').strip()}".strip("；")
+        result.audit_log = [*list(result.audit_log or []), *normalized_skill_audit]
+        if not result.execution_path:
+            result.execution_path = "local"
+        return result
 
     async def _build_code_context(
         self,
@@ -2180,7 +2284,11 @@ class AgentToolContextService:
             str(command.get("focus") or "").strip(),
             str(command.get("expected_output") or "").strip(),
         ]
-        has_command = bool(any(text_fields)) or ("use_tool" in command)
+        skill_hints = command.get("skill_hints")
+        has_skill_hints = isinstance(skill_hints, list) and bool(
+            [str(item or "").strip() for item in skill_hints if str(item or "").strip()]
+        )
+        has_command = bool(any(text_fields)) or ("use_tool" in command) or has_skill_hints
         if not has_command:
             return {
                 "agent_name": agent_name,
@@ -2266,11 +2374,18 @@ class AgentToolContextService:
 
     def _command_preview(self, assigned_command: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         command = dict(assigned_command or {})
+        skill_hints_raw = command.get("skill_hints")
+        skill_hints = (
+            [str(item or "").strip()[:80] for item in skill_hints_raw if str(item or "").strip()]
+            if isinstance(skill_hints_raw, list)
+            else []
+        )
         return {
             "task": str(command.get("task") or "")[:240],
             "focus": str(command.get("focus") or "")[:240],
             "expected_output": str(command.get("expected_output") or "")[:240],
             "use_tool": command.get("use_tool"),
+            "skill_hints": skill_hints[:8],
         }
 
     def _audit(

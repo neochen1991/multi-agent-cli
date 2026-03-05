@@ -40,7 +40,7 @@ const AppSider: React.FC = () => {
       {
         key: '/assets',
         icon: <ApartmentOutlined />,
-        label: '资产图谱',
+        label: '责任田资产',
       },
       {
         key: '/workbench',

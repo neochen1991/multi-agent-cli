@@ -1,107 +1,371 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Button,
   Card,
   Descriptions,
-  Divider,
   Empty,
   Input,
+  Popconfirm,
   Select,
   Space,
+  Switch,
   Table,
   Tabs,
   Tag,
   Typography,
+  Upload,
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { assetApi, incidentApi, type AssetFusion, type InterfaceLocateResult } from '@/services/api';
-import { formatBeijingDateTime } from '@/utils/dateTime';
+import type { UploadProps } from 'antd';
+import {
+  assetApi,
+  type InterfaceLocateResult,
+  type ResponsibilityAssetRecord,
+} from '@/services/api';
 
-const { Paragraph, Title } = Typography;
+const { Paragraph, Title, Text } = Typography;
 const { TextArea } = Input;
 
-type AssetPreviewRow = {
-  key: string;
-  asset_id: string;
-  asset_type: string;
-  service: string;
-  summary: string;
+type ManualAssetForm = {
+  asset_id?: string;
+  feature: string;
+  domain: string;
+  aggregate: string;
+  frontend_pages: string;
+  api_interfaces: string;
+  code_items: string;
+  database_tables: string;
+  dependency_services: string;
+  monitor_items: string;
+  owner_team: string;
+  owner: string;
 };
 
-const toAssetRows = (assets: Record<string, unknown>[], prefix: string): AssetPreviewRow[] => {
-  return (assets || []).slice(0, 20).map((row, index) => {
-    const id = String(row.id || row.asset_id || row.name || row.path || `${prefix}-${index + 1}`);
-    const type = String(row.type || row.asset_type || row.category || '-');
-    const service = String(row.service || row.service_name || row.domain || '-');
-    const summary = String(row.summary || row.description || row.interface || row.table || row.path || '-');
-    return {
-      key: `${prefix}-${id}-${index}`,
-      asset_id: id,
-      asset_type: type,
-      service,
-      summary,
-    };
-  });
-};
+const splitListText = (value: string): string[] =>
+  String(value || '')
+    .split(/[,，;\n；、|]+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
 
-const normalizeSourceLabel = (item: unknown): string => {
-  if (typeof item === 'string') return item;
-  if (item && typeof item === 'object') {
-    const row = item as Record<string, unknown>;
-    return String(row.name || row.source || row.id || row.type || 'unknown');
+const joinListText = (items: string[]): string => (items || []).join('、');
+
+const csvEscape = (value: unknown): string => {
+  const text = String(value ?? '');
+  if (/[",\n]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
   }
-  return String(item || 'unknown');
+  return text;
 };
 
 const AssetsPage: React.FC = () => {
-  const [incidentId, setIncidentId] = useState('');
+  const [records, setRecords] = useState<ResponsibilityAssetRecord[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [latestUpdatedAt, setLatestUpdatedAt] = useState('');
+  const [storagePath, setStoragePath] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [replaceExisting, setReplaceExisting] = useState(true);
+  const [filterText, setFilterText] = useState('');
+  const [filterDomain, setFilterDomain] = useState('');
+  const [filterAggregate, setFilterAggregate] = useState('');
+  const [filterApi, setFilterApi] = useState('');
+  const [schemaTips, setSchemaTips] = useState<string[]>([]);
+  const [manualForm, setManualForm] = useState<ManualAssetForm>({
+    asset_id: '',
+    feature: '',
+    domain: '',
+    aggregate: '',
+    frontend_pages: '',
+    api_interfaces: '',
+    code_items: '',
+    database_tables: '',
+    dependency_services: '',
+    monitor_items: '',
+    owner_team: '',
+    owner: '',
+  });
+  const [editingAssetId, setEditingAssetId] = useState('');
+  const [savingManual, setSavingManual] = useState(false);
+
+  const [locateLoading, setLocateLoading] = useState(false);
   const [logContent, setLogContent] = useState('');
   const [symptom, setSymptom] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [locateLoading, setLocateLoading] = useState(false);
-  const [fusion, setFusion] = useState<AssetFusion | null>(null);
   const [locateResult, setLocateResult] = useState<InterfaceLocateResult | null>(null);
-  const [resourceSources, setResourceSources] = useState<Record<string, unknown>>({});
-  const [recentIncidentOptions, setRecentIncidentOptions] = useState<Array<{ label: string; value: string }>>([]);
 
-  useEffect(() => {
-    const bootstrap = async () => {
-      try {
-        const [payload, incidents] = await Promise.all([assetApi.resources(), incidentApi.list(1, 30)]);
-        setResourceSources(payload || {});
-        const options = (incidents.items || []).map((item) => ({
-          value: item.id,
-          label: `${item.id} · ${item.title} · ${formatBeijingDateTime(item.created_at)}`,
-        }));
-        setRecentIncidentOptions(options);
-      } catch {
-        // ignore bootstrap errors; page keeps manual input workflow
-      }
-    };
-    void bootstrap();
-  }, []);
-
-  const queryFusion = async () => {
-    if (!incidentId.trim()) {
-      message.error('请输入 Incident ID');
-      return;
-    }
+  const loadAssets = async () => {
     setLoading(true);
     try {
-      const result = await assetApi.fusion(incidentId.trim());
-      setFusion(result);
+      const data = await assetApi.listResponsibilityAssets({
+        q: filterText || undefined,
+        domain: filterDomain || undefined,
+        aggregate: filterAggregate || undefined,
+        api: filterApi || undefined,
+      });
+      setRecords(data.items || []);
+      setTotal(Number(data.total || 0));
+      if ((data.items || []).length > 0) {
+        const latest = (data.items || [])
+          .map((x) => String(x.updated_at || ''))
+          .sort()
+          .reverse()[0];
+        setLatestUpdatedAt(latest || '');
+      }
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || e.message || '查询失败');
+      message.error(e?.response?.data?.detail || e?.message || '加载责任田资产失败');
     } finally {
       setLoading(false);
     }
   };
 
+  const loadAssetStats = async () => {
+    try {
+      const payload = await assetApi.resources();
+      const summary =
+        payload && typeof payload.responsibility_assets === 'object'
+          ? (payload.responsibility_assets as Record<string, unknown>)
+          : {};
+      const ts = String(summary.latest_updated_at || '').trim();
+      const path = String(summary.storage_path || '').trim();
+      if (ts) setLatestUpdatedAt(ts);
+      if (path) setStoragePath(path);
+    } catch {
+      // ignore
+    }
+  };
+
+  const loadSchema = async () => {
+    try {
+      const data = await assetApi.responsibilitySchema();
+      const tips = Array.isArray(data.tips) ? data.tips.map((x) => String(x)) : [];
+      setSchemaTips(tips);
+    } catch {
+      setSchemaTips([]);
+    }
+  };
+
+  useEffect(() => {
+    void loadAssets();
+    void loadSchema();
+    void loadAssetStats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const domainOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const options: Array<{ label: string; value: string }> = [];
+    for (const row of records) {
+      const key = String(row.domain || '').trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      options.push({ label: key, value: key });
+    }
+    return options;
+  }, [records]);
+
+  const aggregateOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const options: Array<{ label: string; value: string }> = [];
+    for (const row of records) {
+      const key = String(row.aggregate || '').trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      options.push({ label: key, value: key });
+    }
+    return options;
+  }, [records]);
+
+  const beforeUpload: UploadProps['beforeUpload'] = async (file) => {
+    setUploading(true);
+    try {
+      const result = await assetApi.uploadResponsibilityAssets(file as File, replaceExisting);
+      message.success(`导入完成：导入 ${result.imported} 条，当前存量 ${result.stored} 条`);
+      await loadAssets();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || e?.message || '导入失败');
+    } finally {
+      setUploading(false);
+    }
+    return false;
+  };
+
+  const handleSaveManual = async () => {
+    if (!manualForm.domain.trim() || !manualForm.aggregate.trim() || !manualForm.api_interfaces.trim()) {
+      message.warning('请至少填写：领域、聚合根、API 接口');
+      return;
+    }
+    setSavingManual(true);
+    try {
+      await assetApi.upsertResponsibilityAsset({
+        asset_id: manualForm.asset_id?.trim() || undefined,
+        feature: manualForm.feature.trim(),
+        domain: manualForm.domain.trim(),
+        aggregate: manualForm.aggregate.trim(),
+        frontend_pages: splitListText(manualForm.frontend_pages),
+        api_interfaces: splitListText(manualForm.api_interfaces),
+        code_items: splitListText(manualForm.code_items),
+        database_tables: splitListText(manualForm.database_tables),
+        dependency_services: splitListText(manualForm.dependency_services),
+        monitor_items: splitListText(manualForm.monitor_items),
+        owner_team: manualForm.owner_team.trim(),
+        owner: manualForm.owner.trim(),
+      });
+      message.success('已保存责任田资产');
+      setManualForm({
+        asset_id: '',
+        feature: '',
+        domain: '',
+        aggregate: '',
+        frontend_pages: '',
+        api_interfaces: '',
+        code_items: '',
+        database_tables: '',
+        dependency_services: '',
+        monitor_items: '',
+        owner_team: '',
+        owner: '',
+      });
+      setEditingAssetId('');
+      await loadAssets();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || e?.message || '保存失败');
+    } finally {
+      setSavingManual(false);
+    }
+  };
+
+  const resetManualForm = () => {
+    setManualForm({
+      asset_id: '',
+      feature: '',
+      domain: '',
+      aggregate: '',
+      frontend_pages: '',
+      api_interfaces: '',
+      code_items: '',
+      database_tables: '',
+      dependency_services: '',
+      monitor_items: '',
+      owner_team: '',
+      owner: '',
+    });
+    setEditingAssetId('');
+  };
+
+  const startEdit = (row: ResponsibilityAssetRecord) => {
+    setEditingAssetId(row.asset_id);
+    setManualForm({
+      asset_id: row.asset_id,
+      feature: row.feature || '',
+      domain: row.domain || '',
+      aggregate: row.aggregate || '',
+      frontend_pages: (row.frontend_pages || []).join(', '),
+      api_interfaces: (row.api_interfaces || []).join(', '),
+      code_items: (row.code_items || []).join(', '),
+      database_tables: (row.database_tables || []).join(', '),
+      dependency_services: (row.dependency_services || []).join(', '),
+      monitor_items: (row.monitor_items || []).join(', '),
+      owner_team: row.owner_team || '',
+      owner: row.owner || '',
+    });
+  };
+
+  const handleDelete = async (assetId: string) => {
+    try {
+      await assetApi.deleteResponsibilityAsset(assetId);
+      message.success(`已删除 ${assetId}`);
+      await loadAssets();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || e?.message || '删除失败');
+    }
+  };
+
+  const downloadTemplate = () => {
+    const headers = [
+      '特性',
+      '领域',
+      '聚合根',
+      '前端页面',
+      'api接口',
+      '代码清单',
+      '数据库表',
+      '依赖服务',
+      '监控清单',
+      '责任团队',
+      '负责人',
+    ];
+    const sample = [
+      '下单',
+      'order',
+      'OrderAggregate',
+      '订单创建页,/order/create',
+      'POST /api/v1/orders,GET /api/v1/orders/{id}',
+      'OrderController#createOrder,OrderAppService#createOrder',
+      't_order,t_order_item,t_inventory',
+      'inventory-service,payment-service',
+      'orders_5xx_rate,hikari_pending_threads,db_lock_wait',
+      'order-domain-team',
+      'alice',
+    ];
+    const csv = [headers, sample].map((row) => row.map(csvEscape).join(',')).join('\n');
+    const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '责任田资产模板.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportCurrentRecords = () => {
+    if (!records.length) {
+      message.info('暂无可导出数据');
+      return;
+    }
+    const headers = [
+      'asset_id',
+      'feature',
+      'domain',
+      'aggregate',
+      'frontend_pages',
+      'api_interfaces',
+      'code_items',
+      'database_tables',
+      'dependency_services',
+      'monitor_items',
+      'owner_team',
+      'owner',
+      'updated_at',
+    ];
+    const rows = records.map((row) => [
+      row.asset_id,
+      row.feature,
+      row.domain,
+      row.aggregate,
+      (row.frontend_pages || []).join(';'),
+      (row.api_interfaces || []).join(';'),
+      (row.code_items || []).join(';'),
+      (row.database_tables || []).join(';'),
+      (row.dependency_services || []).join(';'),
+      (row.monitor_items || []).join(';'),
+      row.owner_team,
+      row.owner,
+      row.updated_at,
+    ]);
+    const csv = [headers, ...rows].map((row) => row.map(csvEscape).join(',')).join('\n');
+    const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '责任田资产导出.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const locateByLog = async () => {
     if (!logContent.trim()) {
-      message.error('请输入接口报错日志');
+      message.error('请输入报错日志');
       return;
     }
     setLocateLoading(true);
@@ -109,80 +373,307 @@ const AssetsPage: React.FC = () => {
       const result = await assetApi.locate(logContent.trim(), symptom.trim() || undefined);
       setLocateResult(result);
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || e.message || '定位失败');
+      message.error(e?.response?.data?.detail || e?.message || '定位失败');
     } finally {
       setLocateLoading(false);
     }
   };
 
-  const relationColumns: ColumnsType<AssetFusion['relationships'][number]> = [
-    { title: '源ID', dataIndex: 'source_id', key: 'source_id' },
-    { title: '源类型', dataIndex: 'source_type', key: 'source_type', width: 120 },
-    { title: '关系', dataIndex: 'relation', key: 'relation', width: 180 },
-    { title: '目标ID', dataIndex: 'target_id', key: 'target_id' },
-    { title: '目标类型', dataIndex: 'target_type', key: 'target_type', width: 120 },
+  const columns: ColumnsType<ResponsibilityAssetRecord> = [
+    { title: '特性', dataIndex: 'feature', key: 'feature', width: 140 },
+    { title: '领域', dataIndex: 'domain', key: 'domain', width: 140 },
+    { title: '聚合根', dataIndex: 'aggregate', key: 'aggregate', width: 160 },
+    {
+      title: 'API 接口',
+      dataIndex: 'api_interfaces',
+      key: 'api_interfaces',
+      width: 280,
+      render: (items: string[]) => <Text>{joinListText(items)}</Text>,
+    },
+    {
+      title: '数据库表',
+      dataIndex: 'database_tables',
+      key: 'database_tables',
+      width: 220,
+      render: (items: string[]) => <Text>{joinListText(items)}</Text>,
+    },
+    {
+      title: '依赖服务',
+      dataIndex: 'dependency_services',
+      key: 'dependency_services',
+      width: 220,
+      render: (items: string[]) => <Text>{joinListText(items)}</Text>,
+    },
+    {
+      title: '监控清单',
+      dataIndex: 'monitor_items',
+      key: 'monitor_items',
+      width: 240,
+      render: (items: string[]) => <Text>{joinListText(items)}</Text>,
+    },
+    {
+      title: '责任人',
+      key: 'owner',
+      width: 180,
+      render: (_, row) => (
+        <Space direction="vertical" size={0}>
+          <Text>{row.owner_team || '-'}</Text>
+          <Text type="secondary">{row.owner || '-'}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 160,
+      fixed: 'right',
+      render: (_, row) => (
+        <Space size={0}>
+          <Button type="link" size="small" onClick={() => startEdit(row)}>
+            编辑
+          </Button>
+          <Popconfirm
+            title="确认删除这条责任田资产？"
+            onConfirm={() => void handleDelete(row.asset_id)}
+          >
+            <Button type="link" danger size="small">
+              删除
+            </Button>
+          </Popconfirm>
+        </Space>
+      ),
+    },
   ];
 
   const locateColumns: ColumnsType<NonNullable<InterfaceLocateResult['code_artifacts']>[number]> = [
     { title: '代码路径', dataIndex: 'path', key: 'path' },
-    { title: '符号', dataIndex: 'symbol', key: 'symbol', width: 320 },
+    { title: '符号', dataIndex: 'symbol', key: 'symbol', width: 340 },
   ];
-
-  const caseColumns: ColumnsType<NonNullable<InterfaceLocateResult['similar_cases']>[number]> = [
-    { title: '案例ID', dataIndex: 'id', key: 'id', width: 140 },
-    { title: '标题', dataIndex: 'title', key: 'title' },
-    { title: '接口', dataIndex: 'api_endpoint', key: 'api_endpoint', width: 240 },
-  ];
-
-  const assetPreviewColumns: ColumnsType<AssetPreviewRow> = [
-    { title: '资产ID', dataIndex: 'asset_id', key: 'asset_id' },
-    { title: '类型', dataIndex: 'asset_type', key: 'asset_type', width: 120 },
-    { title: '服务/领域', dataIndex: 'service', key: 'service', width: 180 },
-    { title: '摘要', dataIndex: 'summary', key: 'summary', ellipsis: true },
-  ];
-
-  const enabledSources = Array.isArray(resourceSources.enabled_sources)
-    ? (resourceSources.enabled_sources as unknown[]).map((item) => normalizeSourceLabel(item))
-    : [];
-  const optionalSources = Array.isArray(resourceSources.optional_external_sources)
-    ? (resourceSources.optional_external_sources as unknown[]).map((item) => normalizeSourceLabel(item))
-    : [];
-  const runtimeRows = toAssetRows(fusion?.runtime_assets || [], 'runtime');
-  const devRows = toAssetRows(fusion?.dev_assets || [], 'dev');
-  const designRows = toAssetRows(fusion?.design_assets || [], 'design');
 
   return (
     <div className="assets-page">
       <Card className="module-card" style={{ marginBottom: 16 }}>
         <Title level={4} style={{ marginTop: 0, marginBottom: 8 }}>
-          资产映射与图谱中心
+          责任田资产中心
         </Title>
-        <Paragraph style={{ marginBottom: 0 }}>
-          这个页面用于回答两个问题：1）这个报错归属哪个领域与责任田；2）该故障涉及哪些运行态、开发态、设计态资产。
+        <Paragraph style={{ marginBottom: 8 }}>
+          维护并使用责任田资产：特性、领域、聚合根、前端页面、API 接口、代码清单、数据库表、依赖服务、监控清单。
         </Paragraph>
-        <Space wrap style={{ marginTop: 8 }}>
-          <Tag color="processing">模式：{String(resourceSources.mode || 'local-first')}</Tag>
-          <Tag color={enabledSources.length > 0 ? 'success' : 'default'}>已启用数据源：{enabledSources.length}</Tag>
-          <Tag color={optionalSources.length > 0 ? 'warning' : 'default'}>可选外部源：{optionalSources.length}</Tag>
+        <Space wrap>
+          <Tag color="processing">本地存储</Tag>
+          <Tag color="success">当前记录：{total}</Tag>
         </Space>
-        {enabledSources.length > 0 ? (
-          <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
-            当前启用：{enabledSources.join('、')}
-          </Paragraph>
-        ) : null}
       </Card>
 
       <Card className="module-card">
         <Tabs
-          defaultActiveKey="mapping"
+          defaultActiveKey="saved"
           items={[
             {
-              key: 'mapping',
-              label: '资产映射',
+              key: 'ownership',
+              label: '资产维护',
+              children: (
+                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                  <Alert
+                    type="info"
+                    showIcon
+                    message="上传责任田 Excel/CSV 后，系统会用于接口故障责任田定位；也可手工新增/维护单条记录。"
+                  />
+                  {schemaTips.length > 0 ? (
+                    <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                      {schemaTips.join('；')}
+                    </Paragraph>
+                  ) : null}
+
+                  <Space wrap>
+                    <Upload
+                      accept=".xlsx,.xlsm,.xltx,.xltm,.csv"
+                      beforeUpload={beforeUpload}
+                      showUploadList={false}
+                      maxCount={1}
+                    >
+                      <Button type="primary" loading={uploading}>
+                        上传责任田 Excel/CSV
+                      </Button>
+                    </Upload>
+                    <Space>
+                      <Switch checked={replaceExisting} onChange={setReplaceExisting} />
+                      <Text>覆盖现有数据</Text>
+                    </Space>
+                    <Button onClick={downloadTemplate}>下载模板</Button>
+                    <Button onClick={exportCurrentRecords}>导出当前数据</Button>
+                    <Button
+                      onClick={() => {
+                        void loadAssets();
+                        void loadAssetStats();
+                      }}
+                      loading={loading}
+                    >
+                      刷新
+                    </Button>
+                  </Space>
+
+                  <Card size="small" title="手工维护责任田资产">
+                    <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                      {editingAssetId ? (
+                        <Alert
+                          type="warning"
+                          showIcon
+                          message={`当前正在编辑：${editingAssetId}`}
+                        />
+                      ) : null}
+                      <Space wrap>
+                        <Input
+                          placeholder="特性"
+                          value={manualForm.feature}
+                          onChange={(e) => setManualForm((p) => ({ ...p, feature: e.target.value }))}
+                          style={{ width: 180 }}
+                        />
+                        <Input
+                          placeholder="领域 *"
+                          value={manualForm.domain}
+                          onChange={(e) => setManualForm((p) => ({ ...p, domain: e.target.value }))}
+                          style={{ width: 180 }}
+                        />
+                        <Input
+                          placeholder="聚合根 *"
+                          value={manualForm.aggregate}
+                          onChange={(e) => setManualForm((p) => ({ ...p, aggregate: e.target.value }))}
+                          style={{ width: 180 }}
+                        />
+                        <Input
+                          placeholder="负责人团队"
+                          value={manualForm.owner_team}
+                          onChange={(e) => setManualForm((p) => ({ ...p, owner_team: e.target.value }))}
+                          style={{ width: 180 }}
+                        />
+                        <Input
+                          placeholder="负责人"
+                          value={manualForm.owner}
+                          onChange={(e) => setManualForm((p) => ({ ...p, owner: e.target.value }))}
+                          style={{ width: 180 }}
+                        />
+                      </Space>
+                      <Input
+                        placeholder="前端页面（逗号分隔）"
+                        value={manualForm.frontend_pages}
+                        onChange={(e) => setManualForm((p) => ({ ...p, frontend_pages: e.target.value }))}
+                      />
+                      <Input
+                        placeholder="API 接口 *（示例：POST /api/v1/orders，可多条逗号分隔）"
+                        value={manualForm.api_interfaces}
+                        onChange={(e) => setManualForm((p) => ({ ...p, api_interfaces: e.target.value }))}
+                      />
+                      <Input
+                        placeholder="代码清单（逗号分隔）"
+                        value={manualForm.code_items}
+                        onChange={(e) => setManualForm((p) => ({ ...p, code_items: e.target.value }))}
+                      />
+                      <Input
+                        placeholder="数据库表（逗号分隔）"
+                        value={manualForm.database_tables}
+                        onChange={(e) => setManualForm((p) => ({ ...p, database_tables: e.target.value }))}
+                      />
+                      <Input
+                        placeholder="依赖服务（逗号分隔）"
+                        value={manualForm.dependency_services}
+                        onChange={(e) => setManualForm((p) => ({ ...p, dependency_services: e.target.value }))}
+                      />
+                      <Input
+                        placeholder="监控清单（逗号分隔）"
+                        value={manualForm.monitor_items}
+                        onChange={(e) => setManualForm((p) => ({ ...p, monitor_items: e.target.value }))}
+                      />
+                      <Space>
+                        <Button type="primary" loading={savingManual} onClick={() => void handleSaveManual()}>
+                          {editingAssetId ? '更新' : '保存'}
+                        </Button>
+                        <Button onClick={resetManualForm}>
+                          清空
+                        </Button>
+                      </Space>
+                    </Space>
+                  </Card>
+                </Space>
+              ),
+            },
+            {
+              key: 'saved',
+              label: '已保存资产',
+              children: (
+                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                  <Space wrap>
+                    <Input
+                      placeholder="全文搜索（特性/领域/聚合根/API）"
+                      value={filterText}
+                      onChange={(e) => setFilterText(e.target.value)}
+                      style={{ width: 280 }}
+                    />
+                    <Select
+                      allowClear
+                      showSearch
+                      placeholder="筛选领域"
+                      value={filterDomain || undefined}
+                      options={domainOptions}
+                      style={{ width: 200 }}
+                      onChange={(v) => setFilterDomain(String(v || ''))}
+                    />
+                    <Select
+                      allowClear
+                      showSearch
+                      placeholder="筛选聚合根"
+                      value={filterAggregate || undefined}
+                      options={aggregateOptions}
+                      style={{ width: 220 }}
+                      onChange={(v) => setFilterAggregate(String(v || ''))}
+                    />
+                    <Input
+                      placeholder="筛选 API 关键词"
+                      value={filterApi}
+                      onChange={(e) => setFilterApi(e.target.value)}
+                      style={{ width: 220 }}
+                    />
+                    <Button type="primary" onClick={() => void loadAssets()} loading={loading}>
+                      查询
+                    </Button>
+                  </Space>
+
+                  <Card
+                    size="small"
+                    title={`已保存责任田资产（${total}）`}
+                    extra={
+                      <Space>
+                        <Text type="secondary">
+                          最新更新：{latestUpdatedAt || '-'}
+                        </Text>
+                      </Space>
+                    }
+                  >
+                    {storagePath ? (
+                      <Paragraph type="secondary" style={{ marginBottom: 8 }}>
+                        存储位置：{storagePath}
+                      </Paragraph>
+                    ) : null}
+                    <Table
+                      rowKey={(row) => row.asset_id}
+                      loading={loading}
+                      columns={columns}
+                      dataSource={records}
+                      scroll={{ x: 1800, y: '52vh' }}
+                      pagination={{ pageSize: 20 }}
+                      locale={{ emptyText: '暂无责任田资产，请先上传 Excel/CSV 或手工新增' }}
+                    />
+                  </Card>
+                </Space>
+              ),
+            },
+            {
+              key: 'locate',
+              label: '责任田定位',
               children: (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                   <Paragraph style={{ marginBottom: 0 }}>
-                    输入报错日志后，系统会定位领域、聚合根、责任团队，并返回代码和数据库关联点。
+                    输入故障日志后，系统优先命中你维护的责任田资产；未命中时回退到内置责任田知识库。
                   </Paragraph>
                   <TextArea
                     rows={8}
@@ -191,43 +682,35 @@ const AssetsPage: React.FC = () => {
                     onChange={(e) => setLogContent(e.target.value)}
                   />
                   <Input
-                    placeholder="故障现象（可选），例如：下单失败、支付确认失败"
+                    placeholder="故障现象（可选）"
                     value={symptom}
                     onChange={(e) => setSymptom(e.target.value)}
                   />
                   <Space wrap>
-                    <Button type="primary" loading={locateLoading} onClick={locateByLog}>
-                      定位领域与责任田
+                    <Button type="primary" loading={locateLoading} onClick={() => void locateByLog()}>
+                      定位责任田
                     </Button>
                     <Button
                       onClick={() => {
-                        setLogContent(`2026-02-20T14:01:38.124+08:00 ERROR upstream timeout, status=502, uri=/api/v1/orders, costMs=30211
-2026-02-20T14:01:38.095+08:00 ERROR HikariPool-1 - Connection is not available, request timed out after 30000ms.`);
-                        setSymptom('订单创建超时，502比例上升');
+                        setLogContent(`2026-02-20 14:01:38 ERROR POST /api/v1/orders failed, status=502
+2026-02-20 14:01:38 ERROR HikariPool-1 - Connection is not available, request timed out after 30000ms.`);
+                        setSymptom('下单接口 502，数据库连接池耗尽');
                       }}
                     >
                       填充示例日志
                     </Button>
-                    <Button
-                      onClick={() => {
-                        setLogContent('');
-                        setSymptom('');
-                        setLocateResult(null);
-                      }}
-                    >
-                      清空
-                    </Button>
                   </Space>
 
                   {!locateResult ? (
-                    <Empty
-                      description="暂无映射结果。输入日志并点击“定位领域与责任田”后，将显示责任团队、接口、代码和数据库映射信息。"
-                      image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    />
+                    <Empty description="暂无定位结果" image={Empty.PRESENTED_IMAGE_SIMPLE} />
                   ) : (
                     <>
-                      <Alert type={locateResult.matched ? 'success' : 'warning'} message={locateResult.reason} showIcon />
-                      <Descriptions bordered column={2} style={{ marginTop: 8 }}>
+                      <Alert
+                        type={locateResult.matched ? 'success' : 'warning'}
+                        showIcon
+                        message={locateResult.reason}
+                      />
+                      <Descriptions bordered column={2}>
                         <Descriptions.Item label="匹配状态">
                           <Tag color={locateResult.matched ? 'success' : 'warning'}>
                             {locateResult.matched ? '已命中' : '未命中'}
@@ -240,151 +723,22 @@ const AssetsPage: React.FC = () => {
                         <Descriptions.Item label="负责人">{locateResult.owner || '-'}</Descriptions.Item>
                         <Descriptions.Item label="命中接口" span={2}>
                           {locateResult.matched_endpoint
-                            ? `${locateResult.matched_endpoint.method} ${locateResult.matched_endpoint.path} (${locateResult.matched_endpoint.interface || '-'})`
+                            ? `${locateResult.matched_endpoint.method} ${locateResult.matched_endpoint.path}`
                             : '-'}
                         </Descriptions.Item>
                         <Descriptions.Item label="数据库表" span={2}>
-                          {locateResult.db_tables.join(', ') || '-'}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="设计文档引用" span={2}>
-                          {locateResult.design_ref
-                            ? `${locateResult.design_ref.doc} / ${locateResult.design_ref.section}`
-                            : '-'}
+                          {joinListText(locateResult.db_tables)}
                         </Descriptions.Item>
                       </Descriptions>
-
-                      {!locateResult.matched && locateResult.guidance?.length > 0 && (
-                        <Alert
-                          type="info"
-                          showIcon
-                          message={`补充建议：${locateResult.guidance.join('；')}`}
-                          style={{ marginTop: 12 }}
-                        />
-                      )}
-
                       <Table
-                        style={{ marginTop: 12 }}
-                        rowKey={(row, index) => `${row.path}-${row.symbol}-${index}`}
+                        rowKey={(row, idx) => `${row.path}-${row.symbol}-${idx}`}
                         columns={locateColumns}
                         dataSource={locateResult.code_artifacts}
                         pagination={false}
                         locale={{ emptyText: '未返回关联代码' }}
                       />
-                      <Table
-                        style={{ marginTop: 12 }}
-                        rowKey={(row) => row.id}
-                        columns={caseColumns}
-                        dataSource={locateResult.similar_cases}
-                        pagination={false}
-                        locale={{ emptyText: '未命中相似案例' }}
-                      />
                     </>
                   )}
-                </Space>
-              ),
-            },
-            {
-              key: 'graph',
-              label: '资产图谱',
-              children: (
-                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                  <Paragraph style={{ marginBottom: 0 }}>
-                    资产图谱用于把同一故障下的运行态、代码态、设计态资产串联成关系图，帮助判断影响面和归责链路。
-                  </Paragraph>
-                  <Space wrap>
-                    <Select
-                      showSearch
-                      allowClear
-                      placeholder="选择最近 Incident"
-                      style={{ minWidth: 420 }}
-                      options={recentIncidentOptions}
-                      value={incidentId || undefined}
-                      onChange={(value) => setIncidentId(String(value || ''))}
-                    />
-                    <Input
-                      placeholder="或手动输入 Incident ID"
-                      value={incidentId}
-                      style={{ width: 280 }}
-                      onChange={(e) => setIncidentId(e.target.value)}
-                    />
-                    <Button type="primary" loading={loading} onClick={queryFusion}>
-                      查询融合结果
-                    </Button>
-                  </Space>
-
-                  {!fusion ? (
-                    <Empty
-                      description="暂无图谱结果。请选择 Incident 并查询后，可看到三态资产清单和它们之间的关系。"
-                      image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    />
-                  ) : (
-                    <>
-                      <Descriptions bordered column={2}>
-                        <Descriptions.Item label="Incident">{fusion.incident_id}</Descriptions.Item>
-                        <Descriptions.Item label="Debate Session">{fusion.debate_session_id}</Descriptions.Item>
-                        <Descriptions.Item label="运行态资产">{fusion.runtime_assets.length}</Descriptions.Item>
-                        <Descriptions.Item label="开发态资产">{fusion.dev_assets.length}</Descriptions.Item>
-                        <Descriptions.Item label="设计态资产">{fusion.design_assets.length}</Descriptions.Item>
-                        <Descriptions.Item label="关联关系">{fusion.relationships.length}</Descriptions.Item>
-                      </Descriptions>
-                      <Divider style={{ margin: '8px 0' }} />
-                      <Table
-                        rowKey={(row, index) => `${row.source_id}-${row.target_id}-${index}`}
-                        columns={relationColumns}
-                        dataSource={fusion.relationships}
-                        pagination={{ pageSize: 8 }}
-                        locale={{ emptyText: '暂无关系数据' }}
-                      />
-                      <Table
-                        style={{ marginTop: 12 }}
-                        columns={assetPreviewColumns}
-                        dataSource={runtimeRows}
-                        pagination={false}
-                        title={() => '运行态资产（节选）'}
-                        locale={{ emptyText: '暂无运行态资产' }}
-                      />
-                      <Table
-                        style={{ marginTop: 12 }}
-                        columns={assetPreviewColumns}
-                        dataSource={devRows}
-                        pagination={false}
-                        title={() => '开发态资产（节选）'}
-                        locale={{ emptyText: '暂无开发态资产' }}
-                      />
-                      <Table
-                        style={{ marginTop: 12 }}
-                        columns={assetPreviewColumns}
-                        dataSource={designRows}
-                        pagination={false}
-                        title={() => '设计态资产（节选）'}
-                        locale={{ emptyText: '暂无设计态资产' }}
-                      />
-                    </>
-                  )}
-                </Space>
-              ),
-            },
-            {
-              key: 'guide',
-              label: '使用说明',
-              children: (
-                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                  <Alert
-                    type="info"
-                    showIcon
-                    message="建议流程：先做“资产映射”定位责任田，再看“资产图谱”判断影响面，最后回到辩论过程核对证据链。"
-                  />
-                  <Descriptions bordered column={1}>
-                    <Descriptions.Item label="资产映射页回答什么问题">
-                      某条报错日志属于哪个领域/聚合根/责任团队，以及对应代码文件和数据库表是什么。
-                    </Descriptions.Item>
-                    <Descriptions.Item label="资产图谱页回答什么问题">
-                      故障涉及哪些跨层资产，哪些资产之间存在依赖或影响关系，应该优先验证哪条链路。
-                    </Descriptions.Item>
-                    <Descriptions.Item label="输入建议">
-                      日志里尽量包含接口路径、状态码、traceId、异常类名，能显著提升映射命中率。
-                    </Descriptions.Item>
-                  </Descriptions>
                 </Space>
               ),
             },

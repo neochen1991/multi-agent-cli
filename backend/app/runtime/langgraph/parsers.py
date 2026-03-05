@@ -268,6 +268,29 @@ def normalize_verification_output(parsed: Dict[str, Any], raw_content: str) -> D
 
 def normalize_commander_output(parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
     normalized = normalize_normal_output(parsed, raw_content)
+
+    def _normalize_tables(value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        picks: List[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            picks.append(text[:120])
+        return list(dict.fromkeys(picks))[:20]
+
+    def _normalize_skill_hints(value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        picks: List[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            picks.append(text[:80])
+        return list(dict.fromkeys(picks))[:8]
+
     commands_raw = parsed.get("commands")
     commands: List[Dict[str, Any]] = []
     if isinstance(commands_raw, list):
@@ -284,6 +307,8 @@ def normalize_commander_output(parsed: Dict[str, Any], raw_content: str) -> Dict
                     "focus": str(item.get("focus") or "").strip(),
                     "expected_output": str(item.get("expected_output") or "").strip(),
                     "use_tool": item.get("use_tool"),
+                    "database_tables": _normalize_tables(item.get("database_tables")),
+                    "skill_hints": _normalize_skill_hints(item.get("skill_hints")),
                 }
             )
     if not str(normalized.get("chat_message") or "").strip():

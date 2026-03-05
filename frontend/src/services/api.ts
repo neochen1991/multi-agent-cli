@@ -209,6 +209,33 @@ export interface InterfaceLocateResult {
   }>;
 }
 
+export interface ResponsibilityAssetRecord {
+  asset_id: string;
+  feature: string;
+  domain: string;
+  aggregate: string;
+  frontend_pages: string[];
+  api_interfaces: string[];
+  code_items: string[];
+  database_tables: string[];
+  dependency_services: string[];
+  monitor_items: string[];
+  owner_team: string;
+  owner: string;
+  source_file: string;
+  row_index?: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ResponsibilityAssetUploadResult {
+  file_name: string;
+  replace_existing: boolean;
+  imported: number;
+  stored: number;
+  preview: ResponsibilityAssetRecord[];
+}
+
 export interface CodeRepoToolConfig {
   enabled: boolean;
   repo_url: string;
@@ -306,6 +333,14 @@ export interface AlertPlatformSourceConfig {
   verify_ssl: boolean;
 }
 
+export interface AgentSkillConfig {
+  enabled: boolean;
+  skills_dir: string;
+  max_skills: number;
+  max_skill_chars: number;
+  allowed_agents: string[];
+}
+
 export interface AgentToolingConfig {
   code_repo: CodeRepoToolConfig;
   log_file: LogFileToolConfig;
@@ -319,6 +354,7 @@ export interface AgentToolingConfig {
   apm_source?: APMSourceConfig;
   logcloud_source?: LogCloudSourceConfig;
   alert_platform_source?: AlertPlatformSourceConfig;
+  skills?: AgentSkillConfig;
   updated_at: string;
 }
 
@@ -596,6 +632,61 @@ export const assetApi = {
       log_content: logContent,
       symptom,
     });
+    return data;
+  },
+  async responsibilitySchema(): Promise<Record<string, unknown>> {
+    const { data } = await api.get<Record<string, unknown>>('/assets/responsibility/schema');
+    return data;
+  },
+  async listResponsibilityAssets(params?: {
+    q?: string;
+    domain?: string;
+    aggregate?: string;
+    api?: string;
+  }): Promise<{ items: ResponsibilityAssetRecord[]; total: number }> {
+    const { data } = await api.get<{ items: ResponsibilityAssetRecord[]; total: number }>(
+      '/assets/responsibility',
+      { params },
+    );
+    return data;
+  },
+  async upsertResponsibilityAsset(payload: {
+    asset_id?: string;
+    feature: string;
+    domain: string;
+    aggregate: string;
+    frontend_pages?: string[];
+    api_interfaces?: string[];
+    code_items?: string[];
+    database_tables?: string[];
+    dependency_services?: string[];
+    monitor_items?: string[];
+    owner_team?: string;
+    owner?: string;
+  }): Promise<ResponsibilityAssetRecord> {
+    const { data } = await api.post<ResponsibilityAssetRecord>('/assets/responsibility', payload);
+    return data;
+  },
+  async deleteResponsibilityAsset(assetId: string): Promise<{ deleted: boolean; asset_id: string }> {
+    const { data } = await api.delete<{ deleted: boolean; asset_id: string }>(
+      `/assets/responsibility/${encodeURIComponent(assetId)}`,
+    );
+    return data;
+  },
+  async uploadResponsibilityAssets(
+    file: File,
+    replaceExisting = true,
+  ): Promise<ResponsibilityAssetUploadResult> {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('replace_existing', String(replaceExisting));
+    const { data } = await api.post<ResponsibilityAssetUploadResult>(
+      '/assets/responsibility/upload',
+      form,
+      {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      },
+    );
     return data;
   },
 };

@@ -303,6 +303,37 @@ const IncidentPage: React.FC = () => {
         .filter(Boolean)
         .join('\n');
     }
+    if (toolName === 'agent_skill_router' || preview.skill_context) {
+      const ctx = preview.skill_context && typeof preview.skill_context === 'object'
+        ? asRecord(preview.skill_context)
+        : preview;
+      const base = preview.base_tool_context && typeof preview.base_tool_context === 'object'
+        ? asRecord(preview.base_tool_context)
+        : {};
+      const summary = String(ctx.summary || '-');
+      const status = String(ctx.status || '-');
+      const items = Array.isArray(ctx.items) ? ctx.items : [];
+      const top = items
+        .map((item) => asRecord(item))
+        .map((item) => {
+          const name = String(item.name || '-');
+          const score = String(item.score || '-');
+          const path = String(item.path || '-');
+          return `${name} (score=${score}) @ ${path}`;
+        })
+        .slice(0, truncate ? 4 : 12);
+      return [
+        `Skill状态：${status}`,
+        `Skill摘要：${summary}`,
+        `命中数量：${items.length}`,
+        Object.keys(base).length
+          ? `基础工具状态：${String(base.name || '-')}/${String(base.status || '-')}`
+          : '',
+        top.length ? `命中明细：${top.join('；')}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    }
     const lines = Object.entries(preview)
       .slice(0, 6)
       .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : toDisplayText(value)}`);
@@ -668,6 +699,7 @@ const IncidentPage: React.FC = () => {
         domain_excel_lookup: '责任田文档查询工具',
         git_repo_search: '代码仓检索工具',
         git_change_window: '变更窗口分析工具',
+        agent_skill_router: 'Skill 路由工具',
         metrics_snapshot_analyzer: '监控指标分析工具',
         runbook_case_library: '案例库检索工具',
       };

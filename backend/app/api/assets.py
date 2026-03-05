@@ -6,7 +6,7 @@ Tri-State Asset API Endpoints
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 
 from app.models.asset import (
@@ -168,6 +168,48 @@ class InterfaceLocateResponse(BaseModel):
     design_ref: Optional[Dict[str, Any]]
     design_details: Optional[Dict[str, Any]]
     similar_cases: List[Dict[str, Any]]
+
+
+class ResponsibilityAssetRecord(BaseModel):
+    asset_id: str
+    feature: str
+    domain: str
+    aggregate: str
+    frontend_pages: List[str] = Field(default_factory=list)
+    api_interfaces: List[str] = Field(default_factory=list)
+    code_items: List[str] = Field(default_factory=list)
+    database_tables: List[str] = Field(default_factory=list)
+    dependency_services: List[str] = Field(default_factory=list)
+    monitor_items: List[str] = Field(default_factory=list)
+    owner_team: str = ""
+    owner: str = ""
+    source_file: str = ""
+    row_index: Optional[int] = None
+    created_at: str
+    updated_at: str
+
+
+class ResponsibilityAssetUpsertRequest(BaseModel):
+    asset_id: Optional[str] = None
+    feature: str
+    domain: str
+    aggregate: str
+    frontend_pages: List[str] = Field(default_factory=list)
+    api_interfaces: List[str] = Field(default_factory=list)
+    code_items: List[str] = Field(default_factory=list)
+    database_tables: List[str] = Field(default_factory=list)
+    dependency_services: List[str] = Field(default_factory=list)
+    monitor_items: List[str] = Field(default_factory=list)
+    owner_team: str = ""
+    owner: str = ""
+
+
+class ResponsibilityAssetUploadResponse(BaseModel):
+    file_name: str
+    replace_existing: bool
+    imported: int
+    stored: int
+    preview: List[ResponsibilityAssetRecord]
 
 
 # ==================== 运行态资产 API ====================
@@ -628,7 +670,95 @@ async def locate_by_interface(request: InterfaceLocateRequest):
     description="返回本地优先、可插拔外部源的资源入口清单",
 )
 async def list_asset_resource_sources():
-    return asset_knowledge_service.list_resource_sources()
+    payload = asset_knowledge_service.list_resource_sources()
+    payload["responsibility_assets"] = await asset_service.responsibility_asset_stats()
+    return payload
+
+
+@router.get(
+    "/responsibility/schema",
+    summary="责任田资产模板字段",
+    description="返回责任田资产维护建议字段与别名映射",
+)
+async def get_responsibility_schema():
+    return asset_service.responsibility_asset_schema()
+
+
+@router.get(
+    "/responsibility",
+    response_model=AssetListResponse,
+    summary="责任田资产列表",
+    description="查询用户维护的责任田资产记录",
+)
+async def list_responsibility_assets(
+    q: Optional[str] = Query(None, description="全文检索关键词"),
+    domain: Optional[str] = Query(None, description="按领域筛选"),
+    aggregate: Optional[str] = Query(None, description="按聚合根筛选"),
+    api: Optional[str] = Query(None, description="按接口关键词筛选"),
+):
+    rows = await asset_service.list_responsibility_assets(
+        query=q,
+        domain=domain,
+        aggregate=aggregate,
+        api_keyword=api,
+    )
+    return AssetListResponse(items=[ResponsibilityAssetRecord(**x) for x in rows], total=len(rows))
+
+
+@router.post(
+    "/responsibility",
+    response_model=ResponsibilityAssetRecord,
+    summary="新增或更新责任田资产",
+    description="手工维护责任田资产单行记录",
+)
+async def upsert_responsibility_asset(request: ResponsibilityAssetUpsertRequest):
+    row = await asset_service.upsert_responsibility_asset(request.model_dump(mode="json"))
+    return ResponsibilityAssetRecord(**row)
+
+
+@router.delete(
+    "/responsibility/{asset_id}",
+    summary="删除责任田资产",
+    description="按 asset_id 删除责任田资产记录",
+)
+async def delete_responsibility_asset(asset_id: str):
+    ok = await asset_service.delete_responsibility_asset(asset_id)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"asset {asset_id} not found")
+    return {"deleted": True, "asset_id": asset_id}
+
+
+@router.post(
+    "/responsibility/upload",
+    response_model=ResponsibilityAssetUploadResponse,
+    summary="上传责任田资产 Excel/CSV",
+    description="上传并导入责任田资产清单；支持替换或追加合并",
+)
+async def upload_responsibility_assets(
+    file: UploadFile = File(..., description="Excel/CSV 文件"),
+    replace_existing: bool = Form(True, description="是否替换现有数据"),
+):
+    file_name = str(file.filename or "").strip()
+    if not file_name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file name is required")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file is empty")
+    try:
+        result = await asset_service.import_responsibility_assets_from_file(
+            file_name=file_name,
+            file_bytes=content,
+            replace_existing=replace_existing,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return ResponsibilityAssetUploadResponse(
+        file_name=str(result.get("file_name") or file_name),
+        replace_existing=bool(result.get("replace_existing")),
+        imported=int(result.get("imported") or 0),
+        stored=int(result.get("stored") or 0),
+        preview=[ResponsibilityAssetRecord(**x) for x in list(result.get("preview") or [])],
+    )
 
 
 # ==================== 资产关联 API ====================

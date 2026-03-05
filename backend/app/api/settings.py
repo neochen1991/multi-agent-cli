@@ -25,6 +25,7 @@ TOOL_AGENT_MAP: Dict[str, str] = {
     "local_log_reader": "LogAgent",
     "domain_excel_lookup": "DomainAgent",
     "db_snapshot_reader": "DatabaseAgent",
+    "agent_skill_router": "ProblemAnalysisAgent",
     "metrics_snapshot_analyzer": "MetricsAgent",
     "grafana_connector": "MetricsAgent",
     "apm_connector": "MetricsAgent",

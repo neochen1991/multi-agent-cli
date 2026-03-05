@@ -295,3 +295,103 @@ def test_enrich_agent_commands_passes_mapped_tables_to_database_agent():
 
     assert db_cmd["database_tables"] == ["public.t_order", "t_order_item"]
     assert "责任田映射表" in str(db_cmd["focus"] or "")
+
+
+def test_extract_agent_commands_preserves_skill_hints_and_tables():
+    orchestrator = _orchestrator()
+    payload = {
+        "commands": [
+            {
+                "target_agent": "DatabaseAgent",
+                "task": "检查锁等待",
+                "focus": "锁和慢SQL",
+                "expected_output": "锁链路+索引评估",
+                "use_tool": True,
+                "database_tables": ["public.t_order", "public.t_order_item"],
+                "skill_hints": ["db-bottleneck-diagnosis"],
+            }
+        ]
+    }
+    commands = orchestrator._extract_agent_commands_from_payload(payload, fill_defaults=False)
+    db_cmd = commands["DatabaseAgent"]
+    assert db_cmd["database_tables"] == ["public.t_order", "public.t_order_item"]
+    assert db_cmd["skill_hints"] == ["db-bottleneck-diagnosis"]
+
+
+def test_enrich_agent_commands_adds_default_skill_hints():
+    orchestrator = _orchestrator()
+    commands = {
+        "LogAgent": {
+            "target_agent": "LogAgent",
+            "task": "分析日志",
+            "focus": "",
+            "expected_output": "",
+            "use_tool": True,
+            "database_tables": [],
+            "skill_hints": [],
+        },
+        "DatabaseAgent": {
+            "target_agent": "DatabaseAgent",
+            "task": "分析数据库",
+            "focus": "",
+            "expected_output": "",
+            "use_tool": True,
+            "database_tables": ["public.t_order"],
+            "skill_hints": [],
+        },
+        "MetricsAgent": {
+            "target_agent": "MetricsAgent",
+            "task": "分析指标",
+            "focus": "",
+            "expected_output": "",
+            "use_tool": True,
+            "database_tables": [],
+            "skill_hints": [],
+        },
+        "RuleSuggestionAgent": {
+            "target_agent": "RuleSuggestionAgent",
+            "task": "建议告警规则",
+            "focus": "",
+            "expected_output": "",
+            "use_tool": True,
+            "database_tables": [],
+            "skill_hints": [],
+        },
+    }
+    compact_context = {
+        "incident": {
+            "title": "/orders 502",
+            "description": "Hikari connection timeout and SQL lock wait",
+        },
+        "log_excerpt": "lock wait timeout exceeded",
+    }
+    enriched = orchestrator._enrich_agent_commands_with_skill_hints(commands, compact_context)
+    assert enriched["LogAgent"]["skill_hints"] == ["log-forensics"]
+    assert enriched["DatabaseAgent"]["skill_hints"] == ["db-bottleneck-diagnosis"]
+    assert enriched["MetricsAgent"]["skill_hints"] == ["metrics-anomaly-triage"]
+    assert enriched["RuleSuggestionAgent"]["skill_hints"] == ["alert-rule-hardening"]
+
+
+def test_enrich_agent_commands_does_not_override_existing_skill_hints():
+    orchestrator = _orchestrator()
+    commands = {
+        "CodeAgent": {
+            "target_agent": "CodeAgent",
+            "task": "定位代码问题",
+            "focus": "",
+            "expected_output": "",
+            "use_tool": True,
+            "database_tables": [],
+            "skill_hints": ["custom-skill"],
+        }
+    }
+    enriched = orchestrator._enrich_agent_commands_with_skill_hints(commands, {"incident": {"title": "404"}})
+    assert enriched["CodeAgent"]["skill_hints"] == ["custom-skill"]
+
+
+def test_judge_timeout_plan_has_retry_in_quick_mode():
+    orchestrator = _orchestrator()
+    orchestrator._require_verification_plan = False
+    plan = orchestrator._agent_timeout_plan("JudgeAgent")
+    assert len(plan) == 2
+    assert float(plan[1]) >= float(plan[0])

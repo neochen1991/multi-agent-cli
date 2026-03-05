@@ -997,6 +997,17 @@ class LangGraphRuntimeOrchestrator:
             # preserve order while deduplicating
             return list(dict.fromkeys(picks))[:20]
 
+        def _normalize_skill_hints(value: Any) -> List[str]:
+            if not isinstance(value, list):
+                return []
+            picks: List[str] = []
+            for item in value:
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                picks.append(text[:80])
+            return list(dict.fromkeys(picks))[:8]
+
         raw_commands = payload.get("commands")
         commands: Dict[str, Dict[str, Any]] = {}
         if isinstance(raw_commands, list):
@@ -1013,6 +1024,7 @@ class LangGraphRuntimeOrchestrator:
                     "expected_output": str(item.get("expected_output") or "").strip(),
                     "use_tool": item.get("use_tool"),
                     "database_tables": _normalize_tables(item.get("database_tables")),
+                    "skill_hints": _normalize_skill_hints(item.get("skill_hints")),
                 }
 
         defaults = {
@@ -1039,6 +1051,7 @@ class LangGraphRuntimeOrchestrator:
                         "expected_output": "",
                         "use_tool": None,
                         "database_tables": [],
+                        "skill_hints": [],
                     },
                 )
         elif targets_hint:
@@ -1051,6 +1064,7 @@ class LangGraphRuntimeOrchestrator:
                         "expected_output": "",
                         "use_tool": None,
                         "database_tables": [],
+                        "skill_hints": [],
                     }
         return commands
 
@@ -1088,6 +1102,76 @@ class LangGraphRuntimeOrchestrator:
         if not str(db_cmd.get("expected_output") or "").strip():
             db_cmd["expected_output"] = "输出各目标表的索引、字段定义、疑似慢SQL与会话阻塞信号"
         commands["DatabaseAgent"] = db_cmd
+        return commands
+
+    def _enrich_agent_commands_with_skill_hints(
+        self,
+        commands: Dict[str, Dict[str, Any]],
+        compact_context: Dict[str, Any],
+    ) -> Dict[str, Dict[str, Any]]:
+        if not isinstance(commands, dict):
+            return {}
+
+        incident = compact_context.get("incident") if isinstance(compact_context, dict) else {}
+        incident_text = " ".join(
+            [
+                str((incident or {}).get("title") or ""),
+                str((incident or {}).get("description") or ""),
+                str(compact_context.get("log_excerpt") or ""),
+            ]
+        ).lower()
+        has_db_signal = any(
+            token in incident_text
+            for token in ("sql", "数据库", "连接池", "hikari", "lock", "slow", "deadlock", "session")
+        )
+        has_route_signal = any(token in incident_text for token in ("404", "route", "路由", "not found", "网关"))
+
+        default_skill_by_agent: Dict[str, List[str]] = {
+            "ProblemAnalysisAgent": ["incident-commander"],
+            "LogAgent": ["log-forensics"],
+            "DomainAgent": ["domain-responsibility-mapping"],
+            "CodeAgent": ["code-path-analysis"],
+            "DatabaseAgent": ["db-bottleneck-diagnosis"] if has_db_signal else [],
+            "MetricsAgent": ["metrics-anomaly-triage"],
+            "ChangeAgent": ["change-correlation-review"],
+            "RunbookAgent": ["runbook-execution-planner"],
+            "RuleSuggestionAgent": ["alert-rule-hardening"],
+            "CriticAgent": ["architectural-critique"],
+            "RebuttalAgent": ["evidence-rebuttal"],
+            "JudgeAgent": (
+                ["final-judgment-synthesis", "db-bottleneck-diagnosis"]
+                if has_db_signal
+                else ["final-judgment-synthesis"]
+            ),
+            "VerificationAgent": ["verification-plan-builder"],
+        }
+        if has_route_signal:
+            default_skill_by_agent.setdefault("DomainAgent", []).append("domain-responsibility-mapping")
+            default_skill_by_agent.setdefault("CodeAgent", []).append("code-path-analysis")
+            default_skill_by_agent.setdefault("CriticAgent", []).append("architectural-critique")
+
+        def _normalize_hints(value: Any) -> List[str]:
+            if not isinstance(value, list):
+                return []
+            picks: List[str] = []
+            for item in value:
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                picks.append(text[:80])
+            return list(dict.fromkeys(picks))[:8]
+
+        for target, cmd in list(commands.items()):
+            if not isinstance(cmd, dict):
+                continue
+            existing = _normalize_hints(cmd.get("skill_hints"))
+            if existing:
+                cmd["skill_hints"] = existing
+                commands[target] = cmd
+                continue
+            fallback = list(default_skill_by_agent.get(target) or [])
+            cmd["skill_hints"] = list(dict.fromkeys([str(item).strip() for item in fallback if str(item).strip()]))[:8]
+            commands[target] = cmd
         return commands
 
     async def _run_problem_analysis_commander(
@@ -1135,6 +1219,7 @@ class LangGraphRuntimeOrchestrator:
         payload = turn.output_content if isinstance(turn.output_content, dict) else {}
         commands = self._extract_agent_commands_from_payload(payload, fill_defaults=True)
         commands = self._enrich_agent_commands_with_asset_mapping(commands, compact_context)
+        commands = self._enrich_agent_commands_with_skill_hints(commands, compact_context)
         return {
             "commands": commands,
             "next_mode": str(payload.get("next_mode") or "").strip().lower(),
@@ -1207,6 +1292,7 @@ class LangGraphRuntimeOrchestrator:
             targets_hint=targets_hint,
         )
         commands = self._enrich_agent_commands_with_asset_mapping(commands, compact_context)
+        commands = self._enrich_agent_commands_with_skill_hints(commands, compact_context)
         return {
             "commands": commands,
             "next_mode": next_mode,
@@ -2017,8 +2103,9 @@ class LangGraphRuntimeOrchestrator:
     def _agent_timeout_plan(self, agent_name: str) -> List[float]:
         if agent_name == "JudgeAgent":
             if not self._require_verification_plan:
-                quick_timeout = float(max(int(settings.llm_judge_retry_timeout), 75))
-                return [quick_timeout]
+                first_timeout = float(max(40, int(settings.llm_judge_timeout)))
+                retry_timeout = float(max(first_timeout + 10, int(settings.llm_judge_retry_timeout) + 15))
+                return [first_timeout, retry_timeout]
             first_timeout = float(max(18, int(settings.llm_judge_timeout)))
             retry_timeout = float(max(first_timeout, int(settings.llm_judge_retry_timeout)))
             return [first_timeout, retry_timeout]
@@ -2034,6 +2121,8 @@ class LangGraphRuntimeOrchestrator:
 
     def _agent_http_timeout(self, agent_name: str) -> int:
         if agent_name == "JudgeAgent":
+            if not self._require_verification_plan:
+                return max(45, min(int(settings.llm_judge_retry_timeout) + 20, 120))
             return max(20, min(int(settings.llm_judge_retry_timeout), 120))
         if agent_name in {"CriticAgent", "RebuttalAgent"}:
             return max(15, min(int(settings.llm_review_timeout), 90))

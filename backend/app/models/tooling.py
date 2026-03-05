@@ -5,6 +5,7 @@ Agent tooling configuration models.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import List
 from pydantic import BaseModel, Field
 
 
@@ -105,6 +106,14 @@ class AlertPlatformSourceConfig(BaseModel):
     verify_ssl: bool = Field(default=True, description="是否校验证书")
 
 
+class AgentSkillConfig(BaseModel):
+    enabled: bool = Field(default=True, description="是否启用 Agent Skill 路由")
+    skills_dir: str = Field(default="backend/skills", description="Skill 文档目录（本地）")
+    max_skills: int = Field(default=3, ge=1, le=10, description="单次最多注入 Skill 数量")
+    max_skill_chars: int = Field(default=1600, ge=200, le=8000, description="单个 Skill 最大注入字符数")
+    allowed_agents: List[str] = Field(default_factory=list, description="允许调用 Skill 的 Agent 列表；为空表示全部")
+
+
 class AgentToolingConfig(BaseModel):
     code_repo: CodeRepoToolConfig = Field(default_factory=CodeRepoToolConfig)
     log_file: LogFileToolConfig = Field(default_factory=LogFileToolConfig)
@@ -118,4 +127,5 @@ class AgentToolingConfig(BaseModel):
     apm_source: APMSourceConfig = Field(default_factory=APMSourceConfig)
     logcloud_source: LogCloudSourceConfig = Field(default_factory=LogCloudSourceConfig)
     alert_platform_source: AlertPlatformSourceConfig = Field(default_factory=AlertPlatformSourceConfig)
+    skills: AgentSkillConfig = Field(default_factory=AgentSkillConfig)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

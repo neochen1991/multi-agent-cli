@@ -8,7 +8,15 @@ from app.runtime.langgraph.state import AgentSpec
 from app.runtime.messages import AgentEvidence
 
 ToJsonFn = Callable[[Any], str]
-PROMPT_TEMPLATE_VERSION = "lg-rca-prompt-v2.1.0"
+PROMPT_TEMPLATE_VERSION = "lg-rca-prompt-v2.2.0"
+
+_STRICT_OUTPUT_RULES = (
+    "输出协议（强约束）：\n"
+    "1) 只输出一个 JSON 对象，不要 Markdown，不要 ```json 代码块，不要前后解释。\n"
+    "2) chat_message 使用自然语言短句，不要包含 JSON 片段。\n"
+    "3) 证据不足时必须降低 confidence（<=0.55）并给下一步补证动作。\n"
+    "4) 若有冲突证据，请写入 counter_evidence（可为空数组）。\n"
+)
 
 
 def coordinator_command_schema() -> Dict[str, Any]:
@@ -34,6 +42,7 @@ def coordinator_command_schema() -> Dict[str, Any]:
                 "expected_output": "",
                 "use_tool": True,
                 "database_tables": [],
+                "skill_hints": [],
             }
         ],
         "evidence_chain": [""],
@@ -71,6 +80,9 @@ def judge_output_schema() -> Dict[str, Any]:
                 "risk_factors": [],
             },
         },
+        "alternatives": [
+            {"candidate": "", "why_not_selected": "", "confidence": 0.0}
+        ],
         "decision_rationale": {"key_factors": [], "reasoning": ""},
         "action_items": [],
         "responsible_team": {"team": "", "owner": ""},
@@ -92,6 +104,7 @@ def verification_output_schema() -> Dict[str, Any]:
                 "pass_criteria": "",
                 "owner": "",
                 "priority": "p0|p1|p2",
+                "rollback_trigger": "",
             }
         ],
         "confidence": 0.0,
@@ -149,12 +162,14 @@ def build_problem_analysis_commander_prompt(
         "请优先覆盖故障上下文中的 available_analysis_agents；"
         "若已存在历史结论，可补充 CriticAgent/RebuttalAgent/JudgeAgent/VerificationAgent 命令。\n"
         "若 context.interface_mapping.database_tables 非空，必须把这些表名填入 DatabaseAgent 命令的 database_tables 字段。\n"
+        "必要时可在命令中提供 skill_hints（技能名数组），指导专家Agent优先使用指定技能模板。\n"
         "命令要具体到分析重点，不要泛泛而谈。\n\n"
         f"故障上下文:\n```json\n{to_json(context)}\n```\n\n"
         f"{dialogue_block}"
         f"{skill_block}"
         f"{work_log_block}"
         f"最近发言摘要:\n```json\n{to_json(peer_items)}\n```\n\n"
+        f"{_STRICT_OUTPUT_RULES}\n"
         f"仅输出 JSON，格式:\n```json\n{to_json(schema)}\n```"
     )
 
@@ -215,6 +230,7 @@ def build_problem_analysis_supervisor_prompt(
         "3) 若你判断结论已充分，设置 should_stop=true；但若尚未形成裁决，next_agent 应为 JudgeAgent。\n"
         "4) commands 只需给本步计划执行的Agent（1-3个）下命令。\n\n"
         "5) 若 context.interface_mapping.database_tables 非空，DatabaseAgent 命令必须带 database_tables。\n\n"
+        "6) 如需强制某专家按特定技能模板分析，可填写 skill_hints（例如 ['log-forensics']）。\n\n"
         f"讨论步数预算: {discussion_step_count}/{max_discussion_steps}\n"
         f"故障上下文:\n```json\n{to_json(context)}\n```\n\n"
         f"{dialogue_block}"
@@ -222,6 +238,7 @@ def build_problem_analysis_supervisor_prompt(
         f"{work_log_block}"
         f"本轮最近发言:\n```json\n{to_json(recent_messages)}\n```\n\n"
         f"未决问题:\n```json\n{to_json(open_questions[:8])}\n```\n\n"
+        f"{_STRICT_OUTPUT_RULES}\n"
         f"输出 JSON 格式:\n```json\n{to_json(schema)}\n```"
     )
 
@@ -300,6 +317,7 @@ def build_agent_prompt(
         f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段={spec.phase}。\n"
         "只需要基于核心观点与结论推理，不要复述全部历史，结论请简短。\n"
         "请以真人讨论口吻在 chat_message 中表达你的发言（1-3句），然后输出 JSON。\n\n"
+        f"{_STRICT_OUTPUT_RULES}\n"
         f"{output_constraints}"
         f"{command_block}"
         f"{dialogue_block}"
@@ -364,6 +382,7 @@ def build_collaboration_prompt(
         "1) 明确指出至少 1 条你采纳或反驳的同伴结论；\n"
         "2) 在 evidence_chain 中包含同伴观点依据（可写成 peer:<agent_name>:<观点>）；\n"
         "3) 仅输出 JSON，不要解释文本，保持精炼。\n\n"
+        f"{_STRICT_OUTPUT_RULES}\n"
         f"{command_block}"
         f"{dialogue_block}"
         f"{inbox_block}"
@@ -413,6 +432,7 @@ def build_peer_driven_prompt(
             "必须基于其他 Agent 结论进行综合裁决，禁止独立发挥。\n"
             "请用真人开会讨论的口吻在 chat_message 中表达观点（简短、明确引用同伴结论），并输出 JSON。\n"
             "字段尽量精炼，action_items 最多 3 条。\n\n"
+            f"{_STRICT_OUTPUT_RULES}\n"
             f"{command_block}"
             f"{dialogue_block}"
             f"{inbox_block}"
@@ -434,6 +454,7 @@ def build_peer_driven_prompt(
             f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段={spec.phase}。\n"
             "请严格基于 Judge 与各专家结论生成验证计划，覆盖功能、性能、回归、回滚四个维度。\n"
             "chat_message 用自然语言简要说明验证策略，然后仅输出 JSON。\n\n"
+            f"{_STRICT_OUTPUT_RULES}\n"
             f"{command_block}"
             f"{dialogue_block}"
             f"{inbox_block}"
@@ -458,6 +479,7 @@ def build_peer_driven_prompt(
         "1) 至少明确采纳/反驳 1 条同伴结论；\n"
         "2) evidence_chain 至少包含 1 条 peer:<agent_name>:<观点>；\n"
         "3) 仅输出 JSON，内容尽量简短。\n\n"
+        f"{_STRICT_OUTPUT_RULES}\n"
         f"{command_block}"
         f"{dialogue_block}"
         f"{inbox_block}"
@@ -474,6 +496,8 @@ def _normal_output_schema() -> Dict[str, Any]:
         "chat_message": "",
         "analysis": "",
         "conclusion": "",
+        "counter_evidence": [""],
+        "next_checks": [""],
         "evidence_chain": [
             {
                 "evidence_id": "evd_xxx",
