@@ -14,6 +14,7 @@ type Props = {
   onResume: () => Promise<void>;
   onRetryFailed: () => Promise<void>;
   eventFiltersNode: React.ReactNode;
+  networkFocusNode?: React.ReactNode;
   dialogueNode: React.ReactNode;
   agentNetworkNode?: React.ReactNode;
   roundCollapseItems: CollapseProps['items'];
@@ -37,6 +38,7 @@ const DebateProcessPanel: React.FC<Props> = ({
   onResume,
   onRetryFailed,
   eventFiltersNode,
+  networkFocusNode,
   dialogueNode,
   agentNetworkNode,
   roundCollapseItems,
@@ -92,6 +94,7 @@ const DebateProcessPanel: React.FC<Props> = ({
               label: '辩论对话',
               children: (
                 <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                  {networkFocusNode}
                   {eventFiltersNode}
                   {dialogueNode}
                 </Space>
@@ -107,7 +110,10 @@ const DebateProcessPanel: React.FC<Props> = ({
               label: '轮次详情',
               children:
                 roundCollapseItems && roundCollapseItems.length > 0 ? (
-                  <Collapse items={roundCollapseItems} />
+                  <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                    {networkFocusNode}
+                    <Collapse items={roundCollapseItems} />
+                  </Space>
                 ) : (
                   <Empty description="暂无轮次数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
                 ),
@@ -117,15 +123,18 @@ const DebateProcessPanel: React.FC<Props> = ({
               label: '事件明细',
               children: (
                 timelineItems && timelineItems.length > 0 ? (
-                  <div className="process-timeline-wrap">
-                    <div className="process-timeline-list">
-                      {timelineItems.map((item, index) => (
-                        <div key={`${index}_${String(item.children)}`} className="process-timeline-item">
-                          {item.children}
-                        </div>
-                      ))}
+                  <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                    {networkFocusNode}
+                    <div className="process-timeline-wrap">
+                      <div className="process-timeline-list">
+                        {timelineItems.map((item, index) => (
+                          <div key={`${index}_${String(item.children)}`} className="process-timeline-item">
+                            {item.children}
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  </div>
+                  </Space>
                 ) : (
                   <Empty description="暂无事件明细" image={Empty.PRESENTED_IMAGE_SIMPLE} />
                 )

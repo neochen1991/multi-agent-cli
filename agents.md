@@ -56,7 +56,17 @@
   - 关键链接存在性检查
   - 必备约束条目检查
 
-## 6. 实现入口
+## 6. 演示材料风格约束
+
+- 默认采用 `war-room briefing` 风格，而不是“文档导出风”PPT。
+- 视觉基调：深色主画布、高对比、强层级、少字大结论。
+- 内容组织：先结论，后证据；每页只讲 1 个核心观点。
+- 图形优先：优先使用指标卡、流程链路、网络结构图、阶段路线图，避免整页堆砌长段文字。
+- 来源可见：正式分享材料每页都应带 `Source` 页脚，说明引用来源或本项目代码映射。
+- 项目案例页必须突出：结论、链路、代码入口、工程约束 4 个层次，不能只列文件名。
+- 当前推荐生成器：`scripts/generate_vibe_coding_warroom_ppt.py`
+
+## 7. 实现入口
 
 - Runtime 主入口：`backend/app/runtime/langgraph_runtime.py`
 - Graph 构建：`backend/app/runtime/langgraph/builder.py`

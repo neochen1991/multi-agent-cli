@@ -1,14 +1,46 @@
-import React, { useEffect, useState } from 'react';
-import { Button, Card, Col, Input, InputNumber, List, Row, Select, Space, Statistic, Typography, message } from 'antd';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  Alert,
+  Button,
+  Card,
+  Col,
+  Collapse,
+  Input,
+  InputNumber,
+  List,
+  Row,
+  Select,
+  Space,
+  Statistic,
+  Tabs,
+  Tag,
+  Typography,
+  message,
+} from 'antd';
 import { governanceApi } from '@/services/api';
 import { formatBeijingDateTime } from '@/utils/dateTime';
 
-const { Title, Text } = Typography;
+const { Paragraph, Text, Title } = Typography;
+
+const percent = (value: unknown, precision = 1) => `${(Number(value || 0) * 100).toFixed(precision)}%`;
+const currency = (value: unknown) => `${Number(value || 0).toFixed(4)} CNY`;
+
+const latestQualityInterpretation = (top1Rate: number) => {
+  if (top1Rate >= 0.75) return { tone: 'healthy', text: '最近质量稳定，可继续信任默认策略' };
+  if (top1Rate >= 0.6) return { tone: 'watch', text: '最近质量可用，但建议关注回退和超时情况' };
+  return { tone: 'risk', text: '最近质量偏弱，建议先看评测结果与关键 session 回放' };
+};
+
+const activeRiskInterpretation = (pendingRemediation: number, timeoutRate: number) => {
+  if (pendingRemediation > 0) return { tone: 'risk', text: '存在待处理修复动作，建议优先确认风险级别和审批状态' };
+  if (timeoutRate >= 0.15) return { tone: 'watch', text: '最近超时率偏高，建议先查看团队治理指标和热点' };
+  return { tone: 'healthy', text: '当前没有明显治理阻塞项，可按默认节奏运行' };
+};
 
 const GovernanceCenterPage: React.FC = () => {
   const [systemCard, setSystemCard] = useState<Record<string, any>>({});
   const [quality, setQuality] = useState<Array<Record<string, any>>>([]);
-  const [costCaseCount, setCostCaseCount] = useState(100);
+  const [costCaseCount] = useState(100);
   const [cost, setCost] = useState<Record<string, any>>({});
   const [feedbackIncident, setFeedbackIncident] = useState('');
   const [feedbackSession, setFeedbackSession] = useState('');
@@ -34,7 +66,21 @@ const GovernanceCenterPage: React.FC = () => {
 
   const load = async () => {
     try {
-      const [card, trend, estimate, feedback, learning, tenantRes, remediationRes, externalRes, teamMetricsRes, syncSettings, syncTemplates, runtimeProfilesRes, runtimeActiveRes] = await Promise.all([
+      const [
+        card,
+        trend,
+        estimate,
+        feedback,
+        learning,
+        tenantRes,
+        remediationRes,
+        externalRes,
+        teamMetricsRes,
+        syncSettings,
+        syncTemplates,
+        runtimeProfilesRes,
+        runtimeActiveRes,
+      ] = await Promise.all([
         governanceApi.systemCard(),
         governanceApi.qualityTrend(30),
         governanceApi.costEstimate(costCaseCount),
@@ -61,7 +107,7 @@ const GovernanceCenterPage: React.FC = () => {
       setExternalSyncTemplates((syncTemplates || {}) as Record<string, any>);
       setTeamMetrics((teamMetricsRes?.items || []) as Array<Record<string, any>>);
       setTeamMetricsMeta((teamMetricsRes || {}) as Record<string, any>);
-      setRuntimeProfiles(((runtimeProfilesRes.items || []) as Array<Record<string, any>>));
+      setRuntimeProfiles((runtimeProfilesRes.items || []) as Array<Record<string, any>>);
       setRuntimeActiveProfile(String(runtimeActiveRes.active_profile || 'balanced'));
     } catch (e: any) {
       message.error(e?.response?.data?.detail || e?.message || '治理数据加载失败');
@@ -207,382 +253,800 @@ const GovernanceCenterPage: React.FC = () => {
     }
   };
 
-  return (
-    <div>
-      <Card className="module-card">
-        <Space direction="vertical" size={10} style={{ width: '100%' }}>
-          <Title level={4} style={{ margin: 0 }}>
-            治理中心
-          </Title>
-          <Text type="secondary">
-            系统：{String(systemCard?.system?.name || '')} · 模型：{String(systemCard?.system?.llm_model || '')}
-          </Text>
-        </Space>
-      </Card>
+  const latestQuality = quality[0] || {};
+  const latestQualityTop1 = Number((latestQuality.summary || {}).top1_rate || 0);
+  const qualityState = latestQualityInterpretation(latestQualityTop1);
+  const pendingRemediationItems = remediationItems.filter((item) => {
+    const state = String(item.state || '').toLowerCase();
+    return !['executed', 'rolled_back', 'closed'].includes(state);
+  });
+  const pendingRemediationCount = pendingRemediationItems.length;
+  const worstTeamTimeoutRate = teamMetrics.reduce((max, item) => Math.max(max, Number(item.timeout_rate || 0)), 0);
+  const riskState = activeRiskInterpretation(pendingRemediationCount, worstTeamTimeoutRate);
+  const activeProfile = runtimeProfiles.find((item) => String(item.name || '') === runtimeActiveProfile) || {};
+  const replayReady = Object.keys(replayResult).length > 0;
 
-      <Row gutter={[12, 12]} style={{ marginTop: 16 }}>
-        <Col xs={24} md={8}>
-          <Card className="module-card compact-card">
-            <Space direction="vertical" size={6}>
-              <Text>成本估算样本数</Text>
-              <InputNumber min={1} max={5000} value={costCaseCount} onChange={(v) => setCostCaseCount(Number(v || 100))} />
-              <Statistic title="估算 Tokens" value={Number(cost.estimated_tokens || 0)} />
-            </Space>
-          </Card>
-        </Col>
-        <Col xs={24} md={8}>
-          <Card className="module-card compact-card">
-            <Statistic title="租户数" value={tenants.length} />
-          </Card>
-        </Col>
-        <Col xs={24} md={8}>
-          <Card className="module-card compact-card">
-            <Statistic title="修复动作" value={remediationItems.length} />
-          </Card>
-        </Col>
-      </Row>
+  const recommendedAction = useMemo(() => {
+    if (pendingRemediationCount > 0) {
+      return {
+        tone: 'risk',
+        title: '先处理待审批或待执行的修复动作',
+        description: `当前有 ${pendingRemediationCount} 个修复动作未闭环，建议先进入“治理动作”确认风险和审批状态。`,
+      };
+    }
+    if (worstTeamTimeoutRate >= 0.15) {
+      return {
+        tone: 'watch',
+        title: '先查看团队超时热点',
+        description: `最近 ${metricsWindowDays} 天最高 timeout rate 为 ${percent(worstTeamTimeoutRate)}，建议先在“状态总览”排查热点团队与工具失败。`,
+      };
+    }
+    if (latestQualityTop1 > 0 && latestQualityTop1 < 0.6) {
+      return {
+        tone: 'watch',
+        title: '先交叉核对质量趋势和关键 session',
+        description: '最近质量趋势偏弱，建议从“回放与审计”复盘关键 session，再决定是否切换运行策略。',
+      };
+    }
+    return {
+      tone: 'healthy',
+      title: '当前可以按默认策略继续值班',
+      description: '没有明显治理阻塞项。优先关注新进 incident，必要时再进入策略或回放区做定向排查。',
+    };
+  }, [latestQualityTop1, metricsWindowDays, pendingRemediationCount, worstTeamTimeoutRate]);
 
-      <Card className="module-card" title="系统边界与安全控制" style={{ marginTop: 16 }}>
-        <List
-          size="small"
-          dataSource={[...(systemCard.boundaries || []), ...(systemCard.safety_controls || [])] as string[]}
-          renderItem={(item) => <List.Item>{item}</List.Item>}
-        />
-      </Card>
+  const governanceSummaryCards = [
+    {
+      title: '当前运行策略',
+      value: runtimeActiveProfile || 'balanced',
+      hint: String(activeProfile.description || '控制回合数、截断和历史压缩的默认运行策略'),
+      tone: 'info',
+    },
+    {
+      title: '最近质量趋势',
+      value: latestQualityTop1 ? percent(latestQualityTop1) : '暂无',
+      hint: qualityState.text,
+      tone: qualityState.tone,
+    },
+    {
+      title: '待处理修复动作',
+      value: pendingRemediationCount,
+      hint: riskState.text,
+      tone: riskState.tone,
+    },
+    {
+      title: '最高团队超时率',
+      value: percent(worstTeamTimeoutRate),
+      hint: worstTeamTimeoutRate >= 0.15 ? '超时偏高，建议先看热点和回放' : '暂无明显超时压力',
+      tone: worstTeamTimeoutRate >= 0.15 ? 'watch' : 'healthy',
+    },
+    {
+      title: '自动外部同步',
+      value: Boolean(externalSyncSettings.enabled) ? '开启' : '关闭',
+      hint: Boolean(externalSyncSettings.enabled) ? '治理结果会同步到外部系统' : '目前只保留本地协同记录',
+      tone: Boolean(externalSyncSettings.enabled) ? 'healthy' : 'info',
+    },
+    {
+      title: '回放工具状态',
+      value: replayReady ? '已加载' : '待输入 session',
+      hint: replayReady ? '可以直接查看关键决策链路' : '输入 session_id 后可回放主流程',
+      tone: replayReady ? 'healthy' : 'info',
+    },
+  ];
 
-      <Card className="module-card" title="A/B 评测与质量趋势" style={{ marginTop: 16 }}>
-        <Space direction="vertical" size={10} style={{ width: '100%' }}>
-          <Button onClick={() => void runAbEval()}>执行 A/B 评测</Button>
-          {Object.keys(abResult).length > 0 ? (
-            <Text>
-              {String(abResult.summary || '-')} · top1Δ={String((abResult.comparison || {}).top1_rate_delta ?? '-')} · timeoutΔ=
-              {String((abResult.comparison || {}).timeout_rate_delta ?? '-')}
-            </Text>
-          ) : null}
-          <List
-            size="small"
-            dataSource={quality}
-            renderItem={(item) => (
-              <List.Item>
-                <Text type="secondary">
-                  {formatBeijingDateTime(String(item.generated_at || ''))} · Top1{' '}
-                  {(Number((item.summary || {}).top1_rate || 0) * 100).toFixed(1)}%
-                </Text>
-              </List.Item>
-            )}
-          />
-        </Space>
-      </Card>
+  const timeoutBars = teamMetrics
+    .slice()
+    .sort((a, b) => Number(b.timeout_rate || 0) - Number(a.timeout_rate || 0))
+    .slice(0, 5)
+    .map((item) => ({
+      label: String(item.team || '-'),
+      value: Number(item.timeout_rate || 0),
+      text: percent(item.timeout_rate),
+    }));
 
-      <Card className="module-card" title="运行策略中心（ReActMaster）" style={{ marginTop: 16 }}>
-        <Space direction="vertical" size={10} style={{ width: '100%' }}>
-          <Space wrap>
-            <Text>当前策略</Text>
-            <Select
-              value={runtimeActiveProfile}
-              style={{ width: 220 }}
-              options={runtimeProfiles.map((item) => ({
-                label: `${String(item.name || '-')}: ${String(item.description || '').slice(0, 18)}`,
-                value: String(item.name || 'balanced'),
-              }))}
-              onChange={(value) => void updateRuntimeStrategy(value)}
-            />
-          </Space>
-          <List
-            size="small"
-            dataSource={runtimeProfiles}
-            renderItem={(item) => (
-              <List.Item>
-                <Text type="secondary">
-                  {String(item.name || '-')} · rounds={String(item.suggested_max_rounds || '-')} · doomLoop=
-                  {String(item.doom_loop_max_repeat || '-')} · compaction={String(item.compaction_max_messages || '-')} ·
-                  prune={String(item.prune_history_limit || '-')} · truncation={String(item.truncation_max_chars || '-')}
-                </Text>
-              </List.Item>
-            )}
-          />
-        </Space>
-      </Card>
+  const costTrendBars = (((teamMetricsMeta.token_cost_trend || []) as Array<Record<string, any>>).slice(-6)).map((item) => ({
+    label: String(item.day || '-').slice(5),
+    value: Number(item.estimated_model_cost || 0),
+    text: currency(item.estimated_model_cost),
+  }));
 
-      <Card className="module-card" title="团队治理指标" style={{ marginTop: 16 }}>
-        <Space direction="vertical" size={10} style={{ width: '100%' }}>
-          <Space wrap>
-            <Text>时间窗（天）</Text>
-            <InputNumber min={1} max={90} value={metricsWindowDays} onChange={(v) => setMetricsWindowDays(Number(v || 7))} />
-          </Space>
-          <List
-            size="small"
-            dataSource={teamMetrics}
-            locale={{ emptyText: '暂无团队指标数据' }}
-            renderItem={(item) => (
-              <List.Item>
-                <Space direction="vertical" size={0}>
-                  <Text strong>
-                    {String(item.team || '-')} · sessions={String(item.sessions || 0)} · success=
-                    {(Number(item.success_rate || 0) * 100).toFixed(1)}%
-                  </Text>
-                  <Text type="secondary">
-                    timeout={(Number(item.timeout_rate || 0) * 100).toFixed(1)}% · tool_fail=
-                    {(Number(item.tool_failure_rate || 0) * 100).toFixed(1)}% · 估算成本=
-                    {Number(item.estimated_model_cost || 0).toFixed(4)} CNY
-                  </Text>
-                </Space>
-              </List.Item>
-            )}
-          />
-          <Card size="small">
-            <Space direction="vertical" size={4} style={{ width: '100%' }}>
-              <Text strong>Session SLA</Text>
-              <Text type="secondary">
-                首条证据延迟={String(((teamMetricsMeta.sla || {}) as Record<string, any>).first_evidence_latency_ms || 0)}ms ·
-                首结论延迟={String(((teamMetricsMeta.sla || {}) as Record<string, any>).first_conclusion_latency_ms || 0)}ms ·
-                完整报告延迟={String(((teamMetricsMeta.sla || {}) as Record<string, any>).report_latency_ms || 0)}ms
-              </Text>
-            </Space>
-          </Card>
-          <List
-            size="small"
-            header={<Text strong>Token 成本趋势</Text>}
-            dataSource={(teamMetricsMeta.token_cost_trend || []) as Array<Record<string, any>>}
-            locale={{ emptyText: '暂无趋势数据' }}
-            renderItem={(item) => (
-              <List.Item>
-                <Text type="secondary">
-                  {String(item.day || '-')} · tokens={String(item.estimated_tokens || 0)} · cost=
-                  {Number(item.estimated_model_cost || 0).toFixed(4)} CNY
-                </Text>
-              </List.Item>
-            )}
-          />
-          <List
-            size="small"
-            header={<Text strong>超时热点 TopN</Text>}
-            dataSource={(teamMetricsMeta.timeout_hotspots || []) as Array<Record<string, any>>}
-            locale={{ emptyText: '暂无超时热点' }}
-            renderItem={(item) => (
-              <List.Item>
-                <Text type="secondary">
-                  {String(item.key || '-')} · count={String(item.count || 0)}
-                </Text>
-              </List.Item>
-            )}
-          />
-          <List
-            size="small"
-            header={<Text strong>工具失败 TopN</Text>}
-            dataSource={(teamMetricsMeta.tool_failure_topn || []) as Array<Record<string, any>>}
-            locale={{ emptyText: '暂无工具失败热点' }}
-            renderItem={(item) => (
-              <List.Item>
-                <Text type="secondary">
-                  {String(item.tool_name || '-')} · count={String(item.count || 0)}
-                </Text>
-              </List.Item>
-            )}
-          />
-        </Space>
-      </Card>
+  const toolFailureBars = (((teamMetricsMeta.tool_failure_topn || []) as Array<Record<string, any>>).slice(0, 5)).map((item) => ({
+    label: String(item.tool_name || '-'),
+    value: Number(item.count || 0),
+    text: String(item.count || 0),
+  }));
 
-      <Card className="module-card" title="反馈学习流水线" style={{ marginTop: 16 }}>
-        <Space direction="vertical" size={10} style={{ width: '100%' }}>
-          <Space wrap>
-            <Input value={feedbackIncident} onChange={(e) => setFeedbackIncident(e.target.value)} placeholder="incident_id" style={{ width: 180 }} />
-            <Input value={feedbackSession} onChange={(e) => setFeedbackSession(e.target.value)} placeholder="session_id" style={{ width: 220 }} />
-            <Select
-              value={feedbackVerdict}
-              onChange={(v) => setFeedbackVerdict(v)}
-              options={[
-                { label: '采纳', value: 'adopt' },
-                { label: '驳回', value: 'reject' },
-                { label: '修订', value: 'revise' },
-              ]}
-              style={{ width: 120 }}
-            />
-            <Input value={feedbackComment} onChange={(e) => setFeedbackComment(e.target.value)} placeholder="反馈说明" style={{ width: 360 }} />
-            <Button type="primary" onClick={() => void submitFeedback()}>
-              提交反馈
-            </Button>
-          </Space>
-          <Text type="secondary">反馈统计：{JSON.stringify(learningCandidates.summary || {})}</Text>
-          <List
-            size="small"
-            dataSource={(learningCandidates.prompt_candidates || []) as Array<Record<string, any>>}
-            renderItem={(item) => (
-              <List.Item>
-                <Text>
-                  {String(item.title || '-')}：{String(item.suggestion || '-')}
-                </Text>
-              </List.Item>
-            )}
-          />
-          <List
-            size="small"
-            dataSource={feedbackItems}
-            renderItem={(item) => (
-              <List.Item>
-                <Space direction="vertical" size={0}>
-                  <Text>
-                    [{String(item.verdict || '-')}] incident={String(item.incident_id || '-')}, session={String(item.session_id || '-')}
-                  </Text>
-                  <Text type="secondary">
-                    {formatBeijingDateTime(String(item.created_at || ''))} · {String(item.comment || '')}
-                  </Text>
-                </Space>
-              </List.Item>
-            )}
-          />
-        </Space>
-      </Card>
-
-      <Card className="module-card" title="可控自治修复（状态机）" style={{ marginTop: 16 }}>
-        <Space direction="vertical" size={10} style={{ width: '100%' }}>
-          <Space wrap>
-            <Input
-              value={remediationSummary}
-              onChange={(e) => setRemediationSummary(e.target.value)}
-              placeholder="修复提案摘要"
-              style={{ width: 420 }}
-            />
-            <Button onClick={() => void proposeRemediation()}>创建修复提案</Button>
-          </Space>
-          <List
-            size="small"
-            dataSource={remediationItems}
-            renderItem={(item) => (
-              <List.Item
-                actions={[
-                  <Button key="approve" size="small" onClick={() => void approveRemediation(String(item.id || ''))}>
-                    审批
-                  </Button>,
-                  <Button key="execute" size="small" onClick={() => void executeRemediation(String(item.id || ''))}>
-                    执行
-                  </Button>,
-                  <Button key="rollback" size="small" onClick={() => void rollbackRemediation(String(item.id || ''))}>
-                    回滚方案
-                  </Button>,
-                ]}
-              >
-                <Space direction="vertical" size={0}>
-                  <Text strong>
-                    {String(item.id || '-')} · {String(item.state || '-')} · risk={String(item.risk_level || '-')}
-                  </Text>
-                  <Text type="secondary">{String(item.summary || '')}</Text>
-                </Space>
-              </List.Item>
-            )}
-          />
-        </Space>
-      </Card>
-
-      <Card className="module-card" title="多租户治理与外部协同" style={{ marginTop: 16 }}>
-        <Space direction="vertical" size={10} style={{ width: '100%' }}>
-          <Space wrap>
-            <Text>自动同步</Text>
-            <Select
-              value={Boolean(externalSyncSettings.enabled) ? 'enabled' : 'disabled'}
-              style={{ width: 160 }}
-              options={[
-                { label: '开启', value: 'enabled' },
-                { label: '关闭', value: 'disabled' },
-              ]}
-              onChange={(value) => void updateExternalAutoSync(value === 'enabled')}
-            />
-          </Space>
-          <Button onClick={() => void emitExternalSync()}>写入外部协同记录（Jira）</Button>
-          <List
-            size="small"
-            header={<Text strong>字段映射模板</Text>}
-            dataSource={Object.entries(externalSyncTemplates || {})}
-            renderItem={([provider, mapping]) => (
-              <List.Item>
-                <Text type="secondary">
-                  {provider}: {JSON.stringify(mapping).slice(0, 200)}
-                </Text>
-              </List.Item>
-            )}
-          />
-          <List
-            size="small"
-            header={<Text strong>租户策略</Text>}
-            dataSource={tenants}
-            renderItem={(item) => (
-              <List.Item>
-                <Text>
-                  tenant={String(item.tenant_id || '-')} · budget={String(((item.budget || {}) as Record<string, any>).monthly_token_budget || '-')} · quota=
-                  {String(((item.quota || {}) as Record<string, any>).max_concurrent_sessions || '-')}
-                </Text>
-              </List.Item>
-            )}
-          />
-          <List
-            size="small"
-            header={<Text strong>外部协同记录</Text>}
-            dataSource={externalItems}
-            renderItem={(item) => (
-              <List.Item>
-                <Text type="secondary">
-                  {formatBeijingDateTime(String(item.at || ''))} · {String(item.provider || '-')} · {String(item.direction || '-')} ·{' '}
-                  {String(item.action || '-')}
-                </Text>
-              </List.Item>
-            )}
-          />
-        </Space>
-      </Card>
-
-      <Card className="module-card" title="Session 回放（关键决策路径）" style={{ marginTop: 16 }}>
-        <Space direction="vertical" size={10} style={{ width: '100%' }}>
-          <Space wrap>
-            <Input
-              value={replaySessionId}
-              onChange={(e) => setReplaySessionId(e.target.value)}
-              placeholder="输入 session_id（deb_xxx）"
-              style={{ width: 260 }}
-            />
-            <Button loading={replayLoading} onClick={() => void loadSessionReplay()}>
-              加载回放
-            </Button>
-          </Space>
-          {Object.keys(replayResult).length > 0 ? (
+  const tabs = [
+    {
+      key: 'overview',
+      label: '状态总览',
+      children: (
+        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <Card className="module-card ops-section-card" size="small">
             <Space direction="vertical" size={8} style={{ width: '100%' }}>
-              <Text>
-                session={String(replayResult.session_id || '-')} · status={String(replayResult.session_status || '-')} · incident=
-                {String(replayResult.incident_id || '-')}
-              </Text>
-              <Text type="secondary">
-                root_cause={String(replayResult.root_cause || '暂无')} · confidence=
-                {(Number(replayResult.confidence || 0) * 100).toFixed(1)}%
-              </Text>
+              <Title level={5} style={{ margin: 0 }}>
+                系统边界与安全控制
+              </Title>
+              <Text type="secondary">先确认这套系统的运行边界和门禁，再决定是否信任自动分析和修复动作。</Text>
               <List
                 size="small"
-                header={<Text strong>关键决策</Text>}
-                dataSource={(replayResult.key_decisions || []) as Array<Record<string, any>>}
-                locale={{ emptyText: '暂无关键决策' }}
+                className="ops-list-tight"
+                dataSource={[...(systemCard.boundaries || []), ...(systemCard.safety_controls || [])] as string[]}
+                renderItem={(item) => <List.Item>{item}</List.Item>}
+              />
+            </Space>
+          </Card>
+
+          <Row gutter={[16, 16]}>
+            <Col xs={24} xl={15}>
+              <Card className="module-card ops-section-card" size="small">
+                <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                  <Space align="center" style={{ justifyContent: 'space-between', width: '100%' }}>
+                    <div>
+                      <Title level={5} style={{ margin: 0 }}>
+                        团队治理指标
+                      </Title>
+                      <Text type="secondary">看最近一段时间哪个团队、哪类问题、哪个工具最拖慢分析闭环。</Text>
+                    </div>
+                    <Space wrap>
+                      <Text type="secondary">时间窗（天）</Text>
+                      <InputNumber min={1} max={90} value={metricsWindowDays} onChange={(v) => setMetricsWindowDays(Number(v || 7))} />
+                    </Space>
+                  </Space>
+                  <List
+                    size="small"
+                    className="ops-list-tight"
+                    dataSource={teamMetrics}
+                    locale={{ emptyText: '暂无团队指标数据' }}
+                    renderItem={(item) => (
+                      <List.Item>
+                        <Space direction="vertical" size={2}>
+                          <Text strong>
+                            {String(item.team || '-')} · sessions={String(item.sessions || 0)} · success={percent(item.success_rate)}
+                          </Text>
+                          <Text type="secondary">
+                            timeout={percent(item.timeout_rate)} · tool_fail={percent(item.tool_failure_rate)} · 估算成本=
+                            {currency(item.estimated_model_cost)}
+                          </Text>
+                        </Space>
+                      </List.Item>
+                    )}
+                  />
+                  <Card size="small" className="ops-subtle-block">
+                    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                      <Text strong>Session SLA</Text>
+                      <Text type="secondary">
+                        首条证据延迟={String(((teamMetricsMeta.sla || {}) as Record<string, any>).first_evidence_latency_ms || 0)}ms ·
+                        首结论延迟={String(((teamMetricsMeta.sla || {}) as Record<string, any>).first_conclusion_latency_ms || 0)}ms ·
+                        完整报告延迟={String(((teamMetricsMeta.sla || {}) as Record<string, any>).report_latency_ms || 0)}ms
+                      </Text>
+                    </Space>
+                  </Card>
+                </Space>
+              </Card>
+            </Col>
+
+            <Col xs={24} xl={9}>
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <Card className="module-card ops-section-card" size="small">
+                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                    <Title level={5} style={{ margin: 0 }}>
+                      Token 成本趋势
+                    </Title>
+                    <div className="mini-bar-list">
+                      {costTrendBars.map((item) => (
+                        <div key={item.label} className="mini-bar-row">
+                          <div className="mini-bar-label-wrap">
+                            <Text strong>{item.label}</Text>
+                            <Text type="secondary">{item.text}</Text>
+                          </div>
+                          <div className="mini-bar-track">
+                            <div
+                              className="mini-bar-fill tone-info"
+                              style={{ width: `${Math.max(10, (item.value / Math.max(...costTrendBars.map((bar) => bar.value), 1)) * 100)}%` }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <List
+                      size="small"
+                      className="ops-list-tight"
+                      dataSource={(teamMetricsMeta.token_cost_trend || []) as Array<Record<string, any>>}
+                      locale={{ emptyText: '暂无趋势数据' }}
+                      renderItem={(item) => (
+                        <List.Item>
+                          <Text type="secondary">
+                            {String(item.day || '-')} · tokens={String(item.estimated_tokens || 0)} · cost={currency(item.estimated_model_cost)}
+                          </Text>
+                        </List.Item>
+                      )}
+                    />
+                  </Space>
+                </Card>
+
+                <Card className="module-card ops-section-card" size="small">
+                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                    <Title level={5} style={{ margin: 0 }}>
+                      热点与失败点
+                    </Title>
+                    <Card size="small" className="ops-subtle-block mini-chart-card">
+                      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                        <Text strong>团队超时分布</Text>
+                        <div className="mini-bar-list">
+                          {timeoutBars.map((item) => (
+                            <div key={item.label} className="mini-bar-row">
+                              <div className="mini-bar-label-wrap">
+                                <Text strong>{item.label}</Text>
+                                <Text type="secondary">{item.text}</Text>
+                              </div>
+                              <div className="mini-bar-track">
+                                <div className="mini-bar-fill tone-watch" style={{ width: `${Math.max(8, item.value * 100)}%` }} />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </Space>
+                    </Card>
+                    <Card size="small" className="ops-subtle-block mini-chart-card">
+                      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                        <Text strong>工具失败集中度</Text>
+                        <div className="mini-bar-list">
+                          {toolFailureBars.map((item) => (
+                            <div key={item.label} className="mini-bar-row">
+                              <div className="mini-bar-label-wrap">
+                                <Text strong>{item.label}</Text>
+                                <Text type="secondary">{item.text} 次</Text>
+                              </div>
+                              <div className="mini-bar-track">
+                                <div
+                                  className="mini-bar-fill tone-risk"
+                                  style={{ width: `${Math.max(10, (item.value / Math.max(...toolFailureBars.map((bar) => bar.value), 1)) * 100)}%` }}
+                                />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </Space>
+                    </Card>
+                    <List
+                      size="small"
+                      header={<Text strong>超时热点</Text>}
+                      className="ops-list-tight"
+                      dataSource={(teamMetricsMeta.timeout_hotspots || []) as Array<Record<string, any>>}
+                      locale={{ emptyText: '暂无超时热点' }}
+                      renderItem={(item) => (
+                        <List.Item>
+                          <Text type="secondary">
+                            {String(item.key || '-')} · count={String(item.count || 0)}
+                          </Text>
+                        </List.Item>
+                      )}
+                    />
+                    <List
+                      size="small"
+                      header={<Text strong>工具失败</Text>}
+                      className="ops-list-tight"
+                      dataSource={(teamMetricsMeta.tool_failure_topn || []) as Array<Record<string, any>>}
+                      locale={{ emptyText: '暂无工具失败热点' }}
+                      renderItem={(item) => (
+                        <List.Item>
+                          <Text type="secondary">
+                            {String(item.tool_name || '-')} · count={String(item.count || 0)}
+                          </Text>
+                        </List.Item>
+                      )}
+                    />
+                  </Space>
+                </Card>
+              </Space>
+            </Col>
+          </Row>
+        </Space>
+      ),
+    },
+    {
+      key: 'strategy',
+      label: '运行策略',
+      children: (
+        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <Card className="module-card ops-section-card" size="small">
+            <Space direction="vertical" size={10} style={{ width: '100%' }}>
+              <div>
+                <Title level={5} style={{ margin: 0 }}>
+                  当前策略与切换入口
+                </Title>
+                <Text type="secondary">这里控制多 Agent 的回合数、截断、压缩和防 doom loop 策略。先看解释，再切换配置。</Text>
+              </div>
+              <Space wrap align="center">
+                <Tag color="blue">当前策略：{runtimeActiveProfile || 'balanced'}</Tag>
+                <Select
+                  value={runtimeActiveProfile}
+                  style={{ width: 240 }}
+                  options={runtimeProfiles.map((item) => ({
+                    label: `${String(item.name || '-')}: ${String(item.description || '').slice(0, 24)}`,
+                    value: String(item.name || 'balanced'),
+                  }))}
+                  onChange={(value) => void updateRuntimeStrategy(value)}
+                />
+                <Button onClick={() => void runAbEval()}>执行 A/B 评测</Button>
+              </Space>
+              {Object.keys(abResult).length > 0 ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message={String(abResult.summary || 'A/B 评测已完成')}
+                  description={`top1Δ=${String((abResult.comparison || {}).top1_rate_delta ?? '-')}，timeoutΔ=${String((abResult.comparison || {}).timeout_rate_delta ?? '-')}`}
+                />
+              ) : null}
+            </Space>
+          </Card>
+
+          <Row gutter={[16, 16]}>
+            {runtimeProfiles.map((item) => (
+              <Col xs={24} md={12} xl={8} key={String(item.name || Math.random())}>
+                <Card className="module-card ops-summary-card" size="small">
+                  <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                    <Space align="center" style={{ justifyContent: 'space-between', width: '100%' }}>
+                      <Text strong>{String(item.name || '-')}</Text>
+                      {String(item.name || '') === runtimeActiveProfile ? <Tag color="blue">当前</Tag> : null}
+                    </Space>
+                    <Text type="secondary">{String(item.description || '未提供说明')}</Text>
+                    <Text className="ops-summary-hint">
+                      rounds={String(item.suggested_max_rounds || '-')} · doomLoop={String(item.doom_loop_max_repeat || '-')}
+                    </Text>
+                    <Collapse
+                      size="small"
+                      ghost
+                      items={[
+                        {
+                          key: 'detail',
+                          label: '查看详细参数',
+                          children: (
+                            <Text type="secondary">
+                              compaction={String(item.compaction_max_messages || '-')} · prune={String(item.prune_history_limit || '-')} ·
+                              truncation={String(item.truncation_max_chars || '-')}
+                            </Text>
+                          ),
+                        },
+                      ]}
+                    />
+                  </Space>
+                </Card>
+              </Col>
+            ))}
+          </Row>
+
+          <Card className="module-card ops-section-card" size="small">
+            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+              <Title level={5} style={{ margin: 0 }}>
+                最近质量趋势
+              </Title>
+              <Text type="secondary">如果想切策略，先看最近趋势，不要只凭单个 case 的感受切换。</Text>
+              <List
+                size="small"
+                className="ops-list-tight"
+                dataSource={quality}
                 renderItem={(item) => (
                   <List.Item>
-                    <Text>
-                      [{String(item.agent || '-')}] {String(item.conclusion || '-')}
+                    <Text type="secondary">
+                      {formatBeijingDateTime(String(item.generated_at || ''))} · Top1 {percent((item.summary || {}).top1_rate)} · timeout{' '}
+                      {percent((item.summary || {}).timeout_rate)}
                     </Text>
                   </List.Item>
                 )}
               />
-              <List
-                size="small"
-                header={<Text strong>时间线步骤</Text>}
-                dataSource={(replayResult.rendered_steps || []) as string[]}
-                locale={{ emptyText: '暂无步骤' }}
-                renderItem={(line) => (
-                  <List.Item>
-                    <Text type="secondary">{line}</Text>
-                  </List.Item>
-                )}
-              />
             </Space>
+          </Card>
+        </Space>
+      ),
+    },
+    {
+      key: 'actions',
+      label: '治理动作',
+      children: (
+        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <Row gutter={[16, 16]}>
+            <Col xs={24} xl={12}>
+              <Card className="module-card ops-action-card" size="small">
+                <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                  <div>
+                    <Title level={5} style={{ margin: 0 }}>
+                      反馈学习
+                    </Title>
+                    <Text type="secondary">把本次分析结果标记为采纳、驳回或修订，让平台积累后续优化线索。</Text>
+                  </div>
+                  <Space wrap>
+                    <Input value={feedbackIncident} onChange={(e) => setFeedbackIncident(e.target.value)} placeholder="incident_id" style={{ width: 180 }} />
+                    <Input value={feedbackSession} onChange={(e) => setFeedbackSession(e.target.value)} placeholder="session_id" style={{ width: 220 }} />
+                    <Select
+                      value={feedbackVerdict}
+                      onChange={(v) => setFeedbackVerdict(v)}
+                      options={[
+                        { label: '采纳', value: 'adopt' },
+                        { label: '驳回', value: 'reject' },
+                        { label: '修订', value: 'revise' },
+                      ]}
+                      style={{ width: 120 }}
+                    />
+                    <Input value={feedbackComment} onChange={(e) => setFeedbackComment(e.target.value)} placeholder="反馈说明" style={{ width: 280 }} />
+                    <Button type="primary" onClick={() => void submitFeedback()}>
+                      提交反馈
+                    </Button>
+                  </Space>
+                  <Alert
+                    type="info"
+                    showIcon
+                    message={`反馈统计：${JSON.stringify(learningCandidates.summary || {})}`}
+                    description="先提交一条高质量反馈，再看下方推荐的 prompt 或规则改进候选。"
+                  />
+                  <List
+                    size="small"
+                    className="ops-list-tight"
+                    header={<Text strong>推荐改进候选</Text>}
+                    dataSource={(learningCandidates.prompt_candidates || []) as Array<Record<string, any>>}
+                    renderItem={(item) => (
+                      <List.Item>
+                        <Text>
+                          {String(item.title || '-')}：{String(item.suggestion || '-')}
+                        </Text>
+                      </List.Item>
+                    )}
+                  />
+                </Space>
+              </Card>
+            </Col>
+
+            <Col xs={24} xl={12}>
+              <Card className="module-card ops-action-card" size="small">
+                <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                  <div>
+                    <Title level={5} style={{ margin: 0 }}>
+                      修复治理
+                    </Title>
+                    <Text type="secondary">高风险修复必须先走提案、审批和执行闭环，再决定是否生成回滚方案。</Text>
+                  </div>
+                  <Space wrap>
+                    <Input
+                      value={remediationSummary}
+                      onChange={(e) => setRemediationSummary(e.target.value)}
+                      placeholder="修复提案摘要"
+                      style={{ width: 360 }}
+                    />
+                    <Button onClick={() => void proposeRemediation()}>创建修复提案</Button>
+                  </Space>
+                  <List
+                    size="small"
+                    className="ops-list-tight"
+                    dataSource={remediationItems}
+                    renderItem={(item) => (
+                      <List.Item
+                        actions={[
+                          <Button key="approve" size="small" onClick={() => void approveRemediation(String(item.id || ''))}>
+                            审批
+                          </Button>,
+                          <Button key="execute" size="small" onClick={() => void executeRemediation(String(item.id || ''))}>
+                            执行
+                          </Button>,
+                          <Button key="rollback" size="small" onClick={() => void rollbackRemediation(String(item.id || ''))}>
+                            回滚方案
+                          </Button>,
+                        ]}
+                      >
+                        <Space direction="vertical" size={0}>
+                          <Text strong>
+                            {String(item.id || '-')} · {String(item.state || '-')} · risk={String(item.risk_level || '-')}
+                          </Text>
+                          <Text type="secondary">{String(item.summary || '')}</Text>
+                        </Space>
+                      </List.Item>
+                    )}
+                  />
+                </Space>
+              </Card>
+            </Col>
+          </Row>
+
+          <Row gutter={[16, 16]}>
+            <Col xs={24} xl={12}>
+              <Card className="module-card ops-action-card" size="small">
+                <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                  <div>
+                    <Title level={5} style={{ margin: 0 }}>
+                      外部协同
+                    </Title>
+                    <Text type="secondary">把 RCA 结果同步到 Jira、ServiceNow、Slack 或飞书等外部系统。</Text>
+                  </div>
+                  <Space wrap>
+                    <Text>自动同步</Text>
+                    <Select
+                      value={Boolean(externalSyncSettings.enabled) ? 'enabled' : 'disabled'}
+                      style={{ width: 160 }}
+                      options={[
+                        { label: '开启', value: 'enabled' },
+                        { label: '关闭', value: 'disabled' },
+                      ]}
+                      onChange={(value) => void updateExternalAutoSync(value === 'enabled')}
+                    />
+                    <Button onClick={() => void emitExternalSync()}>写入一条 Jira 协同记录</Button>
+                  </Space>
+                  <List
+                    size="small"
+                    className="ops-list-tight"
+                    header={<Text strong>最近协同记录</Text>}
+                    dataSource={externalItems}
+                    renderItem={(item) => (
+                      <List.Item>
+                        <Text type="secondary">
+                          {formatBeijingDateTime(String(item.at || ''))} · {String(item.provider || '-')} · {String(item.direction || '-')} ·{' '}
+                          {String(item.action || '-')}
+                        </Text>
+                      </List.Item>
+                    )}
+                  />
+                  <Collapse
+                    size="small"
+                    ghost
+                    items={[
+                      {
+                        key: 'mapping',
+                        label: '查看字段映射模板',
+                        children: (
+                          <List
+                            size="small"
+                            className="ops-list-tight"
+                            dataSource={Object.entries(externalSyncTemplates || {})}
+                            renderItem={([provider, mapping]) => (
+                              <List.Item>
+                                <Text type="secondary">
+                                  {provider}: {JSON.stringify(mapping).slice(0, 220)}
+                                </Text>
+                              </List.Item>
+                            )}
+                          />
+                        ),
+                      },
+                    ]}
+                  />
+                </Space>
+              </Card>
+            </Col>
+
+            <Col xs={24} xl={12}>
+              <Card className="module-card ops-section-card" size="small">
+                <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  <Title level={5} style={{ margin: 0 }}>
+                    多租户治理
+                  </Title>
+                  <Text type="secondary">看不同租户的预算和并发配额，判断当前策略是否需要按租户收紧。</Text>
+                  <List
+                    size="small"
+                    className="ops-list-tight"
+                    dataSource={tenants}
+                    renderItem={(item) => (
+                      <List.Item>
+                        <Text>
+                          tenant={String(item.tenant_id || '-')} · budget=
+                          {String(((item.budget || {}) as Record<string, any>).monthly_token_budget || '-')} · quota=
+                          {String(((item.quota || {}) as Record<string, any>).max_concurrent_sessions || '-')}
+                        </Text>
+                      </List.Item>
+                    )}
+                  />
+                  <List
+                    size="small"
+                    className="ops-list-tight"
+                    header={<Text strong>最近反馈记录</Text>}
+                    dataSource={feedbackItems}
+                    renderItem={(item) => (
+                      <List.Item>
+                        <Space direction="vertical" size={0}>
+                          <Text>
+                            [{String(item.verdict || '-')}] incident={String(item.incident_id || '-')}, session={String(item.session_id || '-')}
+                          </Text>
+                          <Text type="secondary">
+                            {formatBeijingDateTime(String(item.created_at || ''))} · {String(item.comment || '')}
+                          </Text>
+                        </Space>
+                      </List.Item>
+                    )}
+                  />
+                </Space>
+              </Card>
+            </Col>
+          </Row>
+        </Space>
+      ),
+    },
+    {
+      key: 'replay',
+      label: '回放与审计',
+      children: (
+        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <Card className="module-card ops-action-card" size="small">
+            <Space direction="vertical" size={10} style={{ width: '100%' }}>
+              <div>
+                <Title level={5} style={{ margin: 0 }}>
+                  Session 回放
+                </Title>
+                <Text type="secondary">输入一个 session_id，回放主 Agent 的关键决策路径、证据引用和结论收敛过程。</Text>
+              </div>
+              <Space wrap>
+                <Input
+                  value={replaySessionId}
+                  onChange={(e) => setReplaySessionId(e.target.value)}
+                  placeholder="输入 session_id（deb_xxx）"
+                  style={{ width: 280 }}
+                />
+                <Button loading={replayLoading} type="primary" onClick={() => void loadSessionReplay()}>
+                  加载回放
+                </Button>
+              </Space>
+            </Space>
+          </Card>
+
+          {Object.keys(replayResult).length > 0 ? (
+            <Row gutter={[16, 16]}>
+              <Col xs={24} xl={10}>
+                <Card className="module-card ops-section-card" size="small">
+                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                    <Title level={5} style={{ margin: 0 }}>
+                      回放摘要
+                    </Title>
+                    <Text>
+                      session={String(replayResult.session_id || '-')} · status={String(replayResult.session_status || '-')} · incident=
+                      {String(replayResult.incident_id || '-')}
+                    </Text>
+                    <Text type="secondary">
+                      root_cause={String(replayResult.root_cause || '暂无')} · confidence={percent(replayResult.confidence)}
+                    </Text>
+                    <Alert
+                      type="info"
+                      showIcon
+                      message="回放适合做什么"
+                      description="当你想确认一次分析为什么得出当前根因、证据链是否完整、或某个专家 Agent 是否偏航时，优先看这里。"
+                    />
+                  </Space>
+                </Card>
+              </Col>
+
+              <Col xs={24} xl={14}>
+                <Card className="module-card ops-section-card" size="small">
+                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                    <Title level={5} style={{ margin: 0 }}>
+                      关键决策与时间线
+                    </Title>
+                    <List
+                      size="small"
+                      className="ops-list-tight"
+                      header={<Text strong>关键决策</Text>}
+                      dataSource={(replayResult.key_decisions || []) as Array<Record<string, any>>}
+                      locale={{ emptyText: '暂无关键决策' }}
+                      renderItem={(item) => (
+                        <List.Item>
+                          <Text>
+                            [{String(item.agent || '-')}] {String(item.conclusion || '-')}
+                          </Text>
+                        </List.Item>
+                      )}
+                    />
+                    <List
+                      size="small"
+                      className="ops-list-tight"
+                      header={<Text strong>时间线步骤</Text>}
+                      dataSource={(replayResult.rendered_steps || []) as string[]}
+                      locale={{ emptyText: '暂无步骤' }}
+                      renderItem={(line) => (
+                        <List.Item>
+                          <Text type="secondary">{line}</Text>
+                        </List.Item>
+                      )}
+                    />
+                  </Space>
+                </Card>
+              </Col>
+            </Row>
           ) : (
-            <Text type="secondary">输入 session_id 后可回放主流程关键决策与证据引用。</Text>
+            <Card className="module-card ops-section-card" size="small">
+              <Text type="secondary">输入 session_id 后可回放主流程关键决策与证据引用。</Text>
+            </Card>
           )}
         </Space>
+      ),
+    },
+  ];
+
+  return (
+    <div className="governance-page">
+      <Card className="module-card ops-hero-card">
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Space wrap>
+            <Tag color="blue">值班 SRE</Tag>
+            <Tag color="default">平台治理负责人</Tag>
+          </Space>
+          <div>
+            <Title level={3} style={{ margin: 0 }}>
+              运行治理
+            </Title>
+            <Paragraph className="ops-hero-description">
+              这页用来判断多 Agent 系统现在是否可信、当前策略是否合适、以及是否存在待处理治理动作。先看状态，再做动作。
+            </Paragraph>
+            <Text type="secondary">
+              系统：{String(systemCard?.system?.name || '-')} · 模型：{String(systemCard?.system?.llm_model || '-')} · 估算样本数：
+              {costCaseCount}
+            </Text>
+          </div>
+          <div className="ops-question-list">
+            <Tag>当前系统是否可信</Tag>
+            <Tag>当前策略是否过于激进或保守</Tag>
+            <Tag>是否有待处理的治理动作</Tag>
+          </div>
+        </Space>
       </Card>
+
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        {governanceSummaryCards.map((card) => (
+          <Col xs={24} sm={12} xl={8} key={card.title}>
+            <Card className={`module-card ops-summary-card tone-${card.tone}`} size="small">
+              <Statistic title={card.title} value={card.value as any} />
+              <Text className="ops-summary-hint">{card.hint}</Text>
+            </Card>
+          </Col>
+        ))}
+      </Row>
+
+      <Card className={`module-card ops-recommend-card tone-${recommendedAction.tone}`} style={{ marginTop: 16 }}>
+        <Space direction="vertical" size={6} style={{ width: '100%' }}>
+          <Text strong>处置建议</Text>
+          <Title level={5} style={{ margin: 0 }}>
+            {recommendedAction.title}
+          </Title>
+          <Text type="secondary">{recommendedAction.description}</Text>
+        </Space>
+      </Card>
+
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Col xs={24} xl={18}>
+          <Tabs className="incident-workspace-tabs" items={tabs} />
+        </Col>
+        <Col xs={24} xl={6}>
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            <Card className="module-card ops-section-card" size="small">
+              <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                <Title level={5} style={{ margin: 0 }}>
+                  快速判断
+                </Title>
+                <Text type="secondary">如果你只想先看一眼当前状态，优先看下面三项。</Text>
+                <Tag color={qualityState.tone === 'risk' ? 'red' : qualityState.tone === 'watch' ? 'orange' : 'green'}>
+                  质量趋势：{qualityState.text}
+                </Tag>
+                <Tag color={riskState.tone === 'risk' ? 'red' : riskState.tone === 'watch' ? 'orange' : 'green'}>
+                  活跃风险：{riskState.text}
+                </Tag>
+                <Tag color="blue">估算 Tokens：{String(cost.estimated_tokens || 0)}</Tag>
+              </Space>
+            </Card>
+
+            <Card className="module-card ops-section-card" size="small">
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                <Title level={5} style={{ margin: 0 }}>
+                  什么时候来这页
+                </Title>
+                <List
+                  size="small"
+                  className="ops-list-tight"
+                  dataSource={[
+                    '感觉最近分析质量变差，想确认是策略、模型还是工具问题。',
+                    '需要审批或执行修复动作，确认是否触发 No-Regression Gate。',
+                    '想复盘某个 session 为什么得出当前根因结论。',
+                  ]}
+                  renderItem={(item) => <List.Item>{item}</List.Item>}
+                />
+              </Space>
+            </Card>
+          </Space>
+        </Col>
+      </Row>
     </div>
   );
 };

@@ -1,12 +1,9 @@
 import React, { useMemo, useState } from 'react';
 import { Layout, Menu } from 'antd';
 import {
-  AlertOutlined,
   ApartmentOutlined,
   DeploymentUnitOutlined,
-  ExperimentOutlined,
-  SafetyCertificateOutlined,
-  ToolOutlined,
+  AlertOutlined,
   HistoryOutlined,
   HomeOutlined,
   SettingOutlined,
@@ -40,32 +37,17 @@ const AppSider: React.FC = () => {
       {
         key: '/assets',
         icon: <ApartmentOutlined />,
-        label: '责任田资产',
-      },
-      {
-        key: '/workbench',
-        icon: <DeploymentUnitOutlined />,
-        label: '调查工作台',
-      },
-      {
-        key: '/benchmark',
-        icon: <ExperimentOutlined />,
-        label: '评测中心',
-      },
-      {
-        key: '/governance',
-        icon: <SafetyCertificateOutlined />,
-        label: '治理中心',
-      },
-      {
-        key: '/tools',
-        icon: <ToolOutlined />,
-        label: '工具中心',
+        label: '责任田',
       },
       {
         key: '/settings',
         icon: <SettingOutlined />,
-        label: '系统设置',
+        label: '设置',
+      },
+      {
+        key: '/advanced',
+        icon: <DeploymentUnitOutlined />,
+        label: '高级',
       },
     ],
     [],
@@ -73,6 +55,27 @@ const AppSider: React.FC = () => {
 
   const selectedKey = useMemo(() => {
     if (location.pathname === '/') return '/';
+    if (
+      location.pathname.startsWith('/incident')
+    ) {
+      return '/incident';
+    }
+    if (
+      location.pathname.startsWith('/history')
+      || location.pathname.startsWith('/events')
+    ) {
+      return '/history';
+    }
+    if (
+      location.pathname.startsWith('/advanced')
+      || location.pathname.startsWith('/workbench')
+      || location.pathname.startsWith('/war-room')
+      || location.pathname.startsWith('/benchmark')
+      || location.pathname.startsWith('/governance')
+      || location.pathname.startsWith('/tools')
+    ) {
+      return '/advanced';
+    }
     const matched = menuItems
       .filter((item) => item.key !== '/')
       .find((item) => location.pathname.startsWith(item.key));

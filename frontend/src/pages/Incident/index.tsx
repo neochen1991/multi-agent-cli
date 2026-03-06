@@ -1,18 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Alert,
   Button,
   Card,
-  Col,
-  Divider,
-  Input,
-  Row,
-  Select,
   Space,
   Spin,
-  Statistic,
-  Steps,
   Tag,
+  Tabs,
   Typography,
   Upload,
   type UploadProps,
@@ -32,14 +25,15 @@ import { formatBeijingDateTime, formatBeijingTime } from '@/utils/dateTime';
 import AssetMappingPanel from '@/components/incident/AssetMappingPanel';
 import DebateProcessPanel from '@/components/incident/DebateProcessPanel';
 import DebateResultPanel from '@/components/incident/DebateResultPanel';
+import IncidentOverviewPanel from '@/components/incident/IncidentOverviewPanel';
 import DialogueFilterBar from '@/components/incident/DialogueFilterBar';
 import DialogueStream, { type DialogueViewMessage } from '@/components/incident/DialogueStream';
 import AgentNetworkGraph, {
   type AgentNetworkEdge,
   type AgentNetworkNode,
+  type AgentNetworkStep,
 } from '@/components/incident/AgentNetworkGraph';
 
-const { TextArea } = Input;
 const { Text } = Typography;
 
 type EventRecord = {
@@ -48,6 +42,15 @@ type EventRecord = {
   kind: string;
   text: string;
   data?: unknown;
+};
+
+type IncidentFormState = {
+  title: string;
+  description: string;
+  severity: string;
+  service_name: string;
+  environment: string;
+  log_content: string;
 };
 
 type DialogueMessage = DialogueViewMessage & {
@@ -70,7 +73,7 @@ const IncidentPage: React.FC = () => {
   const { incidentId: routeIncidentId } = useParams();
   const [activeStep, setActiveStep] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [incidentForm, setIncidentForm] = useState({
+  const [incidentForm, setIncidentForm] = useState<IncidentFormState>({
     title: '',
     description: '',
     severity: 'medium',
@@ -91,6 +94,7 @@ const IncidentPage: React.FC = () => {
   const [eventFilterPhase, setEventFilterPhase] = useState<string>('all');
   const [eventFilterType, setEventFilterType] = useState<string>('all');
   const [eventSearchText, setEventSearchText] = useState<string>('');
+  const [selectedNetworkStep, setSelectedNetworkStep] = useState<AgentNetworkStep | null>(null);
   const [running, setRunning] = useState(false);
   const [debateMaxRounds, setDebateMaxRounds] = useState<number>(1);
   const [executionMode, setExecutionMode] = useState<'standard' | 'quick' | 'background' | 'async'>('standard');
@@ -105,16 +109,6 @@ const IncidentPage: React.FC = () => {
   const seenEventIdsRef = useRef<Set<string>>(new Set());
   const seenEventDedupeKeysRef = useRef<Set<string>>(new Set());
   const seenEventFingerprintsRef = useRef<Set<string>>(new Set());
-
-  const steps = useMemo(
-    () => [
-      { title: '输入故障信息', description: '创建 Incident 与 Session' },
-      { title: '资产映射', description: '责任田映射结果' },
-      { title: '辩论过程', description: '所有 Agent 实时辩论' },
-      { title: '辩论结果', description: '主Agent最终结论' },
-    ],
-    [],
-  );
 
   const appendEvent = (kind: string, text: string, data?: unknown) => {
     const dataRecord = asRecord(data);
@@ -1018,6 +1012,49 @@ const IncidentPage: React.FC = () => {
     setActiveStep((prev) => (nextStep > prev ? nextStep : prev));
   };
 
+  function parseTargetAgentFromEvent(data: Record<string, unknown>, text: string): string {
+    const direct = firstTextValue(data, ['target_agent', 'receiver', 'to_agent', 'target']);
+    if (direct) return direct;
+    const fromText = String(text || '').match(/->\s*([A-Za-z][A-Za-z0-9_-]*)/);
+    return fromText?.[1] || '';
+  }
+
+  function extractNetworkRelationFromEvent(
+    row: EventRecord,
+  ): { source: string; target: string; relation: AgentNetworkEdge['relation'] } | null {
+    const data = asRecord(row.data);
+    const kind = row.kind;
+    const agentName = firstTextValue(data, ['agent_name', 'agent']) || '';
+
+    if (kind === 'agent_command_issued') {
+      const source = agentName || 'ProblemAnalysisAgent';
+      const target = parseTargetAgentFromEvent(data, row.text);
+      if (source && target) {
+        return { source, target, relation: 'command' };
+      }
+      return null;
+    }
+
+    if (kind === 'agent_command_feedback') {
+      const source = agentName;
+      const target = firstTextValue(data, ['target_agent']) || 'ProblemAnalysisAgent';
+      if (source && target) {
+        return { source, target, relation: 'feedback' };
+      }
+      return null;
+    }
+
+    if (kind === 'agent_chat_message') {
+      const source = agentName;
+      const target = firstTextValue(data, ['reply_to']);
+      if (source && target && target !== 'all') {
+        return { source, target, relation: 'reply' };
+      }
+    }
+
+    return null;
+  }
+
   const resetDialogueFilters = () => {
     setEventFilterAgent('all');
     setEventFilterPhase('all');
@@ -1131,6 +1168,7 @@ const IncidentPage: React.FC = () => {
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
+      setSelectedNetworkStep(null);
       resetDialogueFilters();
       assetMappingReadyRef.current = false;
       setReportResult(null);
@@ -1162,6 +1200,7 @@ const IncidentPage: React.FC = () => {
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
+      setSelectedNetworkStep(null);
       resetDialogueFilters();
       assetMappingReadyRef.current = false;
       setReportResult(null);
@@ -1495,7 +1534,7 @@ const IncidentPage: React.FC = () => {
     if (preferredView === 'result' || preferredView === 'report') {
       setActiveStep(3);
     } else if (preferredView === 'analysis') {
-      setActiveStep(1);
+      setActiveStep(2);
     }
     setBootstrapping(true);
     seenEventIdsRef.current.clear();
@@ -1504,6 +1543,7 @@ const IncidentPage: React.FC = () => {
     setEventRecords([]);
     setStreamedMessageText({});
     setExpandedDialogueIds({});
+    setSelectedNetworkStep(null);
     resetDialogueFilters();
     assetMappingReadyRef.current = false;
     setIncidentId(iid);
@@ -1525,7 +1565,7 @@ const IncidentPage: React.FC = () => {
           if (preferredView === 'result' || preferredView === 'report') {
             advanceStep(3);
           } else if (preferredView === 'analysis') {
-            advanceStep(1);
+            advanceStep(2);
           } else if (status === 'completed') {
             advanceStep(3);
           } else {
@@ -1571,7 +1611,8 @@ const IncidentPage: React.FC = () => {
 
   const dialogueMessages = useMemo(
     () => {
-      const rawMessages = debateEvents
+      const scopedEvents = debateEvents.filter((row) => isEventRelatedToNetworkStep(row, selectedNetworkStep));
+      const rawMessages = scopedEvents
         .slice()
         .reverse()
         .map((row) => buildDialogueMessage(row))
@@ -1586,7 +1627,7 @@ const IncidentPage: React.FC = () => {
       });
       return deduped;
     },
-    [debateEvents],
+    [debateEvents, selectedNetworkStep],
   );
 
   const filteredDialogueMessages = useMemo(() => {
@@ -1603,8 +1644,10 @@ const IncidentPage: React.FC = () => {
 
   const filteredDebateEvents = useMemo(() => {
     const includeIds = new Set(filteredDialogueMessages.map((item) => item.id));
-    return debateEvents.filter((row) => includeIds.has(row.id));
-  }, [debateEvents, filteredDialogueMessages]);
+    return debateEvents
+      .filter((row) => isEventRelatedToNetworkStep(row, selectedNetworkStep))
+      .filter((row) => includeIds.has(row.id));
+  }, [debateEvents, filteredDialogueMessages, selectedNetworkStep]);
 
   const eventFilterOptions = useMemo(() => {
     const agentSet = new Set<string>();
@@ -1640,6 +1683,7 @@ const IncidentPage: React.FC = () => {
   const agentNetworkData = useMemo(() => {
     const nodeMap = new Map<string, AgentNetworkNode>();
     const edgeMap = new Map<string, AgentNetworkEdge>();
+    const sequenceSteps: AgentNetworkStep[] = [];
 
     const inferRole = (name: string): AgentNetworkNode['role'] => {
       if (name === 'ProblemAnalysisAgent') return 'commander';
@@ -1697,11 +1741,31 @@ const IncidentPage: React.FC = () => {
       target.activity += 1;
     };
 
-    const parseTargetAgent = (data: Record<string, unknown>, text: string): string => {
-      const direct = firstTextValue(data, ['target_agent', 'receiver', 'to_agent', 'target']);
-      if (direct) return direct;
-      const fromText = String(text || '').match(/->\s*([A-Za-z][A-Za-z0-9_-]*)/);
-      return fromText?.[1] || '';
+    const appendSequenceStep = (
+      sourceName: string,
+      targetName: string,
+      relation: AgentNetworkEdge['relation'],
+    ) => {
+      const source = ensureNode(sourceName);
+      const target = ensureNode(targetName);
+      if (!source || !target || source.id === target.id) return;
+      const last = sequenceSteps[sequenceSteps.length - 1];
+      if (
+        last
+        && last.source === source.id
+        && last.target === target.id
+        && last.relation === relation
+      ) {
+        last.count += 1;
+        return;
+      }
+      sequenceSteps.push({
+        id: `step_${sequenceSteps.length}_${source.id}_${target.id}_${relation}`,
+        source: source.id,
+        target: target.id,
+        relation,
+        count: 1,
+      });
     };
 
     debateEvents
@@ -1715,9 +1779,10 @@ const IncidentPage: React.FC = () => {
 
         if (kind === 'agent_command_issued') {
           const source = agentName || 'ProblemAnalysisAgent';
-          const target = parseTargetAgent(data, row.text);
+          const target = parseTargetAgentFromEvent(data, row.text);
           if (target) {
             upsertEdge(source, target, 'command');
+            appendSequenceStep(source, target, 'command');
           }
           return;
         }
@@ -1727,6 +1792,7 @@ const IncidentPage: React.FC = () => {
           const target = firstTextValue(data, ['target_agent']) || 'ProblemAnalysisAgent';
           if (source && target) {
             upsertEdge(source, target, 'feedback');
+            appendSequenceStep(source, target, 'feedback');
           }
           return;
         }
@@ -1736,6 +1802,7 @@ const IncidentPage: React.FC = () => {
           const replyTo = firstTextValue(data, ['reply_to']);
           if (source && replyTo && replyTo !== 'all') {
             upsertEdge(source, replyTo, 'reply');
+            appendSequenceStep(source, replyTo, 'reply');
           }
           return;
         }
@@ -1747,8 +1814,38 @@ const IncidentPage: React.FC = () => {
       return left.label.localeCompare(right.label);
     });
     const edges = Array.from(edgeMap.values()).sort((left, right) => right.count - left.count);
-    return { nodes, edges };
+    return { nodes, edges, steps: sequenceSteps };
   }, [debateEvents]);
+
+  function isEventRelatedToNetworkStep(row: EventRecord, step: AgentNetworkStep | null): boolean {
+    if (!step) return true;
+    const data = asRecord(row.data);
+    const agentName = firstTextValue(data, ['agent_name', 'agent']) || '';
+    const interaction = extractNetworkRelationFromEvent(row);
+
+    if (
+      interaction
+      && interaction.source === step.source
+      && interaction.target === step.target
+      && interaction.relation === step.relation
+    ) {
+      return true;
+    }
+
+    if (step.relation === 'command') {
+      return agentName === step.target;
+    }
+
+    if (step.relation === 'feedback') {
+      return agentName === step.source;
+    }
+
+    if (step.relation === 'reply') {
+      return row.kind === 'agent_chat_message' && (agentName === step.source || agentName === step.target);
+    }
+
+    return false;
+  }
 
   useEffect(() => {
     const currentIds = new Set(filteredDialogueMessages.map((item) => item.id));
@@ -1830,6 +1927,29 @@ const IncidentPage: React.FC = () => {
     />
   );
 
+  const renderNetworkFocus = selectedNetworkStep ? (
+    <Card className="module-card network-focus-card" size="small">
+      <Space wrap style={{ justifyContent: 'space-between', width: '100%' }}>
+        <Space wrap>
+          <Tag color="processing">链路过滤中</Tag>
+          <Tag color="blue">{selectedNetworkStep.source}</Tag>
+          <span>{'->'}</span>
+          <Tag color="green">{selectedNetworkStep.target}</Tag>
+          <Tag color="purple">
+            {selectedNetworkStep.relation === 'command'
+              ? '下发指令'
+              : selectedNetworkStep.relation === 'feedback'
+                ? '反馈结果'
+                : '对话回复'} x{selectedNetworkStep.count}
+          </Tag>
+        </Space>
+        <Button size="small" onClick={() => setSelectedNetworkStep(null)}>
+          清除过滤
+        </Button>
+      </Space>
+    </Card>
+  ) : null;
+
   const renderDialogueStream = (
     <DialogueStream
       messages={filteredDialogueMessages}
@@ -1845,8 +1965,49 @@ const IncidentPage: React.FC = () => {
   );
 
   const renderAgentNetwork = (
-    <AgentNetworkGraph nodes={agentNetworkData.nodes} edges={agentNetworkData.edges} />
+    <AgentNetworkGraph
+      nodes={agentNetworkData.nodes}
+      edges={agentNetworkData.edges}
+      steps={agentNetworkData.steps}
+      selectedStepId={selectedNetworkStep?.id || null}
+      onStepSelect={(step) => {
+        setSelectedNetworkStep((prev) => (prev?.id === step.id ? null : step));
+      }}
+    />
   );
+
+  const workspaceTabs = useMemo(
+    () => [
+      {
+        key: 'overview',
+        step: 0,
+        label: '概览与启动',
+        hint: '先录入故障信息，确认事件与会话是否已初始化。',
+      },
+      {
+        key: 'asset',
+        step: 1,
+        label: '责任田',
+        hint: '查看责任田映射是否命中，确认领域、聚合根、责任团队和责任人。',
+      },
+      {
+        key: 'process',
+        step: 2,
+        label: '调查过程',
+        hint: '查看主 Agent 调度过程、专家发言、工具调用和关键事件轨迹。',
+      },
+      {
+        key: 'result',
+        step: 3,
+        label: '结论与行动',
+        hint: '查看根因结论、证据链、修复建议、验证计划和最终报告。',
+      },
+    ],
+    [],
+  );
+
+  const workspaceActive = workspaceTabs[activeStep] || workspaceTabs[0];
+  const workspaceActiveKey = workspaceActive.key;
 
   const switchToStep = async (nextStep: number) => {
     if (nextStep > 0 && !incidentId) {
@@ -1864,21 +2025,32 @@ const IncidentPage: React.FC = () => {
     }
   };
 
-  const roundCollapseItems = (sessionDetail?.rounds || []).map((round) => ({
-    key: `${round.round_number}_${round.agent_name}_${round.phase}`,
-    label: `${round.round_number}. ${round.agent_name} (${round.phase}) - ${(round.confidence * 100).toFixed(1)}%`,
-    children: (
-      <Space direction="vertical" style={{ width: '100%' }}>
-        <Text type="secondary">模型：{String(round.model?.name || 'glm-5')}</Text>
-        <Text type="secondary">输入片段：</Text>
-        <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{round.input_message || '无'}</pre>
-        <Text type="secondary">输出内容：</Text>
-        <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
-          {extractReadableTextFromObject(asRecord(round.output_content || {}))}
-        </pre>
-      </Space>
-    ),
-  }));
+  const roundCollapseItems = (sessionDetail?.rounds || [])
+    .filter((round) => {
+      if (!selectedNetworkStep) return true;
+      if (selectedNetworkStep.relation === 'command') {
+        return round.agent_name === selectedNetworkStep.target;
+      }
+      if (selectedNetworkStep.relation === 'feedback') {
+        return round.agent_name === selectedNetworkStep.source;
+      }
+      return round.agent_name === selectedNetworkStep.source || round.agent_name === selectedNetworkStep.target;
+    })
+    .map((round) => ({
+      key: `${round.round_number}_${round.agent_name}_${round.phase}`,
+      label: `${round.round_number}. ${round.agent_name} (${round.phase}) - ${(round.confidence * 100).toFixed(1)}%`,
+      children: (
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Text type="secondary">模型：{String(round.model?.name || 'glm-5')}</Text>
+          <Text type="secondary">输入片段：</Text>
+          <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{round.input_message || '无'}</pre>
+          <Text type="secondary">输出内容：</Text>
+          <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
+            {extractReadableTextFromObject(asRecord(round.output_content || {}))}
+          </pre>
+        </Space>
+      ),
+    }));
 
   const timelineItems = useMemo(
     () =>
@@ -2147,47 +2319,24 @@ const IncidentPage: React.FC = () => {
 
   return (
     <div className="incident-page">
-      <Card className="module-card">
-        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-          <Steps
-            type="navigation"
-            current={activeStep}
-            items={steps}
-            onChange={(idx) => {
-              void switchToStep(idx);
-            }}
-          />
-
-          <Row gutter={[12, 12]}>
-            <Col xs={12} md={6}>
-              <Card size="small" className="incident-kpi-card">
-                <Statistic title="事件总数" value={eventRecords.length} />
-              </Card>
-            </Col>
-            <Col xs={12} md={6}>
-              <Card size="small" className="incident-kpi-card">
-                <Statistic title="辩论事件" value={debateEvents.length} valueStyle={{ color: '#1677ff' }} />
-              </Card>
-            </Col>
-            <Col xs={12} md={6}>
-              <Card size="small" className="incident-kpi-card">
-                <Statistic title="映射命中" value={mappingItems.length} />
-              </Card>
-            </Col>
-            <Col xs={12} md={6}>
-              <Card size="small" className="incident-kpi-card">
-                <Statistic title="辩论轮次" value={debateMaxRounds} />
-              </Card>
-            </Col>
-          </Row>
-
-          <Space wrap>
-            <Tag color={running ? 'processing' : 'default'}>{running ? '会话运行中' : '会话未运行'}</Tag>
-            <Tag color={sessionId ? 'blue' : 'default'}>{sessionId ? `Session: ${sessionId}` : '未创建会话'}</Tag>
-            <Tag color="purple">{`当前步骤：${steps[activeStep]?.title}`}</Tag>
-          </Space>
-        </Space>
-      </Card>
+      <div className="incident-section-nav">
+        <Tabs
+          className="incident-workspace-tabs"
+          activeKey={workspaceActiveKey}
+          onChange={(key) => {
+            const target = workspaceTabs.find((item) => item.key === key);
+            if (target) {
+              void switchToStep(target.step);
+            }
+          }}
+          items={workspaceTabs.map((item) => ({
+            key: item.key,
+            label: item.label,
+            children: null,
+          }))}
+        />
+        <Text type="secondary">{workspaceActive.hint}</Text>
+      </div>
 
       <div style={{ marginTop: 24 }}>
         {bootstrapping && (
@@ -2203,152 +2352,25 @@ const IncidentPage: React.FC = () => {
         {!bootstrapping && (
           <>
         {activeStep === 0 && (
-          <Card
-            className="module-card"
-            title="输入故障信息"
-            extra={
-              <Button onClick={fillDemoIncident} disabled={running || loading}>
-                填充示例故障
-              </Button>
-            }
-          >
-            <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-              <Alert
-                type="info"
-                showIcon
-                message="建议输入接口 URL、错误日志和堆栈，主 Agent 会按命令调度各专家分析。"
-              />
-
-              <Row gutter={[12, 12]}>
-                <Col xs={24} md={12}>
-                  <Input
-                    placeholder="故障标题 *"
-                    value={incidentForm.title}
-                    onChange={(e) => setIncidentForm((s) => ({ ...s, title: e.target.value }))}
-                  />
-                </Col>
-                <Col xs={24} md={12}>
-                  <Input
-                    placeholder="故障描述"
-                    value={incidentForm.description}
-                    onChange={(e) => setIncidentForm((s) => ({ ...s, description: e.target.value }))}
-                  />
-                </Col>
-                <Col xs={24} md={6}>
-                  <Select
-                    value={incidentForm.severity}
-                    style={{ width: '100%' }}
-                    onChange={(value) => setIncidentForm((s) => ({ ...s, severity: value }))}
-                    options={[
-                      { label: 'Critical', value: 'critical' },
-                      { label: 'High', value: 'high' },
-                      { label: 'Medium', value: 'medium' },
-                      { label: 'Low', value: 'low' },
-                    ]}
-                  />
-                </Col>
-                <Col xs={24} md={6}>
-                  <Input
-                    placeholder="服务名（可选）"
-                    value={incidentForm.service_name}
-                    onChange={(e) => setIncidentForm((s) => ({ ...s, service_name: e.target.value }))}
-                  />
-                </Col>
-                <Col xs={24} md={6}>
-                  <Select
-                    value={debateMaxRounds}
-                    style={{ width: '100%' }}
-                    onChange={(value) => setDebateMaxRounds(value)}
-                    options={[
-                      { label: '辩论1轮', value: 1 },
-                      { label: '辩论2轮', value: 2 },
-                      { label: '辩论3轮', value: 3 },
-                      { label: '辩论4轮', value: 4 },
-                      { label: '辩论5轮', value: 5 },
-                      { label: '辩论6轮', value: 6 },
-                    ]}
-                  />
-                </Col>
-                <Col xs={24} md={6}>
-                  <Select
-                    value={executionMode}
-                    style={{ width: '100%' }}
-                    onChange={(value) => setExecutionMode(value)}
-                    options={[
-                      { label: 'Standard（实时）', value: 'standard' },
-                      { label: 'Quick（快速）', value: 'quick' },
-                      { label: 'Background（后台）', value: 'background' },
-                      { label: 'Async（异步）', value: 'async' },
-                    ]}
-                  />
-                </Col>
-              </Row>
-
-              <Divider style={{ margin: 0 }} />
-              <Space wrap>
-                <Upload
-                  accept=".log,.txt,.out,.err,.trace,.stack,.json,.md"
-                  beforeUpload={handleLogFileUpload}
-                  showUploadList={false}
-                  maxCount={1}
-                >
-                  <Button>上传错误日志文件</Button>
-                </Upload>
-                {logUploadMeta && (
-                  <Text type="secondary">
-                    已上传：{logUploadMeta.name}（{Math.max(1, Math.round(logUploadMeta.size / 1024))}KB，
-                    {logUploadMeta.lines} 行）
-                  </Text>
-                )}
-              </Space>
-              <TextArea
-                rows={10}
-                className="log-input-area"
-                placeholder="粘贴日志内容、报错堆栈、监控现象。建议包含 traceId / URL / 状态码。"
-                value={incidentForm.log_content}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  setIncidentForm((s) => ({ ...s, log_content: value }));
-                  if (!value.trim()) {
-                    setLogUploadMeta(null);
-                  }
-                }}
-              />
-              {!incidentId && (
-                <Space>
-                  <Button
-                    type="primary"
-                    loading={loading || running}
-                    onClick={() => void startAnalysisFromInput()}
-                  >
-                    启动分析
-                  </Button>
-                  <Button loading={loading} onClick={() => void createIncidentAndSession()}>
-                    仅创建故障与会话
-                  </Button>
-                </Space>
-              )}
-              {incidentId && !sessionId && (
-                <Space>
-                  <Button
-                    type="primary"
-                    loading={loading || running}
-                    onClick={() => void startAnalysisFromInput()}
-                  >
-                    初始化并启动分析
-                  </Button>
-                  <Button loading={loading} onClick={() => void initSessionForExistingIncident()}>
-                    使用当前故障初始化会话
-                  </Button>
-                </Space>
-              )}
-              {incidentId && sessionId && (
-                <Button type="primary" loading={loading || running} onClick={() => void startAnalysisFromInput()}>
-                  启动分析
-                </Button>
-              )}
-            </Space>
-          </Card>
+          <IncidentOverviewPanel
+            incidentForm={incidentForm}
+            running={running}
+            loading={loading}
+            incidentId={incidentId}
+            sessionId={sessionId}
+            debateMaxRounds={debateMaxRounds}
+            executionMode={executionMode}
+            logUploadMeta={logUploadMeta}
+            onFillDemoIncident={fillDemoIncident}
+            onChangeIncidentForm={(patch) => setIncidentForm((s) => ({ ...s, ...patch }))}
+            onDebateMaxRoundsChange={setDebateMaxRounds}
+            onExecutionModeChange={setExecutionMode}
+            onLogFileUpload={handleLogFileUpload}
+            onClearLogUploadMeta={() => setLogUploadMeta(null)}
+            onStartAnalysis={() => void startAnalysisFromInput()}
+            onCreateIncidentAndSession={() => void createIncidentAndSession()}
+            onInitSessionForExistingIncident={() => void initSessionForExistingIncident()}
+          />
         )}
 
         {activeStep === 1 && <AssetMappingPanel mappingItems={mappingItems} mappingEmptyHint={mappingEmptyHint} />}
@@ -2365,6 +2387,7 @@ const IncidentPage: React.FC = () => {
             onResume={() => sendWsControl('resume')}
             onRetryFailed={retryFailedAgents}
             eventFiltersNode={renderEventFilters}
+            networkFocusNode={renderNetworkFocus}
             dialogueNode={renderDialogueStream}
             agentNetworkNode={renderAgentNetwork}
             roundCollapseItems={roundCollapseItems}

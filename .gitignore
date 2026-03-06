@@ -45,3 +45,5 @@ coverage/
 # Local reports/artifacts
 incident_report_*.json
 incident_report_*.md
+
+output/

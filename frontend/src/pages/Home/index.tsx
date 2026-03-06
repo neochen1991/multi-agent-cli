@@ -5,6 +5,7 @@ import {
   AlertOutlined,
   CheckCircleOutlined,
   ClockCircleOutlined,
+  DeploymentUnitOutlined,
   PlayCircleOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
@@ -35,20 +36,28 @@ const statusColor: Record<string, string> = {
   closed: 'default',
 };
 
-const AGENT_ROLES: Array<{ name: string; desc: string; color: string }> = [
-  { name: 'ProblemAnalysisAgent', desc: '主Agent，负责任务分发、过程协调与最终结论收敛。', color: 'blue' },
-  { name: 'LogAgent', desc: '日志模式识别与异常链路定位。', color: 'geekblue' },
-  { name: 'DomainAgent', desc: '领域与聚合根映射，责任田归属判断。', color: 'cyan' },
-  { name: 'CodeAgent', desc: '代码路径与调用链分析，定位高风险实现。', color: 'orange' },
-  { name: 'DatabaseAgent', desc: '数据库取证分析，聚焦表结构、索引、慢SQL、TopSQL 与会话状态。', color: 'red' },
-  { name: 'MetricsAgent', desc: '指标突变、容量瓶颈与资源异常分析。', color: 'green' },
-  { name: 'ChangeAgent', desc: '变更窗口关联，识别故障与发布耦合。', color: 'gold' },
-  { name: 'RunbookAgent', desc: '案例库检索与处置SOP建议。', color: 'lime' },
-  { name: 'RuleSuggestionAgent', desc: '基于证据输出阈值、告警窗口与规则优化建议。', color: 'purple' },
-  { name: 'CriticAgent', desc: '反例审查，挑战当前假设和证据不足点。', color: 'magenta' },
-  { name: 'RebuttalAgent', desc: '针对质疑补充证据并完成反驳。', color: 'purple' },
-  { name: 'JudgeAgent', desc: '综合多方观点给出裁决与置信度。', color: 'volcano' },
-  { name: 'VerificationAgent', desc: '输出验证计划与回归检查项。', color: 'processing' },
+const START_PATHS = [
+  {
+    key: '/incident',
+    title: '新建分析',
+    desc: '输入故障标题、日志或服务名，立即创建事件并启动分析。',
+    action: '立即开始',
+    icon: <PlayCircleOutlined />,
+  },
+  {
+    key: '/history',
+    title: '查看历史记录',
+    desc: '查看历史故障状态，继续处理进行中的会话或阅读已完成结论。',
+    action: '查看历史',
+    icon: <AlertOutlined />,
+  },
+  {
+    key: '/advanced',
+    title: '打开高级区',
+    desc: '治理、评测、回放和工具接入统一收敛到这里，普通用户通常不必先进入。',
+    action: '进入高级',
+    icon: <DeploymentUnitOutlined />,
+  },
 ];
 
 type DashboardStats = {
@@ -250,19 +259,19 @@ const HomePage: React.FC = () => {
             多 Agent 协作式根因分析平台
           </Title>
           <Paragraph style={{ marginBottom: 0 }}>
-            通过主 Agent 调度日志、代码、领域、指标与案例专家并行分析，沉淀可复核的证据链与可执行结论。
+            先进入“故障分析”创建分析任务，再到“历史记录”跟踪状态、进入详情页查看证据链和结论。治理、评测、回放等后台能力统一收敛到“高级”。
           </Paragraph>
           <Space wrap>
             <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => navigate('/incident')}>
-              开始故障分析
+              故障分析
             </Button>
             <Button onClick={() => navigate('/history')}>历史记录</Button>
-            <Button onClick={() => navigate('/assets')}>资产定位</Button>
+            <Button onClick={() => navigate('/assets')}>维护责任田</Button>
             <Button onClick={() => void loadDashboard()} loading={statsLoading}>
               刷新数据
             </Button>
           </Space>
-          <Text type="secondary">数据基于北京时间实时统计，当前总故障：{stats.totalIncidents}</Text>
+          <Text type="secondary">推荐新手路径：故障分析 {'->'} 历史记录 {'->'} 故障详情。当前总故障：{stats.totalIncidents}</Text>
         </Space>
       </Card>
 
@@ -353,22 +362,25 @@ const HomePage: React.FC = () => {
         </Col>
       </Row>
 
-      <Card className="module-card" title="Agent 角色分工" style={{ marginTop: 16 }}>
+      <Card className="module-card" title="新手上手路径" style={{ marginTop: 16 }}>
         <Row gutter={[12, 12]}>
-          {AGENT_ROLES.map((agent) => (
-            <Col xs={24} sm={12} md={8} lg={6} key={agent.name}>
+          {START_PATHS.map((path) => (
+            <Col xs={24} md={8} key={path.key}>
               <Card
                 size="small"
                 hoverable
-                className="compact-card"
-                onClick={() => navigate('/incident')}
+                className="compact-card quick-path-card"
+                onClick={() => navigate(path.key)}
               >
                 <Space direction="vertical" size={6} style={{ width: '100%' }}>
                   <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-                    <Text strong>{agent.name}</Text>
-                    <Tag color={agent.color}>kimi-k2.5</Tag>
+                    <Space>
+                      <div className="quick-path-icon">{path.icon}</div>
+                      <Text strong>{path.title}</Text>
+                    </Space>
+                    <Tag color="blue">{path.action}</Tag>
                   </Space>
-                  <Text type="secondary">{agent.desc}</Text>
+                  <Text type="secondary">{path.desc}</Text>
                 </Space>
               </Card>
             </Col>
@@ -383,7 +395,7 @@ const HomePage: React.FC = () => {
           dataSource={recentIncidents}
           loading={statsLoading}
           pagination={false}
-          locale={{ emptyText: '暂无故障记录，点击“开始故障分析”创建第一条' }}
+          locale={{ emptyText: '暂无故障记录，点击“新建分析”创建第一条' }}
         />
       </Card>
     </div>

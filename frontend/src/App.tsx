@@ -1,19 +1,37 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
-import { Layout } from 'antd';
+import { Layout, Space, Spin } from 'antd';
 import AppHeader from '@/components/common/Header';
 import AppSider from '@/components/common/Sider';
-import HomePage from '@/pages/Home';
-import IncidentPage from '@/pages/Incident';
-import HistoryPage from '@/pages/History';
-import AssetsPage from '@/pages/Assets';
-import SettingsPage from '@/pages/Settings';
-import InvestigationWorkbenchPage from '@/pages/InvestigationWorkbench';
-import BenchmarkCenterPage from '@/pages/BenchmarkCenter';
-import GovernanceCenterPage from '@/pages/GovernanceCenter';
-import ToolsCenterPage from '@/pages/ToolsCenter';
+
+const HomePage = lazy(() => import('@/pages/Home'));
+const IncidentPage = lazy(() => import('@/pages/Incident'));
+const HistoryPage = lazy(() => import('@/pages/History'));
+const AssetsPage = lazy(() => import('@/pages/Assets'));
+const SettingsPage = lazy(() => import('@/pages/Settings'));
+const InvestigationWorkbenchPage = lazy(() => import('@/pages/InvestigationWorkbench'));
+const BenchmarkCenterPage = lazy(() => import('@/pages/BenchmarkCenter'));
+const GovernanceCenterPage = lazy(() => import('@/pages/GovernanceCenter'));
+const ToolsCenterPage = lazy(() => import('@/pages/ToolsCenter'));
+const AdvancedPage = lazy(() => import('@/pages/Advanced'));
 
 const { Content, Footer } = Layout;
+
+const RouteLoading: React.FC = () => (
+  <div
+    style={{
+      minHeight: 'calc(100vh - 180px)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+    }}
+  >
+    <Space direction="vertical" align="center" size="middle">
+      <Spin size="large" />
+      <span style={{ color: '#64748b' }}>页面加载中...</span>
+    </Space>
+  </div>
+);
 
 const App: React.FC = () => {
   return (
@@ -25,20 +43,24 @@ const App: React.FC = () => {
           <Layout className="app-content-shell">
             <Content className="app-content">
               <div className="page-container">
-                <Routes>
-                  <Route path="/" element={<HomePage />} />
-                  <Route path="/incident" element={<IncidentPage />} />
-                  <Route path="/incident/:incidentId" element={<IncidentPage />} />
-                  <Route path="/history" element={<HistoryPage />} />
-                  <Route path="/assets" element={<AssetsPage />} />
-                  <Route path="/workbench" element={<InvestigationWorkbenchPage />} />
-                  <Route path="/benchmark" element={<BenchmarkCenterPage />} />
-                  <Route path="/governance" element={<GovernanceCenterPage />} />
-                  <Route path="/tools" element={<ToolsCenterPage />} />
-                  <Route path="/war-room" element={<Navigate to="/workbench" replace />} />
-                  <Route path="/settings" element={<SettingsPage />} />
-                  <Route path="*" element={<Navigate to="/" replace />} />
-                </Routes>
+                <Suspense fallback={<RouteLoading />}>
+                  <Routes>
+                    <Route path="/" element={<HomePage />} />
+                    <Route path="/incident" element={<IncidentPage />} />
+                    <Route path="/incident/:incidentId" element={<IncidentPage />} />
+                    <Route path="/events" element={<Navigate to="/history" replace />} />
+                    <Route path="/history" element={<HistoryPage />} />
+                    <Route path="/assets" element={<AssetsPage />} />
+                    <Route path="/advanced" element={<AdvancedPage />} />
+                    <Route path="/workbench" element={<InvestigationWorkbenchPage />} />
+                    <Route path="/benchmark" element={<BenchmarkCenterPage />} />
+                    <Route path="/governance" element={<GovernanceCenterPage />} />
+                    <Route path="/tools" element={<ToolsCenterPage />} />
+                    <Route path="/war-room" element={<Navigate to="/workbench" replace />} />
+                    <Route path="/settings" element={<SettingsPage />} />
+                    <Route path="*" element={<Navigate to="/" replace />} />
+                  </Routes>
+                </Suspense>
               </div>
             </Content>
             <Footer className="app-footer">

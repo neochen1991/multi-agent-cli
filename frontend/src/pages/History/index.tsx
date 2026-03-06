@@ -5,7 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { debateApi, incidentApi, type Incident } from '@/services/api';
 import { formatBeijingDateTime } from '@/utils/dateTime';
 
-const { Title } = Typography;
+const { Paragraph, Text, Title } = Typography;
 
 const statusColor: Record<string, string> = {
   pending: 'default',
@@ -147,15 +147,15 @@ const HistoryPage: React.FC = () => {
       render: (_, record) => (
         <Space>
           <Button size="small" onClick={() => navigate(`/incident/${record.id}`)}>
-            详情
+            进入详情
           </Button>
           {(record.status === 'resolved' || record.status === 'closed' || record.status === 'completed') ? (
             <Button size="small" type="primary" onClick={() => navigate(`/incident/${record.id}?view=report`)}>
-              查看报告
+              查看结论
             </Button>
           ) : (
             <Button size="small" type="primary" onClick={() => navigate(`/incident/${record.id}?view=analysis`)}>
-              继续分析
+              继续处理
             </Button>
           )}
           {record.debate_session_id && ['pending', 'running', 'analyzing', 'debating', 'waiting', 'retrying'].includes(record.status) ? (
@@ -183,20 +183,40 @@ const HistoryPage: React.FC = () => {
   return (
     <div className="history-page history-page-fixed">
       <Card className="module-card" style={{ marginBottom: 16 }}>
-        <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-          <Title level={4} style={{ margin: 0 }}>
-            历史记录
-          </Title>
-          <Button onClick={() => void loadIncidents()} loading={loading}>
-            刷新
-          </Button>
+        <Space
+          direction="vertical"
+          size="middle"
+          style={{ width: '100%' }}
+        >
+          <Space style={{ justifyContent: 'space-between', width: '100%' }} wrap>
+            <div>
+              <Title level={4} style={{ margin: 0 }}>
+                历史记录
+              </Title>
+              <Paragraph type="secondary" style={{ margin: '8px 0 0' }}>
+                这里展示已创建故障的历史队列。你可以回看状态、继续分析进行中的会话，或者查看已完成的结论。
+              </Paragraph>
+            </div>
+            <Space wrap>
+              <Button type="primary" onClick={() => navigate('/incident')}>
+                新建分析
+              </Button>
+              <Button onClick={() => void loadIncidents()} loading={loading}>
+                刷新
+              </Button>
+            </Space>
+          </Space>
+          <Text type="secondary">
+            推荐路径：先到“故障分析”创建任务，再回到这里跟踪状态、进入详情查看证据和结论。
+          </Text>
         </Space>
       </Card>
 
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }} className="history-summary-row">
         <Col xs={12} md={6}>
           <Card className="module-card compact-card">
-            <Statistic title="总任务" value={summary.total} />
+            <Statistic title="总事件" value={summary.total} />
+            
           </Card>
         </Col>
         <Col xs={12} md={6}>
@@ -224,7 +244,7 @@ const HistoryPage: React.FC = () => {
           loading={loading}
           scroll={{ y: 'calc(100vh - 430px)', x: 1200 }}
           pagination={{ pageSize: 10 }}
-          locale={{ emptyText: '暂无历史记录，请先在故障分析页创建任务。' }}
+          locale={{ emptyText: '暂无历史记录，点击“新建分析”创建第一条任务。' }}
         />
       </Card>
     </div>
