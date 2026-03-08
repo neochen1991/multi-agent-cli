@@ -1,4 +1,7 @@
-"""Governance operational services: A/B eval, tenant governance, replay and metrics."""
+"""治理运营服务。
+
+负责 A/B 评测、多租户治理、外部同步、人工审核队列和团队指标聚合等治理面能力。
+"""
 
 from __future__ import annotations
 
@@ -14,7 +17,10 @@ from app.runtime.trace_lineage import replay_session_lineage
 
 
 class GovernanceOpsService:
+    """治理运营聚合服务。"""
+
     def __init__(self) -> None:
+        """初始化治理相关的本地存储文件路径。"""
         root = Path(settings.LOCAL_STORE_DIR)
         root.mkdir(parents=True, exist_ok=True)
         self._tenant_file = root / "tenant_policies.json"
@@ -25,6 +31,7 @@ class GovernanceOpsService:
         self._lock = asyncio.Lock()
 
     def _read_json(self, path: Path, default: Any) -> Any:
+        """读取 JSON 文件；失败时返回默认值。"""
         if not path.exists():
             return default
         try:
@@ -34,15 +41,18 @@ class GovernanceOpsService:
             return default
 
     def _write_json(self, path: Path, payload: Any) -> None:
+        """将 JSON 数据写回本地文件。"""
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
 
     def _metrics_dir(self) -> Path:
+        """定位治理页需要读取的 metrics 目录。"""
         return Path(__file__).resolve().parents[3] / "docs" / "metrics"
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
+        """执行safefloat相关逻辑，并为当前模块提供可复用的处理能力。"""
         try:
             return float(value)
         except (TypeError, ValueError):
@@ -50,12 +60,14 @@ class GovernanceOpsService:
 
     @staticmethod
     def _safe_int(value: Any, default: int = 0) -> int:
+        """执行safeint相关逻辑，并为当前模块提供可复用的处理能力。"""
         try:
             return int(value)
         except (TypeError, ValueError):
             return default
 
     def _load_debate_snapshot(self) -> Dict[str, Any]:
+        """读取 debates.json 快照，供人工审核和治理统计使用。"""
         payload = self._read_json(self._debates_file, {})
         if not isinstance(payload, dict):
             return {"sessions": [], "results": []}
@@ -66,10 +78,38 @@ class GovernanceOpsService:
             "results": results if isinstance(results, list) else [],
         }
 
+    @staticmethod
+    def _extract_review_root_cause(session: Dict[str, Any]) -> str:
+        """对输入执行提取审核rootcause，将原始数据整理为稳定的内部结构。"""
+        context = session.get("context") if isinstance(session.get("context"), dict) else {}
+        checkpoint = context.get("pending_review_checkpoint") if isinstance(context.get("pending_review_checkpoint"), dict) else {}
+        debate_result = checkpoint.get("debate_result") if isinstance(checkpoint.get("debate_result"), dict) else {}
+        root_cause = str(debate_result.get("root_cause") or "").strip()
+        if root_cause:
+            return root_cause
+        final_judgment = debate_result.get("final_judgment") if isinstance(debate_result.get("final_judgment"), dict) else {}
+        root_cause_payload = final_judgment.get("root_cause")
+        if isinstance(root_cause_payload, dict):
+            return str(root_cause_payload.get("summary") or "").strip()
+        return str(root_cause_payload or "").strip()
+
+    @staticmethod
+    def _extract_review_confidence(session: Dict[str, Any]) -> float:
+        """对输入执行提取审核confidence，将原始数据整理为稳定的内部结构。"""
+        context = session.get("context") if isinstance(session.get("context"), dict) else {}
+        checkpoint = context.get("pending_review_checkpoint") if isinstance(context.get("pending_review_checkpoint"), dict) else {}
+        debate_result = checkpoint.get("debate_result") if isinstance(checkpoint.get("debate_result"), dict) else {}
+        try:
+            return float(debate_result.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
     def _runtime_events_path(self, session_id: str) -> Path:
+        """执行运行时eventspath相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._runtime_events_dir / f"{session_id}.jsonl"
 
     def _load_runtime_events(self, session_id: str) -> List[Dict[str, Any]]:
+        """负责加载运行时events，并返回后续流程可直接消费的数据结果。"""
         path = self._runtime_events_path(session_id)
         if not path.exists():
             return []
@@ -87,6 +127,7 @@ class GovernanceOpsService:
         return rows
 
     def _resolve_team_name(self, session: Dict[str, Any], result: Dict[str, Any]) -> str:
+        """执行resolveteamname相关逻辑，并为当前模块提供可复用的处理能力。"""
         for raw in (
             result.get("responsible_team"),
             ((session.get("context") or {}).get("interface_mapping") or {}).get("responsible_team"),
@@ -100,6 +141,7 @@ class GovernanceOpsService:
         return "unknown"
 
     def _is_recent(self, value: Any, window_start: datetime | None) -> bool:
+        """执行isrecent相关逻辑，并为当前模块提供可复用的处理能力。"""
         if window_start is None:
             return True
         ts = str(value or "").strip()
@@ -114,6 +156,7 @@ class GovernanceOpsService:
         return created >= window_start
 
     def _load_baselines(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """负责加载baselines，并返回后续流程可直接消费的数据结果。"""
         files = sorted(self._metrics_dir().glob("baseline-*.json"), reverse=True)[: max(1, int(limit or 20))]
         rows: List[Dict[str, Any]] = []
         for path in files:
@@ -125,6 +168,7 @@ class GovernanceOpsService:
         return rows
 
     async def ab_evaluate(self, strategy_a: str, strategy_b: str) -> Dict[str, Any]:
+        """基于最近两份 baseline 做简化版 A/B 对比。"""
         baselines = self._load_baselines(limit=2)
         if len(baselines) < 2:
             return {
@@ -155,7 +199,51 @@ class GovernanceOpsService:
             "summary": "可灰度上线" if canary_ready else "建议继续离线调优",
         }
 
+    async def list_human_reviews(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """从 debates 快照中整理人工审核队列。"""
+        snapshot = self._load_debate_snapshot()
+        sessions = snapshot.get("sessions") if isinstance(snapshot.get("sessions"), list) else []
+        rows: List[Dict[str, Any]] = []
+        for session in sessions:
+            if not isinstance(session, dict):
+                continue
+            if str(session.get("status") or "").strip().lower() != "waiting":
+                continue
+            context = session.get("context") if isinstance(session.get("context"), dict) else {}
+            review = context.get("human_review") if isinstance(context.get("human_review"), dict) else {}
+            review_status = str(review.get("status") or "").strip().lower()
+            if review_status not in {"pending", "approved"}:
+                continue
+            rows.append(
+                {
+                    "session_id": str(session.get("id") or ""),
+                    "incident_id": str(session.get("incident_id") or ""),
+                    "status": str(session.get("status") or ""),
+                    "current_phase": str(session.get("current_phase") or ""),
+                    "review_status": review_status,
+                    "review_reason": str(review.get("reason") or ""),
+                    "resume_from_step": str(review.get("resume_from_step") or ""),
+                    "requested_at": str(review.get("requested_at") or ""),
+                    "approver": str(review.get("approver") or ""),
+                    "comment": str(review.get("comment") or ""),
+                    "updated_at": str(session.get("updated_at") or ""),
+                    "execution_mode": str(context.get("execution_mode") or "standard"),
+                    "deployment_profile": str(((context.get("deployment_profile") or {}).get("name") if isinstance(context.get("deployment_profile"), dict) else "") or ""),
+                    "root_cause": self._extract_review_root_cause(session),
+                    "confidence": self._extract_review_confidence(session),
+                }
+            )
+        rows.sort(
+            key=lambda item: (
+                0 if str(item.get("review_status") or "") == "pending" else 1,
+                str(item.get("requested_at") or item.get("updated_at") or ""),
+            ),
+            reverse=False,
+        )
+        return rows[: max(1, int(limit or 100))]
+
     async def list_tenants(self) -> List[Dict[str, Any]]:
+        """读取多租户治理策略列表；若为空则初始化默认租户。"""
         async with self._lock:
             rows = self._read_json(self._tenant_file, [])
             if not rows:
@@ -174,6 +262,7 @@ class GovernanceOpsService:
             return rows
 
     async def upsert_tenant(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """新增或更新租户治理策略。"""
         tenant_id = str(payload.get("tenant_id") or "").strip()
         if not tenant_id:
             raise ValueError("tenant_id is required")
@@ -193,6 +282,7 @@ class GovernanceOpsService:
             return target
 
     async def sync_external(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """执行同步外部相关逻辑，并为当前模块提供可复用的处理能力。"""
         provider = str(payload.get("provider") or "unknown").strip().lower() or "unknown"
         action = str(payload.get("action") or "notify")
         adapter_payload: Dict[str, Any] | None = None
@@ -222,11 +312,13 @@ class GovernanceOpsService:
         return record
 
     async def list_external_sync(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """负责列出外部同步，并返回后续流程可直接消费的数据结果。"""
         async with self._lock:
             rows = self._read_json(self._sync_file, [])
         return list(reversed(rows))[: max(1, int(limit or 100))]
 
     async def external_sync_templates(self) -> Dict[str, Any]:
+        """执行外部同步templates相关逻辑，并为当前模块提供可复用的处理能力。"""
         return {
             "jira": {
                 "outbound_fields": {
@@ -266,6 +358,7 @@ class GovernanceOpsService:
         }
 
     async def get_external_sync_settings(self) -> Dict[str, Any]:
+        """负责获取外部同步settings，并返回后续流程可直接消费的数据结果。"""
         async with self._lock:
             payload = self._read_json(
                 self._sync_settings_file,
@@ -280,6 +373,7 @@ class GovernanceOpsService:
             return payload
 
     async def update_external_sync_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """执行更新外部同步settings，并同步更新运行时状态、持久化结果或审计轨迹。"""
         enabled = bool(payload.get("enabled"))
         providers = payload.get("providers")
         if not isinstance(providers, list):
@@ -315,6 +409,8 @@ class GovernanceOpsService:
         grouped: Dict[str, Dict[str, Any]] = {}
         daily_cost_tokens: Dict[str, int] = {}
         timeout_hotspots: Dict[str, int] = {}
+        queue_timeout_hotspots: Dict[str, int] = {}
+        limited_analysis_hotspots: Dict[str, int] = {}
         tool_failure_topn: Dict[str, int] = {}
         sla_samples: Dict[str, List[int]] = {
             "first_evidence_latency_ms": [],
@@ -323,6 +419,7 @@ class GovernanceOpsService:
         }
 
         def _parse_ts(raw: Any) -> datetime | None:
+            """对输入执行解析ts，将原始数据整理为稳定的内部结构。"""
             text = str(raw or "").strip()
             if not text:
                 return None
@@ -353,6 +450,10 @@ class GovernanceOpsService:
                     "cancelled": 0,
                     "llm_calls": 0,
                     "timeouts": 0,
+                    "queue_timeouts": 0,
+                    "limited_analyses": 0,
+                    "limited_analysis_sessions": 0,
+                    "evidence_gap_sessions": 0,
                     "tool_calls": 0,
                     "tool_failures": 0,
                     "estimated_prompt_tokens": 0,
@@ -387,6 +488,7 @@ class GovernanceOpsService:
             first_evidence_at: datetime | None = None
             first_conclusion_at: datetime | None = None
             report_ready_at: datetime | None = None
+            has_limited_analysis = False
             for event in events:
                 event_type = str(event.get("type") or "").strip().lower()
                 event_ts = _parse_ts(event.get("timestamp"))
@@ -405,6 +507,19 @@ class GovernanceOpsService:
                     metrics["timeouts"] += 1
                     key = f"{str(event.get('agent_name') or 'unknown')}::{event_type}"
                     timeout_hotspots[key] = timeout_hotspots.get(key, 0) + 1
+                if event_type == "llm_queue_timeout":
+                    metrics["timeouts"] += 1
+                    metrics["queue_timeouts"] += 1
+                    key = f"{str(event.get('agent_name') or 'unknown')}::llm_queue_timeout"
+                    timeout_hotspots[key] = timeout_hotspots.get(key, 0) + 1
+                    queue_timeout_hotspots[key] = queue_timeout_hotspots.get(key, 0) + 1
+                if event_type == "agent_command_feedback":
+                    evidence_status = str(event.get("evidence_status") or "").strip().lower()
+                    if evidence_status == "inferred_without_tool":
+                        metrics["limited_analyses"] += 1
+                        has_limited_analysis = True
+                        key = f"{str(event.get('agent_name') or 'unknown')}::inferred_without_tool"
+                        limited_analysis_hotspots[key] = limited_analysis_hotspots.get(key, 0) + 1
                 if event_type.startswith("agent_tool_") or event_type.startswith("tool_"):
                     metrics["tool_calls"] += 1
                     io_status = str(event.get("io_status") or event.get("status") or "").strip().lower()
@@ -435,6 +550,12 @@ class GovernanceOpsService:
                 sla_samples["report_latency_ms"].append(
                     max(0, int((report_ready_at - first_event_at).total_seconds() * 1000))
                 )
+            if has_limited_analysis:
+                metrics["limited_analysis_sessions"] += 1
+            risk_assessment = result.get("risk_assessment") if isinstance(result.get("risk_assessment"), dict) else {}
+            risk_factors = risk_assessment.get("risk_factors") if isinstance(risk_assessment.get("risk_factors"), list) else []
+            if any("关键证据不足" in str(item or "") for item in risk_factors):
+                metrics["evidence_gap_sessions"] += 1
 
         # 估算模型成本（默认 0.002 CNY / 1K tokens，便于治理趋势对比）
         estimated_unit_cost = 0.002
@@ -450,6 +571,9 @@ class GovernanceOpsService:
             tool_calls = max(1, self._safe_int(metrics.get("tool_calls"), 0))
             metrics["success_rate"] = round(self._safe_int(metrics.get("completed"), 0) / sessions_count, 4)
             metrics["timeout_rate"] = round(self._safe_int(metrics.get("timeouts"), 0) / llm_calls, 4)
+            metrics["queue_timeout_rate"] = round(self._safe_int(metrics.get("queue_timeouts"), 0) / llm_calls, 4)
+            metrics["limited_analysis_rate"] = round(self._safe_int(metrics.get("limited_analyses"), 0) / llm_calls, 4)
+            metrics["evidence_gap_rate"] = round(self._safe_int(metrics.get("evidence_gap_sessions"), 0) / sessions_count, 4)
             metrics["tool_failure_rate"] = round(self._safe_int(metrics.get("tool_failures"), 0) / tool_calls, 4)
             if self._safe_int(metrics.get("_confidence_count"), 0) > 0:
                 metrics["avg_confidence"] = round(
@@ -482,6 +606,14 @@ class GovernanceOpsService:
             {"key": key, "count": count}
             for key, count in sorted(timeout_hotspots.items(), key=lambda item: item[1], reverse=True)[:20]
         ]
+        queue_hotspot_rows = [
+            {"key": key, "count": count}
+            for key, count in sorted(queue_timeout_hotspots.items(), key=lambda item: item[1], reverse=True)[:20]
+        ]
+        limited_analysis_rows = [
+            {"key": key, "count": count}
+            for key, count in sorted(limited_analysis_hotspots.items(), key=lambda item: item[1], reverse=True)[:20]
+        ]
         tool_failure_rows = [
             {"tool_name": key, "count": count}
             for key, count in sorted(tool_failure_topn.items(), key=lambda item: item[1], reverse=True)[:20]
@@ -498,11 +630,14 @@ class GovernanceOpsService:
             "items": rows[:top_limit],
             "token_cost_trend": trend_rows,
             "timeout_hotspots": hotspot_rows,
+            "queue_timeout_hotspots": queue_hotspot_rows,
+            "limited_analysis_hotspots": limited_analysis_rows,
             "tool_failure_topn": tool_failure_rows,
             "sla": sla,
         }
 
     async def session_replay(self, session_id: str, *, limit: int = 120) -> Dict[str, Any]:
+        """执行会话replay相关逻辑，并为当前模块提供可复用的处理能力。"""
         payload = await replay_session_lineage(session_id, limit=max(1, int(limit or 120)))
         snapshot = self._load_debate_snapshot()
         sessions = {

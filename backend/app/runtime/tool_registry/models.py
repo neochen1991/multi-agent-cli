@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 
 class ToolPolicy(BaseModel):
+    """封装ToolPolicy相关数据结构或服务能力。"""
     timeout_seconds: int = 30
     audit_level: str = "full"
     command_whitelist: List[str] = Field(default_factory=list)
@@ -16,6 +17,7 @@ class ToolPolicy(BaseModel):
 
 
 class ToolRegistryItem(BaseModel):
+    """封装ToolRegistryItem相关数据结构或服务能力。"""
     tool_name: str
     category: str
     owner_agent: str

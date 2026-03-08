@@ -24,6 +24,9 @@ export type AgentNetworkStep = {
   target: string;
   relation: 'command' | 'feedback' | 'reply';
   count: number;
+  clueCount?: number;
+  toolCount?: number;
+  keyClues?: string[];
 };
 
 type Props = {
@@ -67,6 +70,12 @@ const compactName = (name: string): string => {
   return `${plain.slice(0, 12)}...`;
 };
 
+const compactClue = (value: string): string => {
+  const text = String(value || '').trim();
+  if (text.length <= 12) return text;
+  return `${text.slice(0, 10)}...`;
+};
+
 const AgentNetworkGraph: React.FC<Props> = ({
   nodes,
   edges,
@@ -90,7 +99,7 @@ const AgentNetworkGraph: React.FC<Props> = ({
     });
   }, [nodes]);
 
-  const stepItems = useMemo(() => {
+  const stepItems = useMemo<AgentNetworkStep[]>(() => {
     if (steps.length > 0) return steps;
     return edges.map((edge, index) => ({
       id: `${edge.id}_${index}`,
@@ -139,7 +148,7 @@ const AgentNetworkGraph: React.FC<Props> = ({
         <Tag color="green">反馈结果</Tag>
         <Tag color="purple">对话回复</Tag>
       </div>
-      <div className="agent-network-scroll">
+      <div className={`agent-network-scroll${orderedNodes.length > 6 ? ' is-scrollable' : ''}`}>
         <svg
           className="agent-network-svg"
           viewBox={`0 0 ${dimensions.width} ${dimensions.height}`}
@@ -234,15 +243,23 @@ const AgentNetworkGraph: React.FC<Props> = ({
                   <g transform={`translate(${x - 54}, ${midY - (isDownward ? 32 : 54)})`}>
                     <rect
                       width="108"
-                      height="36"
+                      height="62"
                       rx="10"
                       className={`agent-network-step-card is-${step.relation}`}
                     />
-                    <text x="54" y="16" textAnchor="middle" className="agent-network-step-card-title">
+                    <text x="54" y="15" textAnchor="middle" className="agent-network-step-card-title">
                       {relationLabel[step.relation]}
                     </text>
-                    <text x="54" y="29" textAnchor="middle" className="agent-network-step-card-meta">
+                    <text x="54" y="27" textAnchor="middle" className="agent-network-step-card-meta">
                       x{step.count}
+                    </text>
+                    <text x="54" y="39" textAnchor="middle" className="agent-network-step-card-submeta">
+                      线索 {step.clueCount || 0} / 工具 {step.toolCount || 0}
+                    </text>
+                    <text x="54" y="53" textAnchor="middle" className="agent-network-step-card-clues">
+                      {Array.isArray(step.keyClues) && step.keyClues.length > 0
+                        ? step.keyClues.slice(0, 2).map(compactClue).join(' · ')
+                        : '无关键线索'}
                     </text>
                   </g>
                   <text x={x} y={Math.min(source.y, target.y) - 10} textAnchor="middle" className="agent-network-link-meta">

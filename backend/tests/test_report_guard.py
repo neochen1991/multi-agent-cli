@@ -1,3 +1,5 @@
+"""test报告门禁相关测试。"""
+
 from datetime import datetime
 
 from app.models.debate import DebateResult, EvidenceItem
@@ -5,6 +7,8 @@ from app.services.report_service import ReportService
 
 
 def _result(root_cause: str, confidence: float, evidence: list[EvidenceItem]) -> DebateResult:
+    """为测试场景提供result辅助逻辑。"""
+    
     return DebateResult(
         session_id="deb_test",
         incident_id="inc_test",
@@ -20,6 +24,8 @@ def _result(root_cause: str, confidence: float, evidence: list[EvidenceItem]) ->
 
 
 def test_report_guard_rejects_placeholder_conclusion():
+    """验证报告门禁拒绝placeholder结论。"""
+    
     value = _result(
         "需要进一步分析",
         0.8,
@@ -32,6 +38,8 @@ def test_report_guard_rejects_placeholder_conclusion():
 
 
 def test_report_guard_rejects_zero_confidence_or_empty_evidence():
+    """验证报告门禁拒绝zeroconfidenceor空证据。"""
+    
     low = _result(
         "数据库连接池耗尽",
         0.0,
@@ -47,6 +55,8 @@ def test_report_guard_rejects_zero_confidence_or_empty_evidence():
 
 
 def test_report_guard_accepts_effective_result():
+    """验证报告门禁接受有效result。"""
+    
     ok = _result(
         "数据库连接池耗尽",
         0.7,
@@ -59,6 +69,8 @@ def test_report_guard_accepts_effective_result():
 
 
 def test_report_guard_rejects_single_source_evidence():
+    """验证报告门禁拒绝单一来源证据。"""
+    
     only_log = _result(
         "数据库连接池耗尽",
         0.8,

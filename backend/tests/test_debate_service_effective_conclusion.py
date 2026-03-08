@@ -1,3 +1,5 @@
+"""test辩论服务有效结论相关测试。"""
+
 import pytest
 
 from app.models.debate import DebateSession, DebateStatus
@@ -5,6 +7,8 @@ from app.services.debate_service import DebateService
 
 
 def _session() -> DebateSession:
+    """为测试场景提供session辅助逻辑。"""
+    
     return DebateSession(
         id="deb_effective_test",
         incident_id="inc_effective_test",
@@ -14,6 +18,8 @@ def _session() -> DebateSession:
 
 
 def test_has_effective_llm_conclusion_accepts_judge_final_judgment():
+    """验证has有效LLM结论接受裁决finaljudgment。"""
+    
     service = DebateService()
     debate_result = {
         "confidence": 0.74,
@@ -44,6 +50,8 @@ def test_has_effective_llm_conclusion_accepts_judge_final_judgment():
 
 
 def test_has_effective_llm_conclusion_rejects_degraded_placeholder():
+    """验证has有效LLM结论拒绝降级placeholder。"""
+    
     service = DebateService()
     debate_result = {
         "confidence": 0.86,
@@ -65,6 +73,8 @@ def test_has_effective_llm_conclusion_rejects_degraded_placeholder():
 
 
 def test_build_result_fallbacks_confidence_from_root_cause():
+    """验证buildresultfallbacksconfidence从rootcause。"""
+    
     service = DebateService()
     session = _session()
     flow_result = {

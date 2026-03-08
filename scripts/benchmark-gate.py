@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark quality gate based on latest baseline report."""
+"""评测门禁脚本。"""
 
 from __future__ import annotations
 
@@ -10,22 +10,30 @@ from typing import Any, Dict
 
 
 def latest_baseline(metrics_dir: Path) -> Path | None:
+    """返回最新的 baseline 报告路径。"""
+    
     files = sorted(metrics_dir.glob("baseline-*.json"), reverse=True)
     return files[0] if files else None
 
 
 def previous_baseline(metrics_dir: Path) -> Path | None:
+    """返回上一份 baseline 报告路径，用于做回归对比。"""
+    
     files = sorted(metrics_dir.glob("baseline-*.json"), reverse=True)
     return files[1] if len(files) > 1 else None
 
 
 def load_summary(path: Path) -> Dict[str, Any]:
+    """读取 baseline 文件中的 summary 段，供质量门禁判断使用。"""
+    
     payload = json.loads(path.read_text(encoding="utf-8"))
     summary = payload.get("summary")
     return summary if isinstance(summary, dict) else {}
 
 
 def main() -> int:
+    """执行脚本主流程，串联参数解析、内容生成与结果输出。"""
+    
     parser = argparse.ArgumentParser(description="Benchmark quality gate")
     parser.add_argument("--metrics-dir", default="docs/metrics", help="baseline report directory")
     parser.add_argument("--min-top1", type=float, default=0.30, help="minimum top1_rate")

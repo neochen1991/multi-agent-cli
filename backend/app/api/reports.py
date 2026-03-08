@@ -15,7 +15,7 @@ router = APIRouter()
 
 
 class ReportResponse(BaseModel):
-    """报告响应"""
+    """标准报告响应模型。"""
 
     report_id: str
     incident_id: str
@@ -27,7 +27,7 @@ class ReportResponse(BaseModel):
 
 
 class ReportExportRequest(BaseModel):
-    """报告导出请求"""
+    """报告导出请求，控制导出格式及是否附带细节。"""
 
     format: str = Field(
         default="json",
@@ -38,7 +38,7 @@ class ReportExportRequest(BaseModel):
 
 
 class ShareReportResponse(BaseModel):
-    """分享响应"""
+    """创建分享链接后的响应。"""
 
     incident_id: str
     report_id: str
@@ -48,6 +48,8 @@ class ShareReportResponse(BaseModel):
 
 
 class ReportVersionResponse(BaseModel):
+    """历史报告版本摘要。"""
+
     report_id: str
     incident_id: str
     debate_session_id: Optional[str] = None
@@ -57,6 +59,8 @@ class ReportVersionResponse(BaseModel):
 
 
 class ReportDiffResponse(BaseModel):
+    """最近两版报告差异摘要。"""
+
     incident_id: str
     base_report_id: Optional[str] = None
     target_report_id: Optional[str] = None
@@ -72,6 +76,7 @@ class ReportDiffResponse(BaseModel):
     description="通过分享 token 获取报告",
 )
 async def get_shared_report(token: str):
+    """通过分享 token 读取报告。"""
     report = await report_service.get_report_by_share_token(token)
     if not report:
         raise HTTPException(
@@ -88,6 +93,7 @@ async def get_shared_report(token: str):
     description="获取指定故障事件的分析报告（不存在则自动生成）",
 )
 async def get_report(incident_id: str):
+    """获取故障分析报告；若不存在则触发一次懒生成。"""
     try:
         report = await report_service.get_report(incident_id)
         if not report:
@@ -107,6 +113,7 @@ async def get_report(incident_id: str):
     description="导出分析报告为指定格式",
 )
 async def export_report(incident_id: str, request: ReportExportRequest):
+    """按指定格式导出报告。"""
     if request.format == "pdf":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -131,6 +138,7 @@ async def export_report(incident_id: str, request: ReportExportRequest):
     description="重新生成分析报告",
 )
 async def regenerate_report(incident_id: str):
+    """强制重新生成指定故障的 markdown 报告。"""
     try:
         report = await report_service.regenerate_report(
             incident_id=incident_id,
@@ -148,6 +156,7 @@ async def regenerate_report(incident_id: str):
     description="生成报告分享链接",
 )
 async def share_report(incident_id: str):
+    """创建报告分享链接。"""
     try:
         share = await report_service.create_share_link(incident_id)
         return ShareReportResponse(**share)
@@ -162,6 +171,7 @@ async def share_report(incident_id: str):
     description="返回同一故障的历史报告版本摘要，用于横向对比",
 )
 async def compare_reports(incident_id: str):
+    """列出同一故障下的历史报告版本摘要。"""
     items = await report_service.list_reports(incident_id)
     versions: list[ReportVersionResponse] = []
     for item in items:
@@ -185,6 +195,7 @@ async def compare_reports(incident_id: str):
     description="对比同 incident 最近两版报告差异（unified diff）",
 )
 async def compare_report_diff(incident_id: str):
+    """对比同一故障最近两版报告的 unified diff。"""
     payload = await report_service.compare_latest_reports(incident_id)
     return ReportDiffResponse(
         incident_id=str(payload.get("incident_id") or incident_id),
@@ -197,6 +208,7 @@ async def compare_report_diff(incident_id: str):
 
 
 def _build_report_response(report: dict) -> ReportResponse:
+    """把服务层字典结构转换成统一的接口响应模型。"""
     return ReportResponse(
         report_id=report["report_id"],
         incident_id=report["incident_id"],

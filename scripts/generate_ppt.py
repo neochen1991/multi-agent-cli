@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-SRE Debate Platform PPT Generator
-生成面向领导的项目介绍PPT
-"""
+"""generatePPT脚本。"""
 
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -11,7 +8,7 @@ from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
 
 def create_presentation():
-    """创建PPT演示文稿"""
+    """执行创建presentation相关逻辑。"""
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
@@ -1119,7 +1116,7 @@ def create_presentation():
 
 
 def add_title(slide, text, color):
-    """添加标题"""
+    """向当前页补充title相关元素，并统一样式与布局。"""
     title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(12.333), Inches(0.8))
     tf = title_box.text_frame
     p = tf.paragraphs[0]

@@ -6,6 +6,7 @@ from enum import Enum
 
 
 class DebateExecutionMode(str, Enum):
+    """封装DebateExecutionMode相关数据结构或服务能力。"""
     STANDARD = "standard"
     QUICK = "quick"
     BACKGROUND = "background"
@@ -13,6 +14,7 @@ class DebateExecutionMode(str, Enum):
 
 
 def normalize_execution_mode(raw: str | None) -> DebateExecutionMode:
+    """对输入执行归一化execution模式，将原始数据整理为稳定的内部结构。"""
     text = str(raw or "").strip().lower()
     if text == DebateExecutionMode.QUICK.value:
         return DebateExecutionMode.QUICK

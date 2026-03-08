@@ -10,6 +10,7 @@ from typing import List
 
 @dataclass(frozen=True)
 class IncidentFixture:
+    """封装IncidentFixture相关数据结构或服务能力。"""
     fixture_id: str
     title: str
     scenario: str
@@ -25,10 +26,12 @@ class IncidentFixture:
 
 
 def _fixtures_dir() -> Path:
+    """执行样例dir相关逻辑，并为当前模块提供可复用的处理能力。"""
     return Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "incidents"
 
 
 def load_fixtures(limit: int = 0) -> List[IncidentFixture]:
+    """负责加载样例，并返回后续流程可直接消费的数据结果。"""
     root = _fixtures_dir()
     if not root.exists():
         return []

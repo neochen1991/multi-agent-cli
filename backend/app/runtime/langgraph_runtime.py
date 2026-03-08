@@ -94,7 +94,21 @@ logger = structlog.get_logger()
 
 
 class LangGraphRuntimeOrchestrator:
-    """LangGraph-backed orchestrator with persisted checkpoints."""
+    """
+    基于 LangGraph 的运行时编排器。
+
+    这是多 Agent 分析主流程的总控类，主要负责：
+    1. 会话初始化与超时边界
+    2. 运行策略 / deployment profile 生效
+    3. Graph 构建与执行
+    4. 事件、轨迹、checkpoint 和最终结论收口
+
+    它本身尽量不承载过多细节执行逻辑，重执行部分会下沉到：
+    - PhaseExecutor
+    - AgentRunner
+    - PromptBuilder
+    - RoutingService / StateTransitionService
+    """
 
     MAX_HISTORY_ITEMS = 2
     PARALLEL_ANALYSIS_AGENTS = (
@@ -107,6 +121,16 @@ class LangGraphRuntimeOrchestrator:
         "RunbookAgent",
         "RuleSuggestionAgent",
     )
+    KEY_EVIDENCE_AGENTS = (
+        "LogAgent",
+        "CodeAgent",
+        "DatabaseAgent",
+        "MetricsAgent",
+    )
+    ANALYSIS_PRIORITY_BATCHES = (
+        ("DatabaseAgent", "MetricsAgent"),
+        ("LogAgent", "CodeAgent"),
+    )
     COLLABORATION_PEER_LIMIT = 2
     STREAM_CHUNK_SIZE = 160
     STREAM_MAX_CHUNKS = 16
@@ -115,6 +139,14 @@ class LangGraphRuntimeOrchestrator:
     DIALOGUE_PROMPT_CHAR_BUDGET = 900
 
     def __init__(self, consensus_threshold: float = 0.85, max_rounds: int = 1):
+        """
+        初始化运行时编排器的核心依赖。
+
+        注意这里不是在“启动一次分析”，而是在装配执行器本身：
+        - 挂好事件分发器
+        - 初始化路由/阶段/状态服务
+        - 建立 LLM 并发控制和 checkpoint 依赖
+        """
         self.consensus_threshold = consensus_threshold
         self.max_rounds = max_rounds
         self.min_rounds = 1
@@ -124,6 +156,7 @@ class LangGraphRuntimeOrchestrator:
         self._active_round_commands: Dict[str, Dict[str, Any]] = {}
         self._event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
         self._input_context: Dict[str, Any] = {}
+        self._enable_collaboration: bool = bool(settings.DEBATE_ENABLE_COLLABORATION)
         self._enable_critique: bool = bool(settings.DEBATE_ENABLE_CRITIQUE)
         self._require_verification_plan: bool = True
         self._event_dispatcher = EventDispatcher()
@@ -170,7 +203,16 @@ class LangGraphRuntimeOrchestrator:
         )
 
     def _configure_runtime_policy(self, context: Dict[str, Any]) -> None:
+        """
+        根据 execution mode、runtime strategy 和 deployment profile 计算当前会话的运行策略。
+
+        这里真正决定的是本轮会话的“行为边界”，例如：
+        - 哪些 analysis agent 会参与
+        - 每轮最多允许多少讨论步
+        - 是否开启 collaboration / critique / verification
+        """
         execution_mode = str((context or {}).get("execution_mode") or "standard").strip().lower()
+        deployment_profile = (context or {}).get("deployment_profile")
         runtime_strategy = (context or {}).get("runtime_strategy")
         phase_mode = ""
         if isinstance(runtime_strategy, dict):
@@ -184,41 +226,76 @@ class LangGraphRuntimeOrchestrator:
             selected_agents = core_agents
             max_discussion_steps = 4
             enable_critique = False
+            enable_collaboration = False
             require_verification_plan = False
         elif phase_mode == "fast_track" or execution_mode in {"background", "async"}:
             selected_agents = fast_agents
             max_discussion_steps = 10
             enable_critique = False
+            enable_collaboration = False
             require_verification_plan = False
         else:
             selected_agents = balanced_agents
             max_discussion_steps = 8
             enable_critique = bool(settings.DEBATE_ENABLE_CRITIQUE)
+            enable_collaboration = bool(settings.DEBATE_ENABLE_COLLABORATION)
             require_verification_plan = True
+
+        if isinstance(deployment_profile, dict) and deployment_profile.get("name"):
+            selected_agents = tuple(
+                str(name or "").strip()
+                for name in list(deployment_profile.get("analysis_agents") or [])
+                if str(name or "").strip()
+            ) or selected_agents
+            enable_collaboration = bool(deployment_profile.get("collaboration_enabled") or False)
+            enable_critique = bool(deployment_profile.get("critique_enabled") or False)
+            require_verification_plan = bool(deployment_profile.get("require_verification_plan") or False)
 
         self.PARALLEL_ANALYSIS_AGENTS = tuple(selected_agents)
         self.MAX_DISCUSSION_STEPS_PER_ROUND = int(max_discussion_steps)
+        self._enable_collaboration = bool(enable_collaboration)
         self._enable_critique = bool(enable_critique)
         self._require_verification_plan = bool(require_verification_plan)
         logger.info(
             "runtime_policy_applied",
             execution_mode=execution_mode,
             phase_mode=phase_mode or "standard",
+            deployment_profile=(
+                str(deployment_profile.get("name") or "")
+                if isinstance(deployment_profile, dict)
+                else ""
+            ),
             parallel_analysis_agents=list(self.PARALLEL_ANALYSIS_AGENTS),
             max_discussion_steps=self.MAX_DISCUSSION_STEPS_PER_ROUND,
+            enable_collaboration=self._enable_collaboration,
             enable_critique=self._enable_critique,
             require_verification_plan=self._require_verification_plan,
         )
 
     def _get_llm_semaphore(self) -> asyncio.Semaphore:
+        """获取当前事件循环绑定的 LLM 并发 semaphore，避免跨 loop 复用失效。"""
         loop = asyncio.get_running_loop()
         if self._llm_semaphore is None or self._llm_semaphore_loop is not loop:
             self._llm_semaphore = asyncio.Semaphore(self._llm_semaphore_limit)
             self._llm_semaphore_loop = loop
         return self._llm_semaphore
 
+    def _analysis_batch_limit(self, *, collaboration: bool = False) -> int:
+        """
+        计算 analysis / collaboration 阶段单批可并发 Agent 数。
+
+        这里故意保留至少一个槽位给收口链路，避免分析波次把
+        `ProblemAnalysisAgent` / `JudgeAgent` 直接挤出队列。
+        """
+        reserve_slots = 1 if self._llm_semaphore_limit > 1 else 0
+        batch_limit = max(1, self._llm_semaphore_limit - reserve_slots)
+        if collaboration:
+            return max(1, min(batch_limit, 2))
+        return batch_limit
+
     @staticmethod
     def _is_rate_limited_error(error_text: str) -> bool:
+        """统一判断错误文本是否属于模型限流/过载类问题。"""
         normalized = str(error_text or "").lower()
         return (
             "429" in normalized
@@ -232,6 +309,16 @@ class LangGraphRuntimeOrchestrator:
         context: Dict[str, Any],
         event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
+        """
+        执行一次完整的 LangGraph 会话。
+
+        高层流程如下：
+        1. 绑定 trace/session 和事件回调
+        2. 根据上下文应用运行策略
+        3. 构建 Graph 并调用 `ainvoke`
+        4. 收集最终 payload、写入轨迹摘要
+        5. 统一做异常和资源清理
+        """
         self.turns = []
         self._active_round_commands = {}
         self._event_callback = event_callback
@@ -264,6 +351,7 @@ class LangGraphRuntimeOrchestrator:
             "log_excerpt": str(context.get("log_content") or "")[:1400],
             "parsed_data": context.get("parsed_data") or {},
             "interface_mapping": context.get("interface_mapping") or {},
+            "investigation_leads": context.get("investigation_leads") or {},
             "runtime_assets_count": len(context.get("runtime_assets") or []),
             "dev_assets_count": len(context.get("dev_assets") or []),
             "design_assets_count": len(context.get("design_assets") or []),
@@ -271,6 +359,7 @@ class LangGraphRuntimeOrchestrator:
             "available_analysis_agents": list(self.PARALLEL_ANALYSIS_AGENTS),
         }
 
+        # Graph 每次执行时按当前策略即时构建，避免把旧会话策略残留到新会话。
         graph_builder = GraphBuilder(self)
         graph = graph_builder.build(self._agent_sequence())
         app = graph.compile(checkpointer=self._graph_checkpointer)
@@ -313,6 +402,7 @@ class LangGraphRuntimeOrchestrator:
             self._session_deadline_monotonic = None
 
     async def _graph_init_session(self, state: _DebateExecState) -> _DebateExecState:
+        """初始化运行时会话，并把首个 session_created 事件落到审计流。"""
         context_summary = state.get("context_summary") or {}
         await runtime_session_store.create(
             session_id=str(self.session_id),
@@ -329,42 +419,52 @@ class LangGraphRuntimeOrchestrator:
         return build_session_init_update(self.MAX_DISCUSSION_STEPS_PER_ROUND)
 
     def _route_after_analysis_parallel(self, state: _DebateExecState) -> str:
+        """决定并行分析阶段结束后下一步该走哪个节点。"""
         return self._routing_service.route_after_analysis_parallel(
-            enable_collaboration=settings.DEBATE_ENABLE_COLLABORATION
+            enable_collaboration=self._enable_collaboration
         )
 
     def _route_after_critic(self, state: _DebateExecState) -> str:
+        """决定质疑阶段结束后下一步该走哪个节点。"""
         return self._routing_service.route_after_critic(
-            enable_critique=settings.DEBATE_ENABLE_CRITIQUE
+            enable_critique=self._enable_critique
         )
 
     def _supervisor_step_to_node(self, next_step: str) -> str:
+        """把 supervisor 产出的 step 名称映射成 LangGraph 节点名。"""
         return self._routing_service.supervisor_step_to_node(next_step)
 
     def _route_after_supervisor_decide(self, state: _DebateExecState) -> str:
+        """根据 supervisor 的决策结果选择下一跳节点。"""
         return self._routing_service.route_after_supervisor_decide(state)
 
     def _route_after_round_evaluate(self, state: _DebateExecState) -> str:
+        """根据 round_evaluate 的结果选择下一轮或终态节点。"""
         return self._routing_service.route_after_round_evaluate(state)
 
     def _round_discussion_budget(self) -> int:
+        """计算当前配置下每轮允许消耗的讨论步数预算。"""
         return self._routing_service.round_discussion_budget(
             base_steps=self.MAX_DISCUSSION_STEPS_PER_ROUND,
-            enable_collaboration=settings.DEBATE_ENABLE_COLLABORATION,
-            enable_critique=settings.DEBATE_ENABLE_CRITIQUE,
+            enable_collaboration=self._enable_collaboration,
+            enable_critique=self._enable_critique,
         )
 
     def _step_for_agent(self, agent_name: str) -> str:
+        """根据 Agent 名称反查它在图中的逻辑 step。"""
         return self._routing_service.step_for_agent(agent_name)
 
     def _agent_from_step(self, step: str) -> str:
+        """根据图 step 反查对应的 Agent 名称。"""
         return self._routing_service.agent_from_step(step)
 
     def _round_turns_from_state(self, state: _DebateExecState) -> List[DebateTurn]:
+        """从全量 turn 历史中切出当前 round 的 turn 视图。"""
         start_index = max(0, int(state.get("round_start_turn_index") or 0))
         return list(self.turns[start_index:])
 
     def _round_cards_from_state(self, state: _DebateExecState) -> List[AgentEvidence]:
+        """从 state 中切出当前 round 的证据卡片集合。"""
         history_cards = list(state.get("history_cards") or [])
         start_index = max(0, int(state.get("round_start_turn_index") or 0))
         if start_index <= 0:
@@ -378,6 +478,7 @@ class LangGraphRuntimeOrchestrator:
         *,
         limit: int = 12,
     ) -> List[AgentEvidence]:
+        """把 LangGraph messages 投影成统一的证据卡片结构。"""
         return messages_to_cards_ops(messages, limit=limit)
 
     def _history_cards_for_state(
@@ -396,17 +497,20 @@ class LangGraphRuntimeOrchestrator:
         return merge_round_and_message_cards_ops(stored_cards, message_cards, limit=max(8, limit))
 
     def _round_cards_for_routing(self, state: _DebateExecState) -> List[AgentEvidence]:
+        """为路由判断准备 round cards，并补上最新消息投影。"""
         round_cards = self._round_cards_from_state(state)
         message_cards = self._messages_to_cards(list(state.get("messages") or []), limit=12)
         return merge_round_and_message_cards_ops(round_cards, message_cards, limit=20)
 
     def _recent_judge_turn(self, round_turns: List[DebateTurn]) -> Optional[DebateTurn]:
+        """返回当前轮里最近一次 JudgeAgent 的 turn。"""
         for turn in reversed(round_turns):
             if turn.agent_name == "JudgeAgent":
                 return turn
         return None
 
     def _recent_judge_card(self, round_cards: List[AgentEvidence]) -> Optional[AgentEvidence]:
+        """返回当前轮里最近一次 JudgeAgent 的证据卡片。"""
         for card in reversed(round_cards):
             if card.agent_name == "JudgeAgent":
                 return card
@@ -417,14 +521,18 @@ class LangGraphRuntimeOrchestrator:
         round_cards: List[AgentEvidence],
         agent_name: str,
     ) -> Optional[AgentEvidence]:
+        """返回指定 Agent 最近一张可用于路由判断的卡片。"""
         return recent_agent_card_route(round_cards, agent_name)
 
     def _round_agent_counts(self, round_cards: List[AgentEvidence]) -> Dict[str, int]:
+        """统计当前轮各 Agent 已产出的卡片数量。"""
         return round_agent_counts_route(round_cards)
 
     def _judge_is_ready(self, round_cards: List[AgentEvidence]) -> bool:
+        """判断当前证据覆盖是否足以进入 Judge 阶段。"""
         return judge_is_ready_route(
             round_cards,
+            state={"agent_outputs": {card.agent_name: card.raw_output for card in round_cards if isinstance(card.raw_output, dict)}},
             parallel_analysis_agents=self.PARALLEL_ANALYSIS_AGENTS,
             debate_enable_critique=self._enable_critique,
         )
@@ -436,6 +544,7 @@ class LangGraphRuntimeOrchestrator:
         round_cards: List[AgentEvidence],
         route_decision: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """对路由结果施加门禁，防止空转、误收口或越界跳转。"""
         return route_guardrail_helper(
             state=state,
             round_cards=round_cards,
@@ -451,6 +560,7 @@ class LangGraphRuntimeOrchestrator:
         state: _DebateExecState,
         round_cards: List[AgentEvidence],
     ) -> Dict[str, Any]:
+        """在 supervisor 输出不可用时生成谨慎的兜底路由决策。"""
         return fallback_supervisor_route_helper(
             state=state,
             round_cards=round_cards,
@@ -467,6 +577,7 @@ class LangGraphRuntimeOrchestrator:
         state: _DebateExecState,
         round_cards: List[AgentEvidence],
     ) -> Dict[str, Any]:
+        """把主 Agent 的结构化输出转换成实际可执行的路由决策。"""
         return route_from_commander_output_helper(
             payload=payload,
             state=state,
@@ -478,6 +589,7 @@ class LangGraphRuntimeOrchestrator:
         )
 
     def _card_to_ai_message(self, card: AgentEvidence) -> Optional[AIMessage]:
+        """把证据卡片压缩成可回灌给模型的 AIMessage。"""
         output = card.raw_output if isinstance(getattr(card, "raw_output", None), dict) else {}
         chat_message = str(output.get("chat_message") or "").strip()
         if not chat_message:
@@ -501,6 +613,7 @@ class LangGraphRuntimeOrchestrator:
         limit: int = 8,
         char_budget: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
+        """从消息流中抽取可放入 Prompt 的对话摘要条目。"""
         budget = max(240, int(char_budget or self.DIALOGUE_PROMPT_CHAR_BUDGET))
         items: List[Dict[str, Any]] = []
         seen_signatures: set[tuple[str, str]] = set()
@@ -548,6 +661,7 @@ class LangGraphRuntimeOrchestrator:
         return items
 
     def _message_signature(self, msg: Any) -> str:
+        """为消息生成稳定签名，供去重逻辑复用。"""
         return message_signature_ops(msg)
 
     def _dedupe_new_messages(
@@ -555,9 +669,11 @@ class LangGraphRuntimeOrchestrator:
         existing_messages: List[Any],
         new_messages: List[Any],
     ) -> List[Any]:
+        """在写回 state 前去掉本轮新增消息里的重复项。"""
         return dedupe_new_messages_ops(existing_messages, new_messages)
 
     def _message_deltas_from_cards(self, cards: List[AgentEvidence]) -> List[AIMessage]:
+        """把新增 cards 转成需要追加到 message history 的增量消息。"""
         deltas: List[AIMessage] = []
         for card in cards:
             msg = self._card_to_ai_message(card)
@@ -566,6 +682,7 @@ class LangGraphRuntimeOrchestrator:
         return deltas
 
     def _derive_conversation_state(self, history_cards: List[AgentEvidence]) -> Dict[str, Any]:
+        """从历史卡片恢复主 Agent 需要的会话摘要状态。"""
         return self._derive_conversation_state_with_context(history_cards)
 
     def _derive_conversation_state_with_context(
@@ -575,6 +692,7 @@ class LangGraphRuntimeOrchestrator:
         messages: Optional[List[Any]] = None,
         existing_agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        """结合历史卡片、消息流和既有输出派生完整会话状态。"""
         claims: List[Dict[str, Any]] = []
         open_questions: List[str] = []
         agent_outputs: Dict[str, Dict[str, Any]] = {
@@ -638,6 +756,7 @@ class LangGraphRuntimeOrchestrator:
         }
 
     async def _graph_supervisor_decide(self, state: _DebateExecState) -> _DebateExecState:
+        """执行 Supervisor 路由决策节点，决定下一步进入哪个图节点。"""
         return await execute_supervisor_decide(self, state)
 
     def _graph_apply_step_result(
@@ -645,9 +764,17 @@ class LangGraphRuntimeOrchestrator:
         state: _DebateExecState,
         result: Optional[Dict[str, Any]],
     ) -> _DebateExecState:
+        """把单个节点返回的增量结果合并回全局状态。"""
         return self._state_transition_service.apply_step_result(state, result)
 
     async def _graph_round_start(self, state: _DebateExecState) -> _DebateExecState:
+        """
+        启动新一轮分析。
+
+        这一阶段会先整理历史卡片、对话摘要和压缩上下文，再调用
+        `ProblemAnalysisAgent` 生成本轮命令，并把命令写入 mailbox，
+        供后续并行分析阶段逐个专家 Agent 消费。
+        """
         current_round = int(state.get("current_round") or 0) + 1
         if current_round > max(1, self.max_rounds):
             return {"continue_next_round": False}
@@ -675,6 +802,7 @@ class LangGraphRuntimeOrchestrator:
                 "mode": "langgraph_runtime",
             }
         )
+        # 主 Agent 在这一轮只做“下发命令”，不直接产出最终根因。
         commander_result = await self._run_problem_analysis_commander(
             loop_round=current_round,
             compact_context=compact_context,
@@ -736,6 +864,12 @@ class LangGraphRuntimeOrchestrator:
         return {**next_state, **structured_state_snapshot(merged_preview)}
 
     async def _graph_analysis_parallel(self, state: _DebateExecState) -> _DebateExecState:
+        """
+        执行并行分析阶段。
+
+        这里会按当前运行策略把专家 Agent 拆成批次执行，避免一次性占满
+        LLM 队列，同时确保关键证据 Agent 优先得到执行机会。
+        """
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
         history_cards = self._history_cards_for_state(state, limit=20)
@@ -757,7 +891,8 @@ class LangGraphRuntimeOrchestrator:
         return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
 
     async def _graph_analysis_collaboration(self, state: _DebateExecState) -> _DebateExecState:
-        if not settings.DEBATE_ENABLE_COLLABORATION:
+        """执行专家间协作阶段，让分析 Agent 互相补充证据或纠正结论。"""
+        if not self._enable_collaboration:
             return {}
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
@@ -779,7 +914,8 @@ class LangGraphRuntimeOrchestrator:
         return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
 
     async def _graph_critic(self, state: _DebateExecState) -> _DebateExecState:
-        if not settings.DEBATE_ENABLE_CRITIQUE:
+        """执行质疑阶段，让 `CriticAgent` 针对当前主结论提出反证。"""
+        if not self._enable_critique:
             return {}
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
@@ -807,7 +943,8 @@ class LangGraphRuntimeOrchestrator:
         return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
 
     async def _graph_rebuttal(self, state: _DebateExecState) -> _DebateExecState:
-        if not settings.DEBATE_ENABLE_CRITIQUE:
+        """执行反驳阶段，让 `RebuttalAgent` 回应质疑并补充证据。"""
+        if not self._enable_critique:
             return {}
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
@@ -835,6 +972,12 @@ class LangGraphRuntimeOrchestrator:
         return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
 
     async def _graph_judge(self, state: _DebateExecState) -> _DebateExecState:
+        """
+        执行裁决阶段。
+
+        `JudgeAgent` 会综合本轮专家输出、协作结果和质疑/反驳信息，
+        形成最终结构化裁决，同时由主 Agent 补发最终摘要事件。
+        """
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
         history_cards = self._history_cards_for_state(state, limit=20)
@@ -865,6 +1008,15 @@ class LangGraphRuntimeOrchestrator:
         return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
 
     async def _graph_round_evaluate(self, state: _DebateExecState) -> _DebateExecState:
+        """
+        评估当前轮次是否已经可以收口。
+
+        这里会同时考虑：
+        - Judge 是否已返回有效结论
+        - 置信度是否达到共识阈值
+        - Supervisor 是否主动请求停止
+        - 轮次预算是否还有余量
+        """
         current_round = int(state.get("current_round") or 1)
         history_cards = self._history_cards_for_state(state, limit=20)
         judge_card = self._recent_judge_card(self._round_cards_from_state(state))
@@ -896,18 +1048,22 @@ class LangGraphRuntimeOrchestrator:
         }
 
     def _spec_by_name(self, agent_name: str) -> Optional[AgentSpec]:
+        """按名称查找 AgentSpec。"""
         for spec in self._agent_sequence():
             if spec.name == agent_name:
                 return spec
         return None
 
     def _problem_analysis_agent_spec(self) -> AgentSpec:
+        """返回 ProblemAnalysisAgent 的标准规格定义。"""
         return build_problem_analysis_agent_spec()
 
     def _coordinator_command_schema(self) -> Dict[str, Any]:
+        """返回 commander/supervisor 使用的结构化命令 Schema。"""
         return coordinator_command_schema_template()
 
     def _prompt_template_version(self) -> str:
+        """返回当前 Prompt 模板版本号，便于审计和回放。"""
         return str(self._prompt_builder.template_version or "unknown")
 
     def _build_problem_analysis_commander_prompt(
@@ -918,6 +1074,7 @@ class LangGraphRuntimeOrchestrator:
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         existing_agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> str:
+        """组装 ProblemAnalysisAgent 的 commander Prompt。"""
         return self._prompt_builder.build_commander_prompt(
             loop_round=loop_round,
             context=context,
@@ -938,6 +1095,7 @@ class LangGraphRuntimeOrchestrator:
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         existing_agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> str:
+        """组装 supervisor 决策使用的 Prompt。"""
         return self._prompt_builder.build_supervisor_prompt(
             loop_round=loop_round,
             context=context,
@@ -958,6 +1116,7 @@ class LangGraphRuntimeOrchestrator:
         limit: int,
     ) -> List[Dict[str, Any]]:
         # compatibility shim: moved to context_builders.coordination_peer_items
+        """整理 commander 协调阶段要看的同伴结论摘要。"""
         return coordination_peer_items_ctx(
             history_cards=history_cards,
             dialogue_items=dialogue_items,
@@ -972,6 +1131,7 @@ class LangGraphRuntimeOrchestrator:
         limit: int,
     ) -> List[Dict[str, Any]]:
         # compatibility shim: moved to context_builders.supervisor_recent_messages
+        """整理 supervisor 最近需要关注的消息摘要。"""
         return supervisor_recent_messages_ctx(
             round_history_cards=round_history_cards,
             dialogue_items=dialogue_items,
@@ -985,7 +1145,9 @@ class LangGraphRuntimeOrchestrator:
         fill_defaults: bool,
         targets_hint: Optional[List[str]] = None,
     ) -> Dict[str, Dict[str, Any]]:
-        def _normalize_tables(value: Any) -> List[str]:
+        """从 commander/supervisor 载荷里提取标准化的 Agent 命令集合。"""
+        def _normalize_items(value: Any, *, limit: int = 20, width: int = 120) -> List[str]:
+            """把列表字段清洗成稳定的短文本数组。"""
             if not isinstance(value, list):
                 return []
             picks: List[str] = []
@@ -993,20 +1155,13 @@ class LangGraphRuntimeOrchestrator:
                 text = str(item or "").strip()
                 if not text:
                     continue
-                picks.append(text[:120])
+                picks.append(text[:width])
             # preserve order while deduplicating
-            return list(dict.fromkeys(picks))[:20]
+            return list(dict.fromkeys(picks))[:limit]
 
         def _normalize_skill_hints(value: Any) -> List[str]:
-            if not isinstance(value, list):
-                return []
-            picks: List[str] = []
-            for item in value:
-                text = str(item or "").strip()
-                if not text:
-                    continue
-                picks.append(text[:80])
-            return list(dict.fromkeys(picks))[:8]
+            """把 skill hints 清洗成稳定的提示语列表。"""
+            return _normalize_items(value, limit=8, width=80)
 
         raw_commands = payload.get("commands")
         commands: Dict[str, Dict[str, Any]] = {}
@@ -1023,7 +1178,15 @@ class LangGraphRuntimeOrchestrator:
                     "focus": str(item.get("focus") or "").strip(),
                     "expected_output": str(item.get("expected_output") or "").strip(),
                     "use_tool": item.get("use_tool"),
-                    "database_tables": _normalize_tables(item.get("database_tables")),
+                    "database_tables": _normalize_items(item.get("database_tables")),
+                    "api_endpoints": _normalize_items(item.get("api_endpoints"), limit=12, width=180),
+                    "service_names": _normalize_items(item.get("service_names"), limit=12, width=120),
+                    "code_artifacts": _normalize_items(item.get("code_artifacts"), limit=16, width=180),
+                    "class_names": _normalize_items(item.get("class_names"), limit=16, width=120),
+                    "monitor_items": _normalize_items(item.get("monitor_items"), limit=16, width=160),
+                    "dependency_services": _normalize_items(item.get("dependency_services"), limit=16, width=120),
+                    "trace_ids": _normalize_items(item.get("trace_ids"), limit=8, width=120),
+                    "error_keywords": _normalize_items(item.get("error_keywords"), limit=12, width=120),
                     "skill_hints": _normalize_skill_hints(item.get("skill_hints")),
                 }
 
@@ -1051,6 +1214,14 @@ class LangGraphRuntimeOrchestrator:
                         "expected_output": "",
                         "use_tool": None,
                         "database_tables": [],
+                        "api_endpoints": [],
+                        "service_names": [],
+                        "code_artifacts": [],
+                        "class_names": [],
+                        "monitor_items": [],
+                        "dependency_services": [],
+                        "trace_ids": [],
+                        "error_keywords": [],
                         "skill_hints": [],
                     },
                 )
@@ -1064,12 +1235,21 @@ class LangGraphRuntimeOrchestrator:
                         "expected_output": "",
                         "use_tool": None,
                         "database_tables": [],
+                        "api_endpoints": [],
+                        "service_names": [],
+                        "code_artifacts": [],
+                        "class_names": [],
+                        "monitor_items": [],
+                        "dependency_services": [],
+                        "trace_ids": [],
+                        "error_keywords": [],
                         "skill_hints": [],
                     }
         return commands
 
     @staticmethod
-    def _normalize_database_tables(value: Any) -> List[str]:
+    def _normalize_text_items(value: Any, *, limit: int = 20, width: int = 160) -> List[str]:
+        """把任意输入清洗成稳定的文本列表。"""
         if not isinstance(value, list):
             return []
         picks: List[str] = []
@@ -1077,31 +1257,180 @@ class LangGraphRuntimeOrchestrator:
             text = str(item or "").strip()
             if not text:
                 continue
-            picks.append(text[:120])
-        return list(dict.fromkeys(picks))[:20]
+            picks.append(text[:width])
+        return list(dict.fromkeys(picks))[:limit]
+
+    @staticmethod
+    def _normalize_database_tables(value: Any) -> List[str]:
+        """把数据库表线索清洗成统一的表名列表。"""
+        return LangGraphRuntimeOrchestrator._normalize_text_items(value, limit=20, width=120)
+
+    def _normalize_investigation_leads(self, compact_context: Dict[str, Any]) -> Dict[str, Any]:
+        """把 investigation leads 归一化成统一字段结构。"""
+        leads = compact_context.get("investigation_leads") if isinstance(compact_context, dict) else {}
+        if not isinstance(leads, dict):
+            leads = {}
+        return {
+            "api_endpoints": self._normalize_text_items(leads.get("api_endpoints"), limit=12, width=180),
+            "service_names": self._normalize_text_items(leads.get("service_names"), limit=12, width=120),
+            "code_artifacts": self._normalize_text_items(leads.get("code_artifacts"), limit=16, width=180),
+            "class_names": self._normalize_text_items(leads.get("class_names"), limit=16, width=120),
+            "database_tables": self._normalize_database_tables(leads.get("database_tables")),
+            "monitor_items": self._normalize_text_items(leads.get("monitor_items"), limit=16, width=160),
+            "dependency_services": self._normalize_text_items(leads.get("dependency_services"), limit=16, width=120),
+            "trace_ids": self._normalize_text_items(leads.get("trace_ids"), limit=8, width=120),
+            "error_keywords": self._normalize_text_items(leads.get("error_keywords"), limit=12, width=120),
+            "domain": str(leads.get("domain") or "").strip(),
+            "aggregate": str(leads.get("aggregate") or "").strip(),
+            "owner_team": str(leads.get("owner_team") or "").strip(),
+            "owner": str(leads.get("owner") or "").strip(),
+        }
 
     def _enrich_agent_commands_with_asset_mapping(
         self,
         commands: Dict[str, Dict[str, Any]],
         compact_context: Dict[str, Any],
     ) -> Dict[str, Dict[str, Any]]:
+        """把责任田映射出的结构化线索补到各 Agent 命令里。"""
         if not isinstance(commands, dict):
             return {}
+        leads = self._normalize_investigation_leads(compact_context)
         interface_mapping = compact_context.get("interface_mapping") if isinstance(compact_context, dict) else {}
-        mapping_tables = self._normalize_database_tables(
-            (interface_mapping or {}).get("database_tables") if isinstance(interface_mapping, dict) else []
-        )
-        if not mapping_tables:
+        if not isinstance(interface_mapping, dict):
+            interface_mapping = {}
+        if not leads.get("database_tables"):
+            leads["database_tables"] = self._normalize_database_tables(
+                interface_mapping.get("database_tables") or interface_mapping.get("db_tables") or []
+            )
+        endpoint = interface_mapping.get("endpoint") if isinstance(interface_mapping.get("endpoint"), dict) else {}
+        if not leads.get("api_endpoints"):
+            endpoint_label = " ".join(
+                part for part in [str(endpoint.get("method") or "").strip(), str(endpoint.get("path") or "").strip()] if part
+            ).strip()
+            if endpoint_label:
+                leads["api_endpoints"] = [endpoint_label]
+        if not leads.get("service_names"):
+            service_name = str(endpoint.get("service") or "").strip()
+            if service_name:
+                leads["service_names"] = [service_name]
+        if not any(
+            leads.get(key)
+            for key in (
+                "api_endpoints",
+                "service_names",
+                "code_artifacts",
+                "class_names",
+                "database_tables",
+                "monitor_items",
+                "dependency_services",
+                "trace_ids",
+                "error_keywords",
+            )
+        ):
             return commands
-        db_cmd = dict(commands.get("DatabaseAgent") or {})
-        if not db_cmd:
-            return commands
-        db_cmd["database_tables"] = self._normalize_database_tables(db_cmd.get("database_tables")) or mapping_tables
-        if not str(db_cmd.get("focus") or "").strip():
-            db_cmd["focus"] = f"优先检查责任田映射表: {', '.join(db_cmd['database_tables'][:8])}"
-        if not str(db_cmd.get("expected_output") or "").strip():
-            db_cmd["expected_output"] = "输出各目标表的索引、字段定义、疑似慢SQL与会话阻塞信号"
-        commands["DatabaseAgent"] = db_cmd
+
+        def _merge_values(cmd: Dict[str, Any], field: str, values: List[str], *, limit: int = 20) -> None:
+            """按字段合并新旧线索值，并保持稳定去重顺序。"""
+            existing = self._normalize_text_items(cmd.get(field), limit=limit, width=180)
+            if field == "database_tables":
+                existing = self._normalize_database_tables(cmd.get(field))
+            cmd[field] = list(dict.fromkeys(existing + list(values or [])))[:limit]
+
+        for target, base in list(commands.items()):
+            if not isinstance(base, dict):
+                continue
+            cmd = dict(base)
+            for field, limit in (
+                ("api_endpoints", 12),
+                ("service_names", 12),
+                ("code_artifacts", 16),
+                ("class_names", 16),
+                ("database_tables", 20),
+                ("monitor_items", 16),
+                ("dependency_services", 16),
+                ("trace_ids", 8),
+                ("error_keywords", 12),
+            ):
+                values = leads.get(field)
+                if isinstance(values, list) and values:
+                    _merge_values(cmd, field, values, limit=limit)
+
+            if target == "LogAgent":
+                if not str(cmd.get("focus") or "").strip():
+                    focus_bits = []
+                    if cmd.get("api_endpoints"):
+                        focus_bits.append(f"围绕接口调用链: {', '.join(cmd['api_endpoints'][:2])}")
+                    if cmd.get("trace_ids"):
+                        focus_bits.append(f"追踪 Trace: {', '.join(cmd['trace_ids'][:3])}")
+                    if cmd.get("error_keywords"):
+                        focus_bits.append(f"异常关键词: {', '.join(cmd['error_keywords'][:4])}")
+                    cmd["focus"] = "；".join(focus_bits)
+                if not str(cmd.get("expected_output") or "").strip():
+                    cmd["expected_output"] = "输出接口/Trace 维度的错误时间线、关键日志片段、上下游异常链路"
+            elif target == "DomainAgent":
+                if not str(cmd.get("focus") or "").strip():
+                    focus_bits = []
+                    if cmd.get("api_endpoints"):
+                        focus_bits.append(f"确认接口归属: {', '.join(cmd['api_endpoints'][:2])}")
+                    if leads.get("domain") or leads.get("aggregate"):
+                        focus_bits.append(f"领域/聚合根: {leads.get('domain') or '-'} / {leads.get('aggregate') or '-'}")
+                    if cmd.get("dependency_services"):
+                        focus_bits.append(f"下游服务: {', '.join(cmd['dependency_services'][:4])}")
+                    cmd["focus"] = "；".join(focus_bits)
+                if not str(cmd.get("expected_output") or "").strip():
+                    cmd["expected_output"] = "输出责任田归属、业务链路、上下游依赖与责任团队判断"
+            elif target == "CodeAgent":
+                if not str(cmd.get("focus") or "").strip():
+                    focus_bits = []
+                    if cmd.get("class_names"):
+                        focus_bits.append(f"类名检索: {', '.join(cmd['class_names'][:4])}")
+                    if cmd.get("code_artifacts"):
+                        focus_bits.append(f"代码线索: {', '.join(cmd['code_artifacts'][:4])}")
+                    if cmd.get("api_endpoints"):
+                        focus_bits.append(f"接口入口: {', '.join(cmd['api_endpoints'][:2])}")
+                    cmd["focus"] = "；".join(focus_bits)
+                if not str(cmd.get("expected_output") or "").strip():
+                    cmd["expected_output"] = "输出相关代码文件、入口类/服务类、可疑调用链与回归风险点"
+            elif target == "DatabaseAgent":
+                if not str(cmd.get("focus") or "").strip():
+                    cmd["focus"] = f"优先检查责任田映射表: {', '.join((cmd.get('database_tables') or [])[:8])}"
+                if not str(cmd.get("expected_output") or "").strip():
+                    cmd["expected_output"] = "输出各目标表的 Meta、索引、疑似慢 SQL 与会话阻塞信号"
+            elif target == "MetricsAgent":
+                if not str(cmd.get("focus") or "").strip():
+                    focus_bits = []
+                    if cmd.get("monitor_items"):
+                        focus_bits.append(f"监控项: {', '.join(cmd['monitor_items'][:4])}")
+                    if cmd.get("service_names"):
+                        focus_bits.append(f"服务: {', '.join(cmd['service_names'][:4])}")
+                    if cmd.get("api_endpoints"):
+                        focus_bits.append(f"接口: {', '.join(cmd['api_endpoints'][:2])}")
+                    cmd["focus"] = "；".join(focus_bits)
+                if not str(cmd.get("expected_output") or "").strip():
+                    cmd["expected_output"] = "输出异常指标窗口、阈值变化、接口与资源信号的相关性"
+            elif target == "ChangeAgent":
+                if not str(cmd.get("focus") or "").strip():
+                    focus_bits = []
+                    if cmd.get("service_names"):
+                        focus_bits.append(f"服务变更: {', '.join(cmd['service_names'][:4])}")
+                    if cmd.get("code_artifacts"):
+                        focus_bits.append(f"代码路径: {', '.join(cmd['code_artifacts'][:4])}")
+                    cmd["focus"] = "；".join(focus_bits)
+                if not str(cmd.get("expected_output") or "").strip():
+                    cmd["expected_output"] = "输出故障窗口前后的发布、提交与配置变化候选"
+            elif target == "RunbookAgent":
+                if not str(cmd.get("focus") or "").strip():
+                    focus_bits = []
+                    if leads.get("domain") or leads.get("aggregate"):
+                        focus_bits.append(f"领域/聚合根: {leads.get('domain') or '-'} / {leads.get('aggregate') or '-'}")
+                    if cmd.get("api_endpoints"):
+                        focus_bits.append(f"接口: {', '.join(cmd['api_endpoints'][:2])}")
+                    if cmd.get("error_keywords"):
+                        focus_bits.append(f"故障模式: {', '.join(cmd['error_keywords'][:4])}")
+                    cmd["focus"] = "；".join(focus_bits)
+                if not str(cmd.get("expected_output") or "").strip():
+                    cmd["expected_output"] = "输出匹配的 SOP、相似案例、止血动作与验证步骤"
+            commands[target] = cmd
         return commands
 
     def _enrich_agent_commands_with_skill_hints(
@@ -1109,6 +1438,7 @@ class LangGraphRuntimeOrchestrator:
         commands: Dict[str, Dict[str, Any]],
         compact_context: Dict[str, Any],
     ) -> Dict[str, Dict[str, Any]]:
+        """把 skill 产生的提示语补到各 Agent 命令里。"""
         if not isinstance(commands, dict):
             return {}
 
@@ -1151,6 +1481,7 @@ class LangGraphRuntimeOrchestrator:
             default_skill_by_agent.setdefault("CriticAgent", []).append("architectural-critique")
 
         def _normalize_hints(value: Any) -> List[str]:
+            """把候选提示语清洗成适合注入命令的数组。"""
             if not isinstance(value, list):
                 return []
             picks: List[str] = []
@@ -1182,8 +1513,19 @@ class LangGraphRuntimeOrchestrator:
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         existing_agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        """
+        运行主 Agent 的“任务分发”阶段。
+
+        这里的职责不是给出最终根因，而是：
+        1. 先向前端发一条主 Agent 开场消息。
+        2. 构造 commander prompt，让模型生成专家分工方案。
+        3. 记录本轮 turn，并把输出解析成标准化 agent commands。
+        4. 再把责任田映射与默认 skill hints 注入命令，供后续专家执行。
+        """
         spec = self._problem_analysis_agent_spec()
         round_number = len(self.turns) + 1
+        # 这条消息只是给用户一个“主 Agent 已开始拆解问题”的可见锚点，
+        # 真正的命令内容仍以后续结构化 payload 为准。
         await self._emit_event(
             {
                 "type": "agent_chat_message",
@@ -1207,6 +1549,8 @@ class LangGraphRuntimeOrchestrator:
             dialogue_items=dialogue_items,
             existing_agent_outputs=existing_agent_outputs,
         )
+        # commander 结果必须先落成 turn，再做命令提取；这样前端轨迹和审计链路
+        # 才能解释“为什么会下发这些命令”。
         turn = await self._agent_runner.run_agent(
             spec=spec,
             prompt=prompt,
@@ -1217,6 +1561,9 @@ class LangGraphRuntimeOrchestrator:
         await self._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
 
         payload = turn.output_content if isinstance(turn.output_content, dict) else {}
+        # 命令提取后还会追加两层系统增强：
+        # 1. 责任田映射出的接口、表名、类名等调查线索
+        # 2. 针对不同 Agent 的默认 skill hints
         commands = self._extract_agent_commands_from_payload(payload, fill_defaults=True)
         commands = self._enrich_agent_commands_with_asset_mapping(commands, compact_context)
         commands = self._enrich_agent_commands_with_skill_hints(commands, compact_context)
@@ -1226,6 +1573,9 @@ class LangGraphRuntimeOrchestrator:
             "next_agent": str(payload.get("next_agent") or "").strip(),
             "should_stop": bool(payload.get("should_stop") or False),
             "stop_reason": str(payload.get("stop_reason") or "").strip(),
+            "should_pause_for_review": bool(payload.get("should_pause_for_review") or False),
+            "review_reason": str(payload.get("review_reason") or "").strip(),
+            "review_payload": payload.get("review_payload") if isinstance(payload.get("review_payload"), dict) else {},
         }
 
     async def _run_problem_analysis_supervisor_router(
@@ -1239,6 +1589,14 @@ class LangGraphRuntimeOrchestrator:
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         existing_agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        """
+        运行主 Agent 的监督路由阶段。
+
+        当一轮并行分析结束后，这里负责判断：
+        - 是继续拉起新的专家补证
+        - 还是进入 Judge / finalize
+        - 还是触发人工审核暂停
+        """
         spec = self._problem_analysis_agent_spec()
         round_number = len(self.turns) + 1
         # Avoid repetitive commander placeholder messages on every supervisor step.
@@ -1299,6 +1657,9 @@ class LangGraphRuntimeOrchestrator:
             "next_agent": next_agent,
             "should_stop": bool(payload.get("should_stop") or False),
             "stop_reason": str(payload.get("stop_reason") or "").strip(),
+            "should_pause_for_review": bool(payload.get("should_pause_for_review") or False),
+            "review_reason": str(payload.get("review_reason") or "").strip(),
+            "review_payload": payload.get("review_payload") if isinstance(payload.get("review_payload"), dict) else {},
         }
 
     async def _emit_agent_command_issued(
@@ -1309,18 +1670,43 @@ class LangGraphRuntimeOrchestrator:
         round_number: int,
         command: Dict[str, Any],
     ) -> None:
+        """执行发射Agentcommandissued，并同步更新运行时状态、持久化结果或审计轨迹。"""
         command_text = str(command.get("task") or "").strip() or f"请完成 {target} 维度分析"
         focus = str(command.get("focus") or "").strip()
         expected = str(command.get("expected_output") or "").strip()
         use_tool = command.get("use_tool")
         database_tables = self._normalize_database_tables(command.get("database_tables"))
+        api_endpoints = self._normalize_text_items(command.get("api_endpoints"), limit=12, width=180)
+        service_names = self._normalize_text_items(command.get("service_names"), limit=12, width=120)
+        code_artifacts = self._normalize_text_items(command.get("code_artifacts"), limit=16, width=180)
+        class_names = self._normalize_text_items(command.get("class_names"), limit=16, width=120)
+        monitor_items = self._normalize_text_items(command.get("monitor_items"), limit=16, width=160)
+        dependency_services = self._normalize_text_items(command.get("dependency_services"), limit=16, width=120)
+        trace_ids = self._normalize_text_items(command.get("trace_ids"), limit=8, width=120)
+        error_keywords = self._normalize_text_items(command.get("error_keywords"), limit=12, width=120)
         message_parts = [f"{commander} 指令 {target}: {command_text}"]
         if focus:
             message_parts.append(f"重点: {focus}")
         if expected:
             message_parts.append(f"输出: {expected}")
+        if api_endpoints:
+            message_parts.append(f"接口: {', '.join(api_endpoints[:3])}")
+        if service_names:
+            message_parts.append(f"服务: {', '.join(service_names[:4])}")
+        if class_names:
+            message_parts.append(f"类名: {', '.join(class_names[:4])}")
+        if code_artifacts:
+            message_parts.append(f"代码线索: {', '.join(code_artifacts[:4])}")
         if database_tables:
             message_parts.append(f"目标表: {', '.join(database_tables[:8])}")
+        if monitor_items:
+            message_parts.append(f"监控项: {', '.join(monitor_items[:4])}")
+        if dependency_services:
+            message_parts.append(f"依赖服务: {', '.join(dependency_services[:4])}")
+        if trace_ids:
+            message_parts.append(f"Trace: {', '.join(trace_ids[:3])}")
+        if error_keywords:
+            message_parts.append(f"异常关键词: {', '.join(error_keywords[:4])}")
         if isinstance(use_tool, bool):
             message_parts.append(f"工具调用: {'允许' if use_tool else '禁止'}")
         agent_message = AgentMessage(
@@ -1333,6 +1719,14 @@ class LangGraphRuntimeOrchestrator:
                 "expected_output": expected,
                 "use_tool": use_tool,
                 "database_tables": database_tables,
+                "api_endpoints": api_endpoints,
+                "service_names": service_names,
+                "code_artifacts": code_artifacts,
+                "class_names": class_names,
+                "monitor_items": monitor_items,
+                "dependency_services": dependency_services,
+                "trace_ids": trace_ids,
+                "error_keywords": error_keywords,
             },
         )
         await self._emit_event(
@@ -1346,6 +1740,14 @@ class LangGraphRuntimeOrchestrator:
                 "command": command_text,
                 "use_tool": use_tool,
                 "database_tables": database_tables,
+                "api_endpoints": api_endpoints,
+                "service_names": service_names,
+                "code_artifacts": code_artifacts,
+                "class_names": class_names,
+                "monitor_items": monitor_items,
+                "dependency_services": dependency_services,
+                "trace_ids": trace_ids,
+                "error_keywords": error_keywords,
                 "message": "\n".join(message_parts),
                 "agent_message": agent_message.model_dump(mode="json"),
                 "session_id": self.session_id,
@@ -1360,8 +1762,13 @@ class LangGraphRuntimeOrchestrator:
         command: Dict[str, Any],
         turn: DebateTurn,
     ) -> None:
+        """执行发射Agentcommandfeedback，并同步更新运行时状态、持久化结果或审计轨迹。"""
         output = turn.output_content if isinstance(turn.output_content, dict) else {}
         feedback_text = str(output.get("chat_message") or output.get("conclusion") or "")[:300]
+        degraded = bool(output.get("degraded"))
+        evidence_status = str(output.get("evidence_status") or ("degraded" if degraded else "collected")).strip() or "collected"
+        tool_status = str(output.get("tool_status") or "").strip()
+        degrade_reason = str(output.get("degrade_reason") or "").strip()
         agent_message = AgentMessage(
             sender=source,
             receiver="ProblemAnalysisAgent",
@@ -1370,6 +1777,10 @@ class LangGraphRuntimeOrchestrator:
                 "command": str(command.get("task") or "")[:240],
                 "feedback": feedback_text,
                 "confidence": float(turn.confidence or 0.0),
+                "degraded": degraded,
+                "evidence_status": evidence_status,
+                "tool_status": tool_status,
+                "degrade_reason": degrade_reason,
             },
         )
         await self._emit_event(
@@ -1382,10 +1793,14 @@ class LangGraphRuntimeOrchestrator:
                 "round_number": round_number,
                 "command": str(command.get("task") or "")[:240],
                 "feedback": feedback_text,
-                "message": f"{source} 已执行主Agent命令并提交结论",
+                "message": f"{source} 已提交降级反馈" if degraded else f"{source} 已执行主Agent命令并提交结论",
                 "agent_message": agent_message.model_dump(mode="json"),
                 "session_id": self.session_id,
                 "confidence": float(turn.confidence or 0.0),
+                "degraded": degraded,
+                "evidence_status": evidence_status,
+                "tool_status": tool_status,
+                "degrade_reason": degrade_reason,
             }
         )
 
@@ -1394,6 +1809,7 @@ class LangGraphRuntimeOrchestrator:
         loop_round: int,
         history_cards: Optional[List[AgentEvidence]] = None,
     ) -> None:
+        """执行发射problem分析final摘要，并同步更新运行时状态、持久化结果或审计轨迹。"""
         judge_turn = next((turn for turn in reversed(self.turns) if turn.agent_name == "JudgeAgent"), None)
         if not judge_turn:
             return
@@ -1457,6 +1873,12 @@ class LangGraphRuntimeOrchestrator:
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         agent_mailbox: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ) -> None:
+        """
+        把并行分析阶段委托给 `PhaseExecutor`。
+
+        当前 orchestrator 只保留阶段入口和上下文拼装职责，真正的批次拆分、
+        并发控制、优先级调度和失败降级都下沉到 `PhaseExecutor` 内部。
+        """
         await self._phase_executor.run_parallel_analysis_phase(
             loop_round=loop_round,
             compact_context=compact_context,
@@ -1474,6 +1896,7 @@ class LangGraphRuntimeOrchestrator:
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         agent_mailbox: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ) -> None:
+        """把专家协作阶段委托给 `PhaseExecutor` 统一执行。"""
         await self._phase_executor.run_collaboration_phase(
             loop_round=loop_round,
             compact_context=compact_context,
@@ -1483,28 +1906,64 @@ class LangGraphRuntimeOrchestrator:
         )
 
     async def _graph_finalize(self, state: _DebateExecState) -> _DebateExecState:
+        """
+        执行图收尾阶段。
+
+        这里统一处理三类收尾：
+        1. 正常完成，输出 final payload
+        2. 命中人工审核，进入 waiting_review
+        3. 其他异常或缺口场景下的兜底收口，确保会话进入明确终态
+        """
         history_cards = self._history_cards_for_state(state, limit=24)
         consensus_reached = bool(state.get("consensus_reached") or False)
         executed_rounds = int(state.get("executed_rounds") or state.get("current_round") or 0)
+        awaiting_human_review = bool(state.get("awaiting_human_review") or False)
+        human_review_reason = str(state.get("human_review_reason") or "").strip()
+        human_review_payload = dict(state.get("human_review_payload") or {})
+        resume_from_step = str(state.get("resume_from_step") or "report_generation").strip()
         final_payload = dict(state.get("final_payload") or {})
         if not final_payload:
+            # finalize 是最后一道兜底门。即便中间节点没有显式写入 final_payload，
+            # 这里也必须补出完整结果对象，避免前端和报告页拿到空结果。
             final_payload = self._build_final_payload(
                 history_cards=history_cards,
                 consensus_reached=consensus_reached,
                 executed_rounds=executed_rounds,
             )
-        await runtime_session_store.complete(
-            str(self.session_id),
-            FinalVerdict.model_validate(final_payload.get("final_judgment") or {}),
-        )
-        await self._emit_event(
-            {
-                "type": "runtime_debate_completed",
-                "confidence": final_payload.get("confidence", 0.0),
-                "consensus_reached": consensus_reached,
-                "mode": "langgraph_runtime",
+        if awaiting_human_review:
+            final_payload["awaiting_human_review"] = True
+            final_payload["human_review"] = {
+                "reason": human_review_reason,
+                "payload": human_review_payload,
+                "resume_from_step": resume_from_step,
             }
-        )
+            await runtime_session_store.mark_waiting_review(
+                str(self.session_id),
+                FinalVerdict.model_validate(final_payload.get("final_judgment") or {}),
+            )
+            await self._emit_event(
+                {
+                    "type": "runtime_human_review_requested",
+                    "confidence": final_payload.get("confidence", 0.0),
+                    "consensus_reached": consensus_reached,
+                    "mode": "langgraph_runtime",
+                    "review_reason": human_review_reason,
+                    "resume_from_step": resume_from_step,
+                }
+            )
+        else:
+            await runtime_session_store.complete(
+                str(self.session_id),
+                FinalVerdict.model_validate(final_payload.get("final_judgment") or {}),
+            )
+            await self._emit_event(
+                {
+                    "type": "runtime_debate_completed",
+                    "confidence": final_payload.get("confidence", 0.0),
+                    "consensus_reached": consensus_reached,
+                    "mode": "langgraph_runtime",
+                }
+            )
         next_state = {"final_payload": final_payload}
         merged_preview = {**dict(state), **next_state}
         return {**next_state, **structured_state_snapshot(merged_preview)}
@@ -1519,6 +1978,7 @@ class LangGraphRuntimeOrchestrator:
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         inbox_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
+        """组装 peer-driven 协作 Prompt。"""
         return self._prompt_builder.build_peer_driven_prompt(
             spec=spec,
             loop_round=loop_round,
@@ -1537,6 +1997,7 @@ class LangGraphRuntimeOrchestrator:
         limit: int,
     ) -> List[Dict[str, Any]]:
         # compatibility shim: moved to context_builders.collect_peer_items_from_dialogue
+        """从对话流中抽取可复用的同伴结论条目。"""
         return collect_peer_items_from_dialogue_ctx(
             dialogue_items=dialogue_items,
             exclude_agent=exclude_agent,
@@ -1550,6 +2011,7 @@ class LangGraphRuntimeOrchestrator:
         limit: int,
     ) -> List[Dict[str, Any]]:
         # compatibility shim: moved to context_builders.collect_peer_items_from_cards
+        """聚合历史卡片和对话摘要，形成协作阶段的 peer items。"""
         return collect_peer_items_from_cards_ctx(
             history_cards=history_cards,
             exclude_agent=exclude_agent,
@@ -1557,6 +2019,7 @@ class LangGraphRuntimeOrchestrator:
         )
 
     def _judge_output_schema(self) -> Dict[str, Any]:
+        """返回 JudgeAgent 的结构化输出 Schema。"""
         return judge_output_schema_template()
 
     def _latest_cards_for_agents(
@@ -1565,6 +2028,7 @@ class LangGraphRuntimeOrchestrator:
         agent_names: List[str],
         limit: int,
     ) -> List[AgentEvidence]:
+        """返回指定 Agent 最近若干张卡片，供 Prompt 和路由复用。"""
         wanted = set(agent_names)
         latest_by_agent: Dict[str, AgentEvidence] = {}
         for card in reversed(history_cards):
@@ -1587,6 +2051,7 @@ class LangGraphRuntimeOrchestrator:
         loop_round: int,
         error_text: str,
     ) -> DebateTurn:
+        """构造通用降级 turn，表示本轮执行未拿到完整结果。"""
         friendly_reason = self._friendly_degrade_reason(error_text)
         await self._emit_event(
             {
@@ -1612,6 +2077,18 @@ class LangGraphRuntimeOrchestrator:
                 f"{spec.name} {friendly_reason}",
             )
         )
+        fallback_output["degraded"] = True
+        fallback_output["degrade_reason"] = friendly_reason
+        fallback_output["evidence_status"] = "degraded"
+        fallback_output["tool_status"] = "unknown"
+        fallback_output["next_checks"] = list(
+            dict.fromkeys(
+                [
+                    *list(fallback_output.get("next_checks") or []),
+                    f"重试 {spec.name} 并重新采集关键证据",
+                ]
+            )
+        )[:6]
         now = datetime.utcnow()
         return DebateTurn(
             round_number=round_number,
@@ -1626,8 +2103,70 @@ class LangGraphRuntimeOrchestrator:
             completed_at=now,
         )
 
+    async def _create_missing_evidence_turn(
+        self,
+        *,
+        spec: AgentSpec,
+        prompt: str,
+        round_number: int,
+        loop_round: int,
+        tool_name: str,
+        tool_status: str,
+        reason: str,
+    ) -> DebateTurn:
+        """构造关键证据缺失时的受限分析 turn。"""
+        await self._emit_event(
+            {
+                "type": "agent_round_skipped",
+                "phase": spec.phase,
+                "agent_name": spec.name,
+                "agent_role": spec.role,
+                "loop_round": loop_round,
+                "round_number": round_number,
+                "reason": reason,
+                "skip_mode": "tool_unavailable",
+                "tool_name": tool_name,
+                "tool_status": tool_status,
+                "session_id": self.session_id,
+            }
+        )
+        status_text = tool_status or "unavailable"
+        analysis = (
+            f"{spec.name} 需要依赖 {tool_name or '关键工具'} 采集实时证据，但当前工具状态为 {status_text}，"
+            "本轮未完成真实证据检索。"
+        )
+        payload = {
+            "chat_message": f"我收到了排查命令，但 {tool_name or '关键工具'} 当前{status_text}，只能先标记证据缺失。",
+            "analysis": analysis,
+            "conclusion": f"{spec.name} 证据未采集完成：{reason}",
+            "evidence_chain": [],
+            "counter_evidence": [],
+            "next_checks": [f"恢复 {tool_name or '对应工具'} 后重试 {spec.name}"],
+            "confidence": 0.22,
+            "degraded": True,
+            "degrade_reason": reason,
+            "evidence_status": "missing",
+            "tool_status": status_text,
+            "tool_name": tool_name,
+            "raw_text": analysis[:1200],
+        }
+        now = datetime.utcnow()
+        return DebateTurn(
+            round_number=round_number,
+            phase=spec.phase,
+            agent_name=spec.name,
+            agent_role=spec.role,
+            model={"name": settings.llm_model},
+            input_message=prompt,
+            output_content=payload,
+            confidence=float(payload.get("confidence", 0.0) or 0.0),
+            started_at=now,
+            completed_at=now,
+        )
+
     @staticmethod
     def _friendly_degrade_reason(error_text: str) -> str:
+        """把内部降级原因转换成前端可读的说明文案。"""
         normalized = str(error_text or "").strip().lower()
         if "timeout" in normalized:
             return "调用超时，已降级继续"
@@ -1641,6 +2180,7 @@ class LangGraphRuntimeOrchestrator:
         return "调用异常，已降级继续"
 
     def _history_cards_snapshot(self, limit: int = 8) -> List[AgentEvidence]:
+        """抓取当前 state 的历史卡片快照，避免后续逻辑误读可变对象。"""
         cards: List[AgentEvidence] = []
         for turn in self.turns[-max(1, limit) :]:
             output = turn.output_content if isinstance(turn.output_content, dict) else {}
@@ -1657,11 +2197,186 @@ class LangGraphRuntimeOrchestrator:
             )
         return cards
 
+    @staticmethod
+    def _is_degraded_output(payload: Any) -> bool:
+        """判断某个输出是否属于降级或受限分析结果。"""
+        if not isinstance(payload, dict):
+            return False
+        if bool(payload.get("degraded")):
+            return True
+        evidence_status = str(payload.get("evidence_status") or "").strip().lower()
+        if evidence_status in {"degraded", "missing", "inferred_without_tool"}:
+            return True
+        conclusion = str(payload.get("conclusion") or "").strip().lower()
+        return "调用超时，已降级继续" in conclusion or "调用异常，已降级继续" in conclusion
+
+    @staticmethod
+    def _tool_limited_status(
+        *,
+        spec: AgentSpec,
+        assigned_command: Optional[Dict[str, Any]],
+        context_with_tools: Dict[str, Any],
+    ) -> Optional[Dict[str, str]]:
+        """提取工具受限状态，供质量门禁和前端提示复用。"""
+        if spec.name not in LangGraphRuntimeOrchestrator.KEY_EVIDENCE_AGENTS:
+            return None
+        if not isinstance(assigned_command, dict) or not assigned_command:
+            return None
+        tool_ctx = context_with_tools.get("tool_context")
+        if not isinstance(tool_ctx, dict):
+            return None
+        command_gate = tool_ctx.get("command_gate")
+        if not isinstance(command_gate, dict):
+            command_gate = {}
+        if not bool(command_gate.get("has_command")) or not bool(command_gate.get("allow_tool")):
+            return None
+        status = str(tool_ctx.get("status") or "").strip().lower()
+        used = bool(tool_ctx.get("used"))
+        if used and status == "ok":
+            return None
+        if status not in {"disabled", "unavailable", "error", "failed", "timeout"}:
+            return None
+        summary = str(tool_ctx.get("summary") or "").strip()
+        tool_name = str(tool_ctx.get("name") or "").strip()
+        reason = summary or str(command_gate.get("reason") or "").strip() or f"{tool_name or '关键工具'} 当前不可用"
+        return {
+            "tool_name": tool_name,
+            "tool_status": status,
+            "reason": reason,
+        }
+
+    def _collect_missing_leads_for_agent(
+        self,
+        *,
+        agent_name: str,
+        context_with_tools: Dict[str, Any],
+    ) -> List[str]:
+        """收集当前 Agent 还缺失的关键调查线索。"""
+        leads = context_with_tools.get("investigation_leads")
+        if not isinstance(leads, dict):
+            tool_ctx = context_with_tools.get("tool_context")
+            data = tool_ctx.get("data") if isinstance(tool_ctx, dict) else None
+            leads = data.get("investigation_leads") if isinstance(data, dict) else {}
+        if not isinstance(leads, dict):
+            leads = {}
+        key_map = {
+            "LogAgent": ("api_endpoints", "trace_ids", "error_keywords"),
+            "CodeAgent": ("class_names", "code_artifacts", "api_endpoints", "service_names"),
+            "DatabaseAgent": ("database_tables", "api_endpoints", "service_names"),
+            "MetricsAgent": ("monitor_items", "service_names", "api_endpoints"),
+        }
+        values: List[str] = []
+        for key in key_map.get(agent_name, ()):
+            raw_items = leads.get(key)
+            if not isinstance(raw_items, list):
+                continue
+            for item in raw_items[:3]:
+                text = str(item or "").strip()
+                if text:
+                    values.append(text[:140])
+        deduped = list(dict.fromkeys(values))
+        return deduped[:4]
+
+    def _apply_tool_limited_semantics(
+        self,
+        *,
+        turn: DebateTurn,
+        spec: AgentSpec,
+        assigned_command: Optional[Dict[str, Any]],
+        context_with_tools: Dict[str, Any],
+    ) -> DebateTurn:
+        """把工具受限语义补到输出里，供前端和 Judge 正确识别。"""
+        limited = self._tool_limited_status(
+            spec=spec,
+            assigned_command=assigned_command,
+            context_with_tools=context_with_tools,
+        )
+        if limited is None:
+            return turn
+        payload = dict(turn.output_content or {})
+        tool_name = limited["tool_name"]
+        tool_status = limited["tool_status"]
+        reason = limited["reason"]
+        missing_leads = self._collect_missing_leads_for_agent(
+            agent_name=spec.name,
+            context_with_tools=context_with_tools,
+        )
+        existing_missing = payload.get("missing_info")
+        missing_info = list(existing_missing) if isinstance(existing_missing, list) else []
+        if tool_name:
+            missing_info.append(f"{tool_name} 实时取证结果")
+        missing_info.extend(missing_leads)
+        next_checks = payload.get("next_checks")
+        if not isinstance(next_checks, list):
+            next_checks = []
+        next_checks = list(next_checks)
+        next_checks.extend(
+            [
+                f"恢复 {tool_name or '关键工具'} 后补采 {spec.name} 所需证据",
+                f"复核 {spec.name} 当前基于已有证据得出的受限结论",
+            ]
+        )
+        analysis = str(payload.get("analysis") or "").strip()
+        conclusion = str(payload.get("conclusion") or "").strip()
+        chat_message = str(payload.get("chat_message") or "").strip()
+        if analysis:
+            analysis = f"{analysis}\n\n受限分析说明：{reason}。本结论仅基于当前已有证据推理，未包含实时工具取证结果。"
+        else:
+            analysis = f"{spec.name} 当前无法使用 {tool_name or '关键工具'} 进行实时取证，已基于已有证据完成受限分析。限制原因：{reason}。"
+        if conclusion:
+            conclusion = f"{conclusion}（受限分析：{tool_name or '关键工具'} {tool_status}）"
+        else:
+            conclusion = f"{spec.name} 基于已有证据给出受限分析结论，但 {tool_name or '关键工具'} 当前{tool_status}。"
+        if chat_message:
+            chat_message = f"{chat_message} 当前工具不可用，我先基于已有证据给出受限判断。"
+        else:
+            chat_message = f"{tool_name or '关键工具'} 当前{tool_status}，我先基于已有证据给出受限分析。"
+        confidence = float(payload.get("confidence", turn.confidence) or turn.confidence or 0.0)
+        confidence = min(confidence, 0.58)
+        confidence = max(confidence, 0.18)
+        payload.update(
+            {
+                "chat_message": chat_message,
+                "analysis": analysis,
+                "conclusion": conclusion,
+                "confidence": confidence,
+                "degraded": True,
+                "degrade_reason": reason,
+                "evidence_status": "inferred_without_tool",
+                "tool_status": tool_status,
+                "tool_name": tool_name,
+                "missing_info": list(dict.fromkeys(str(item).strip() for item in missing_info if str(item).strip()))[:6],
+                "next_checks": list(dict.fromkeys(str(item).strip() for item in next_checks if str(item).strip()))[:6],
+            }
+        )
+        return replace(turn, output_content=payload, confidence=confidence)
+
+    @staticmethod
+    def _count_key_evidence_coverage(history_cards: List[AgentEvidence]) -> Dict[str, int]:
+        """计算统计keyevidencecoverage，为治理、裁决或展示提供量化依据。"""
+        coverage = {"ok": 0, "degraded": 0, "missing": 0}
+        seen: set[str] = set()
+        for card in history_cards:
+            name = str(card.agent_name or "").strip()
+            if name not in LangGraphRuntimeOrchestrator.KEY_EVIDENCE_AGENTS or name in seen:
+                continue
+            seen.add(name)
+            output = card.raw_output if isinstance(getattr(card, "raw_output", None), dict) else {}
+            evidence_status = str(output.get("evidence_status") or "").strip().lower()
+            if evidence_status == "missing":
+                coverage["missing"] += 1
+            elif LangGraphRuntimeOrchestrator._is_degraded_output(output):
+                coverage["degraded"] += 1
+            else:
+                coverage["ok"] += 1
+        return coverage
+
     def _infer_reply_target(
         self,
         spec_name: str,
         history_cards: List[AgentEvidence],
     ) -> Optional[str]:
+        """从消息或输出结构里推断 reply_to 的目标 Agent。"""
         if spec_name == "ProblemAnalysisAgent":
             return "all"
         if spec_name == "JudgeAgent":
@@ -1681,6 +2396,7 @@ class LangGraphRuntimeOrchestrator:
         loop_round: int,
         history_cards: List[AgentEvidence],
     ) -> None:
+        """执行记录turn，并同步更新运行时状态、持久化结果或审计轨迹。"""
         self.turns.append(turn)
         card = AgentEvidence(
             agent_name=turn.agent_name,
@@ -1722,9 +2438,11 @@ class LangGraphRuntimeOrchestrator:
         )
 
     def _agent_sequence(self) -> List[AgentSpec]:
+        """返回当前部署配置下启用的 Agent 执行顺序。"""
         return build_agent_sequence(enable_critique=bool(self._enable_critique))
 
     def _evidence_texts(self, raw_items: Any, *, limit: int = 3) -> List[str]:
+        """从历史卡片中抽取可直接放入 Prompt 的证据文本。"""
         if not isinstance(raw_items, list):
             return []
         texts: List[str] = []
@@ -1749,6 +2467,7 @@ class LangGraphRuntimeOrchestrator:
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         inbox_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
+        """组装单个专家 Agent 的执行 Prompt。"""
         return self._prompt_builder.build_agent_prompt(
             spec=spec,
             loop_round=loop_round,
@@ -1770,6 +2489,7 @@ class LangGraphRuntimeOrchestrator:
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         inbox_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
+        """组装协作阶段使用的 Prompt。"""
         return self._prompt_builder.build_collaboration_prompt(
             spec=spec,
             loop_round=loop_round,
@@ -1782,6 +2502,7 @@ class LangGraphRuntimeOrchestrator:
         )
 
     def _work_log_context(self, *, limit: int = 16) -> Dict[str, Any]:
+        """裁剪工作日志，生成可放入 Prompt 的轻量上下文。"""
         return self._work_log_manager.build_context(str(self.session_id or ""), limit=limit)
 
     def _history_items_for_agent_prompt(
@@ -1793,6 +2514,7 @@ class LangGraphRuntimeOrchestrator:
         limit: int,
     ) -> List[Dict[str, Any]]:
         # compatibility shim: moved to context_builders.history_items_for_agent_prompt
+        """整理单 Agent Prompt 需要看到的历史条目摘要。"""
         return history_items_for_agent_prompt_ctx(
             agent_name=agent_name,
             history_cards=history_cards,
@@ -1809,6 +2531,7 @@ class LangGraphRuntimeOrchestrator:
         limit: int,
     ) -> List[Dict[str, Any]]:
         # compatibility shim: moved to context_builders.peer_items_for_collaboration_prompt
+        """整理协作 Prompt 需要的同伴结论条目。"""
         return peer_items_for_collaboration_prompt_ctx(
             spec_name=spec_name,
             peer_cards=peer_cards,
@@ -1817,6 +2540,7 @@ class LangGraphRuntimeOrchestrator:
         )
 
     def _compact_round_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """压缩 round 级上下文，避免 Prompt 被无关历史撑大。"""
         interface_mapping = context.get("interface_mapping")
         if not isinstance(interface_mapping, dict):
             interface_mapping = {}
@@ -1864,6 +2588,27 @@ class LangGraphRuntimeOrchestrator:
                 if value not in (None, "", [], {}):
                     compact_parsed[str(key)] = self._compact_value(value)
 
+        investigation_leads = context.get("investigation_leads")
+        if not isinstance(investigation_leads, dict):
+            investigation_leads = {}
+        compact_leads = {
+            "api_endpoints": self._normalize_text_items(investigation_leads.get("api_endpoints"), limit=12, width=180),
+            "service_names": self._normalize_text_items(investigation_leads.get("service_names"), limit=12, width=120),
+            "code_artifacts": self._normalize_text_items(investigation_leads.get("code_artifacts"), limit=16, width=180),
+            "class_names": self._normalize_text_items(investigation_leads.get("class_names"), limit=16, width=120),
+            "database_tables": self._normalize_database_tables(
+                investigation_leads.get("database_tables") or interface_mapping.get("database_tables") or []
+            ),
+            "monitor_items": self._normalize_text_items(investigation_leads.get("monitor_items"), limit=16, width=160),
+            "dependency_services": self._normalize_text_items(investigation_leads.get("dependency_services"), limit=16, width=120),
+            "trace_ids": self._normalize_text_items(investigation_leads.get("trace_ids"), limit=8, width=120),
+            "error_keywords": self._normalize_text_items(investigation_leads.get("error_keywords"), limit=12, width=120),
+            "domain": str(investigation_leads.get("domain") or interface_mapping.get("domain") or "").strip(),
+            "aggregate": str(investigation_leads.get("aggregate") or interface_mapping.get("aggregate") or "").strip(),
+            "owner_team": str(investigation_leads.get("owner_team") or interface_mapping.get("owner_team") or "").strip(),
+            "owner": str(investigation_leads.get("owner") or interface_mapping.get("owner") or "").strip(),
+        }
+
         return {
             "log_excerpt": str(context.get("log_excerpt") or "")[:240],
             "parsed_data": compact_parsed,
@@ -1882,7 +2627,10 @@ class LangGraphRuntimeOrchestrator:
                 },
                 "database_tables": interface_mapping.get("database_tables") or [],
                 "code_artifacts": (interface_mapping.get("code_artifacts") or [])[:3],
+                "dependency_services": self._normalize_text_items(interface_mapping.get("dependency_services"), limit=16, width=120),
+                "monitor_items": self._normalize_text_items(interface_mapping.get("monitor_items"), limit=16, width=160),
             },
+            "investigation_leads": compact_leads,
             "asset_counts": {
                 "runtime": int(context.get("runtime_assets_count") or 0),
                 "development": int(context.get("dev_assets_count") or 0),
@@ -1899,6 +2647,12 @@ class LangGraphRuntimeOrchestrator:
         round_number: int,
         assigned_command: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        """
+        为指定 Agent 组装带工具结果的执行上下文。
+
+        如果工具构建失败，这里不会直接打断整轮分析，而是发出审计事件后
+        回退到纯上下文模式，让 Agent 仍可基于已有证据执行受限分析。
+        """
         try:
             tool_context = await agent_tool_context_service.build_context(
                 agent_name=agent_name,
@@ -1922,7 +2676,7 @@ class LangGraphRuntimeOrchestrator:
 
         tool_name = str(tool_context.get("name") or "").strip().lower()
         if tool_name in {"", "none"}:
-            # 未配置工具的 Agent 不展示工具调用记录，直接走默认上下文
+            # 未配置外部工具的 Agent 直接沿用 compact_context，避免制造伪造的工具轨迹。
             return compact_context
 
         compact_tool_data = self._compact_value(tool_context.get("data") or {})
@@ -2018,6 +2772,7 @@ class LangGraphRuntimeOrchestrator:
         spec: AgentSpec,
         context_with_tools: Dict[str, Any],
     ) -> AgentSpec:
+        """根据工具状态裁剪 AgentSpec，避免把失效工具继续暴露给模型。"""
         tool_ctx = context_with_tools.get("tool_context")
         if not isinstance(tool_ctx, dict):
             return spec
@@ -2045,6 +2800,7 @@ class LangGraphRuntimeOrchestrator:
         return spec
 
     def _compact_value(self, value: Any) -> Any:
+        """压缩任意值，控制上下文和事件体积。"""
         if isinstance(value, str):
             return value[:140]
         if isinstance(value, (int, float, bool)) or value is None:
@@ -2060,6 +2816,7 @@ class LangGraphRuntimeOrchestrator:
         return str(value)[:140]
 
     def _tool_event_value(self, value: Any, depth: int = 0) -> Any:
+        """把工具执行结果压缩成适合审计事件持久化的值。"""
         if depth >= 4:
             return "..."
         if isinstance(value, str):
@@ -2082,12 +2839,14 @@ class LangGraphRuntimeOrchestrator:
         return str(value)[:600]
 
     def _to_compact_json(self, value: Any) -> str:
+        """把对象序列化成紧凑 JSON，便于日志落盘。"""
         try:
             return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         except Exception:
             return "{}"
 
     def _agent_max_tokens(self, agent_name: str) -> int:
+        """按 Agent 角色返回本轮允许使用的最大 token 预算。"""
         if agent_name == "JudgeAgent":
             configured = int(settings.DEBATE_JUDGE_MAX_TOKENS)
             return max(800, min(configured, 1400))
@@ -2101,6 +2860,7 @@ class LangGraphRuntimeOrchestrator:
         return max(420, min(configured, 800))
 
     def _agent_timeout_plan(self, agent_name: str) -> List[float]:
+        """按 Agent 角色生成 HTTP 超时与重试超时计划。"""
         if agent_name == "JudgeAgent":
             if not self._require_verification_plan:
                 first_timeout = float(max(40, int(settings.llm_judge_timeout)))
@@ -2120,6 +2880,7 @@ class LangGraphRuntimeOrchestrator:
         return [float(max(12, int(settings.llm_analysis_timeout)))]
 
     def _agent_http_timeout(self, agent_name: str) -> int:
+        """返回单次 LLM HTTP 请求允许的最长超时时间。"""
         if agent_name == "JudgeAgent":
             if not self._require_verification_plan:
                 return max(45, min(int(settings.llm_judge_retry_timeout) + 20, 120))
@@ -2129,10 +2890,18 @@ class LangGraphRuntimeOrchestrator:
         return max(15, min(int(settings.llm_analysis_timeout), 90))
 
     def _agent_queue_timeout(self, agent_name: str) -> float:
-        _ = agent_name
-        return float(max(2, int(settings.llm_queue_timeout)))
+        """返回该 Agent 在 LLM 队列里允许等待的最长时间。"""
+        base_timeout = float(max(2, int(settings.llm_queue_timeout)))
+        if agent_name == "JudgeAgent":
+            return float(max(base_timeout + 12.0, 20.0))
+        if agent_name == "ProblemAnalysisAgent":
+            return float(max(base_timeout + 8.0, 18.0))
+        if agent_name in {"CriticAgent", "RebuttalAgent", "VerificationAgent"}:
+            return float(max(base_timeout + 4.0, 16.0))
+        return base_timeout
 
     def _remaining_session_budget_seconds(self) -> Optional[float]:
+        """计算当前会话剩余的总预算秒数。"""
         if self._session_deadline_monotonic is None:
             return None
         return max(0.0, self._session_deadline_monotonic - monotonic())
@@ -2159,6 +2928,7 @@ class LangGraphRuntimeOrchestrator:
         return compact_prompt, compact_tokens, compacted
 
     def _compact_prompt_for_retry(self, prompt: str, max_chars: int) -> str:
+        """在超时重试前压缩 Prompt，减少无效上下文。"""
         text = str(prompt or "")
         limit = max(700, int(max_chars))
         if len(text) <= limit:
@@ -2174,6 +2944,7 @@ class LangGraphRuntimeOrchestrator:
     # Compatibility wrappers: parsing/normalization implementation was moved to
     # app.runtime.langgraph.parsers to keep runtime focused on graph orchestration.
     def _normalize_agent_output(self, agent_name: str, raw_content: str) -> Dict[str, Any]:
+        """把普通 Agent 原始输出解析成统一结构。"""
         return normalize_agent_output_parser(
             agent_name,
             raw_content,
@@ -2181,12 +2952,15 @@ class LangGraphRuntimeOrchestrator:
         )
 
     def _normalize_commander_output(self, parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
+        """把主 Agent 原始输出解析成统一结构。"""
         return normalize_commander_output_parser(parsed, raw_content)
 
     def _normalize_normal_output(self, parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
+        """把普通结构化输出解析成统一格式。"""
         return normalize_normal_output(parsed, raw_content)
 
     def _normalize_judge_output(self, parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
+        """把 Judge 输出解析成最终裁决格式。"""
         return normalize_judge_output(
             parsed,
             raw_content,
@@ -2194,6 +2968,7 @@ class LangGraphRuntimeOrchestrator:
         )
 
     def _is_placeholder_summary(self, summary: str) -> bool:
+        """判断摘要是否仍处于占位态，不能作为最终结论。"""
         text = str(summary or "").strip()
         if not text:
             return True
@@ -2214,9 +2989,12 @@ class LangGraphRuntimeOrchestrator:
         return False
 
     def _synthesize_final_from_history(self, history_cards: List[AgentEvidence]) -> Optional[Dict[str, Any]]:
+        """在缺少 Judge 结果时，从历史卡片合成一个谨慎的最终结论。"""
         candidates: List[AgentEvidence] = []
         for card in history_cards:
             if card.agent_name == "JudgeAgent":
+                continue
+            if self._is_degraded_output(card.raw_output if isinstance(card.raw_output, dict) else {}):
                 continue
             if self._is_placeholder_summary(card.conclusion):
                 continue
@@ -2317,12 +3095,20 @@ class LangGraphRuntimeOrchestrator:
         consensus_reached: bool,
         executed_rounds: int,
     ) -> Dict[str, Any]:
+        """
+        汇总本次会话的最终对外输出。
+
+        优先采用 `JudgeAgent` 的结构化裁决；若 Judge 缺席，则退回到基于
+        历史卡片的保守合成逻辑，确保前端和报告端始终能拿到完整结果对象。
+        """
         judge_turn = next((turn for turn in reversed(self.turns) if turn.agent_name == "JudgeAgent"), None)
         verification_turn = next(
             (turn for turn in reversed(self.turns) if turn.agent_name == "VerificationAgent"),
             None,
         )
 
+        # 第一优先级始终是 Judge 的结构化输出；只有它缺席或输出占位内容时，
+        # 才退回到基于历史卡片的保守合成逻辑。
         if judge_turn:
             output = judge_turn.output_content
             confidence = float(output.get("confidence") or judge_turn.confidence or 0.0)
@@ -2366,6 +3152,7 @@ class LangGraphRuntimeOrchestrator:
             raw_plan = verification_turn.output_content.get("verification_plan")
             if isinstance(raw_plan, list):
                 verification_plan = [item for item in raw_plan if isinstance(item, dict)]
+        # VerificationAgent 的结果只补充验证计划，不覆盖最终根因裁决。
         if isinstance(final_judgment, dict):
             if verification_plan:
                 final_judgment["verification_plan"] = verification_plan
@@ -2377,6 +3164,8 @@ class LangGraphRuntimeOrchestrator:
         if isinstance(root_cause, dict):
             root_summary = str(root_cause.get("summary") or "").strip()
         if self._is_placeholder_summary(root_summary):
+            # 如果 Judge 只返回了占位语句，就从历史专家输出里再做一次保守合成，
+            # 保证最终结果至少落在“低置信但可解释”的级别，而不是空白。
             synthesized = self._synthesize_final_from_history(history_cards)
             if synthesized:
                 confidence = float(synthesized.get("confidence") or confidence or 0.0)
@@ -2384,6 +3173,41 @@ class LangGraphRuntimeOrchestrator:
                 decision_rationale = synthesized.get("decision_rationale") or decision_rationale
                 action_items = synthesized.get("action_items") or action_items
                 responsible_team = synthesized.get("responsible_team") or responsible_team
+
+        coverage = self._count_key_evidence_coverage(history_cards)
+        if coverage["degraded"] + coverage["missing"] >= 2:
+            confidence = min(float(confidence or 0.0), 0.45)
+            if not isinstance(final_judgment, dict):
+                final_judgment = {}
+            risk_assessment = final_judgment.get("risk_assessment")
+            if not isinstance(risk_assessment, dict):
+                risk_assessment = {}
+            factors = [
+                str(item).strip()
+                for item in list(risk_assessment.get("risk_factors") or [])
+                if str(item).strip()
+            ]
+            factors.append(
+                f"关键证据不足：成功={coverage['ok']}，降级={coverage['degraded']}，缺失={coverage['missing']}"
+            )
+            risk_assessment["risk_factors"] = list(dict.fromkeys(factors))[:6]
+            risk_assessment["risk_level"] = "high"
+            final_judgment["risk_assessment"] = risk_assessment
+            if not isinstance(decision_rationale, dict):
+                decision_rationale = {}
+            reasoning = str(decision_rationale.get("reasoning") or "").strip()
+            suffix = "关键证据 Agent 覆盖不足，本轮结论仅作为低置信方向判断。"
+            decision_rationale["reasoning"] = f"{reasoning} {suffix}".strip()
+            if not isinstance(action_items, list):
+                action_items = []
+            action_items = [
+                {
+                    "priority": 1,
+                    "action": "优先恢复失败/缺失的关键证据 Agent（Log/Code/Database/Metrics）并重跑分析",
+                    "owner": "待确认",
+                },
+                *[item for item in action_items if isinstance(item, dict)],
+            ][:3]
 
         dissenting_opinions = [
             {
@@ -2425,18 +3249,21 @@ class LangGraphRuntimeOrchestrator:
 
     @staticmethod
     def _base_url_for_llm() -> str:
+        """标准化 LLM Base URL，统一补齐版本后缀。"""
         base = settings.LLM_BASE_URL.rstrip("/")
         if base.endswith("/v1") or base.endswith("/v3"):
             return base
         return f"{base}/v3"
 
     def _chat_endpoint(self) -> str:
+        """返回当前运行时实际访问的 chat completions 端点。"""
         base = self._base_url_for_llm()
         if base.endswith("/chat/completions"):
             return base
         return f"{base}/chat/completions"
 
     async def _emit_event(self, event: Dict[str, Any]) -> None:
+        """执行发射事件，并同步更新运行时状态、持久化结果或审计轨迹。"""
         self._event_dispatcher.bind(
             trace_id=self.trace_id,
             session_id=str(self.session_id or ""),

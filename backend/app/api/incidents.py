@@ -30,7 +30,7 @@ router = APIRouter()
 # ==================== API 数据模型 ====================
 
 class ExceptionInfo(BaseModel):
-    """异常信息"""
+    """结构化异常信息，用于接收上游告警或表单提交时的异常摘要。"""
     type: str = Field(..., description="异常类型")
     message: str = Field(..., description="异常消息")
     stack_trace: List[str] = Field(default_factory=list, description="堆栈跟踪")
@@ -38,21 +38,21 @@ class ExceptionInfo(BaseModel):
 
 
 class SourceInfo(BaseModel):
-    """来源信息"""
+    """告警/日志来源信息，描述服务、实例和环境。"""
     service_name: str = Field(..., description="服务名称")
     instance_id: Optional[str] = Field(None, description="实例ID")
     environment: Optional[str] = Field(None, description="环境")
 
 
 class RuntimeAssetCreate(BaseModel):
-    """创建运行态资产"""
+    """告警接入时附带的运行态证据载荷。"""
     exception: Optional[ExceptionInfo] = None
     raw_logs: List[str] = Field(default_factory=list, description="原始日志")
     source: SourceInfo = Field(..., description="来源信息")
 
 
 class IncidentCreateRequest(BaseModel):
-    """创建故障事件请求"""
+    """前端创建故障事件时使用的请求模型。"""
     title: str = Field(..., min_length=1, max_length=255, description="故障标题")
     description: Optional[str] = Field(None, description="故障描述")
     severity: Optional[str] = Field(
@@ -72,7 +72,7 @@ class IncidentCreateRequest(BaseModel):
 
 
 class IncidentResponse(BaseModel):
-    """故障事件响应"""
+    """故障事件列表项/基础详情响应。"""
     id: str
     title: str
     description: Optional[str]
@@ -88,11 +88,12 @@ class IncidentResponse(BaseModel):
     resolved_at: Optional[datetime] = None
 
     class Config:
+        """提供模型配置项，统一对象序列化与字段行为。"""
         from_attributes = True
 
 
 class IncidentListResponse(BaseModel):
-    """故障事件列表响应"""
+    """分页故障事件列表响应。"""
     items: List[IncidentResponse]
     total: int
     page: int
@@ -100,7 +101,7 @@ class IncidentListResponse(BaseModel):
 
 
 class IncidentDetailResponse(IncidentResponse):
-    """故障事件详情响应"""
+    """故障事件详情响应，在基础响应上补充原始证据和分析产物。"""
     log_content: Optional[str] = None
     exception_stack: Optional[str] = None
     parsed_data: Optional[dict] = None
@@ -110,6 +111,8 @@ class IncidentDetailResponse(IncidentResponse):
 
 
 class AutoInvestigateResponse(BaseModel):
+    """自动调查任务创建后的回执。"""
+
     incident_id: str
     session_id: str
     task_id: str
@@ -117,6 +120,8 @@ class AutoInvestigateResponse(BaseModel):
 
 
 class AlertIngestRequest(BaseModel):
+    """告警自动拉起调查时的接入请求。"""
+
     alarm_id: str = Field(..., min_length=1, max_length=120)
     service_name: str = Field(..., min_length=1, max_length=120)
     title: str = Field(..., min_length=1, max_length=255)
@@ -139,8 +144,11 @@ class AlertIngestRequest(BaseModel):
     description="创建新的故障事件，并触发分析流程"
 )
 async def create_incident(request: IncidentCreateRequest):
-    """创建故障事件"""
-    # 转换请求模型
+    """创建故障事件。
+
+    这里只负责把 API 输入转换为服务层标准模型，真正的 ID 生成、落库和默认值处理交给 IncidentService。
+    """
+    # 先把 API 层的字符串枚举转换为领域模型，避免服务层感知前端表单细节。
     create_data = IncidentCreateModel(
         title=request.title,
         description=request.description,
@@ -185,7 +193,7 @@ async def list_incidents(
     status: Optional[str] = Query(None, description="按状态筛选"),
     service_name: Optional[str] = Query(None, description="按服务名称筛选"),
 ):
-    """获取故障事件列表"""
+    """分页查询故障事件列表，并支持按状态、严重度、服务名筛选。"""
     status_filter = IncidentStatus(status) if status else None
     severity_filter = IncidentSeverity(severity) if severity else None
     
@@ -231,7 +239,7 @@ async def list_incidents(
     description="根据ID获取故障事件详情"
 )
 async def get_incident(incident_id: str):
-    """获取故障事件详情"""
+    """读取单个故障事件详情。"""
     incident = await incident_service.get_incident(incident_id)
     
     if not incident:
@@ -276,7 +284,7 @@ async def update_incident(
     severity: Optional[str] = None,
     status: Optional[str] = None,
 ):
-    """更新故障事件"""
+    """更新故障事件的基础信息或状态。"""
     update_data = IncidentUpdate(
         title=title,
         description=description,
@@ -316,7 +324,7 @@ async def update_incident(
     description="删除指定的故障事件"
 )
 async def delete_incident(incident_id: str):
-    """删除故障事件"""
+    """删除指定故障事件。"""
     success = await incident_service.delete_incident(incident_id)
     
     if not success:
@@ -336,6 +344,7 @@ async def auto_investigate_incident(
     incident_id: str,
     max_rounds: int = Query(1, ge=1, le=8, description="最大辩论轮次"),
 ):
+    """为指定 incident 自动创建/复用辩论会话，并在后台异步执行调查。"""
     incident = await incident_service.get_incident(incident_id)
     if not incident:
         raise HTTPException(
@@ -364,6 +373,7 @@ async def auto_investigate_incident(
         )
 
     async def _run():
+        """后台任务主体，负责执行辩论并回填 incident 结果状态。"""
         try:
             result = await asyncio.wait_for(
                 debate_service.execute_debate(session_id=session_id, retry_failed_only=False),
@@ -416,6 +426,7 @@ async def auto_investigate_incident(
     description="告警接入后自动创建 incident 与调查会话，并异步执行分析流程",
 )
 async def ingest_alert(payload: AlertIngestRequest):
+    """接收外部告警并自动创建 incident + 辩论会话。"""
     incident = await incident_service.create_incident(
         IncidentCreateModel(
             title=str(payload.title).strip()[:255],
@@ -441,6 +452,7 @@ async def ingest_alert(payload: AlertIngestRequest):
     )
 
     async def _run():
+        """告警自动调查的后台任务主体。"""
         try:
             result = await asyncio.wait_for(
                 debate_service.execute_debate(session.id, retry_failed_only=False),

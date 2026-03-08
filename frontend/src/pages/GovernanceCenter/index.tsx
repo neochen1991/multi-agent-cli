@@ -19,6 +19,7 @@ import {
 } from 'antd';
 import { governanceApi } from '@/services/api';
 import { formatBeijingDateTime } from '@/utils/dateTime';
+import { useNavigate } from 'react-router-dom';
 
 const { Paragraph, Text, Title } = Typography;
 
@@ -38,6 +39,7 @@ const activeRiskInterpretation = (pendingRemediation: number, timeoutRate: numbe
 };
 
 const GovernanceCenterPage: React.FC = () => {
+  const navigate = useNavigate();
   const [systemCard, setSystemCard] = useState<Record<string, any>>({});
   const [quality, setQuality] = useState<Array<Record<string, any>>>([]);
   const [costCaseCount] = useState(100);
@@ -63,6 +65,13 @@ const GovernanceCenterPage: React.FC = () => {
   const [replayLoading, setReplayLoading] = useState(false);
   const [runtimeProfiles, setRuntimeProfiles] = useState<Array<Record<string, any>>>([]);
   const [runtimeActiveProfile, setRuntimeActiveProfile] = useState<string>('balanced');
+  const [humanReviewItems, setHumanReviewItems] = useState<Array<Record<string, any>>>([]);
+  const [humanReviewSummary, setHumanReviewSummary] = useState<Record<string, any>>({});
+  const [humanReviewFilter, setHumanReviewFilter] = useState<'all' | 'pending' | 'approved'>('pending');
+  const [humanReviewOperator, setHumanReviewOperator] = useState('sre-oncall');
+  const [humanReviewApproveComment, setHumanReviewApproveComment] = useState('');
+  const [humanReviewRejectReason, setHumanReviewRejectReason] = useState('证据不足，暂不放行');
+  const [humanReviewActionLoading, setHumanReviewActionLoading] = useState<string>('');
 
   const load = async () => {
     try {
@@ -80,6 +89,7 @@ const GovernanceCenterPage: React.FC = () => {
         syncTemplates,
         runtimeProfilesRes,
         runtimeActiveRes,
+        humanReviewRes,
       ] = await Promise.all([
         governanceApi.systemCard(),
         governanceApi.qualityTrend(30),
@@ -94,6 +104,7 @@ const GovernanceCenterPage: React.FC = () => {
         governanceApi.externalSyncTemplates(),
         governanceApi.runtimeStrategies(),
         governanceApi.runtimeStrategyActive(),
+        governanceApi.listHumanReview(50),
       ]);
       setSystemCard(card as Record<string, any>);
       setQuality((trend?.items || []) as Array<Record<string, any>>);
@@ -109,6 +120,8 @@ const GovernanceCenterPage: React.FC = () => {
       setTeamMetricsMeta((teamMetricsRes || {}) as Record<string, any>);
       setRuntimeProfiles((runtimeProfilesRes.items || []) as Array<Record<string, any>>);
       setRuntimeActiveProfile(String(runtimeActiveRes.active_profile || 'balanced'));
+      setHumanReviewItems((humanReviewRes.items || []) as Array<Record<string, any>>);
+      setHumanReviewSummary((humanReviewRes.summary || {}) as Record<string, any>);
     } catch (e: any) {
       message.error(e?.response?.data?.detail || e?.message || '治理数据加载失败');
     }
@@ -260,18 +273,80 @@ const GovernanceCenterPage: React.FC = () => {
     const state = String(item.state || '').toLowerCase();
     return !['executed', 'rolled_back', 'closed'].includes(state);
   });
+  const pendingHumanReviewCount = Number(humanReviewSummary.pending || 0);
+  const approvedHumanReviewCount = Number(humanReviewSummary.approved || 0);
   const pendingRemediationCount = pendingRemediationItems.length;
   const worstTeamTimeoutRate = teamMetrics.reduce((max, item) => Math.max(max, Number(item.timeout_rate || 0)), 0);
+  const worstTeamQueueTimeoutRate = teamMetrics.reduce(
+    (max, item) => Math.max(max, Number(item.queue_timeout_rate || 0)),
+    0,
+  );
+  const worstLimitedAnalysisRate = teamMetrics.reduce(
+    (max, item) => Math.max(max, Number(item.limited_analysis_rate || 0)),
+    0,
+  );
+  const worstEvidenceGapRate = teamMetrics.reduce(
+    (max, item) => Math.max(max, Number(item.evidence_gap_rate || 0)),
+    0,
+  );
   const riskState = activeRiskInterpretation(pendingRemediationCount, worstTeamTimeoutRate);
   const activeProfile = runtimeProfiles.find((item) => String(item.name || '') === runtimeActiveProfile) || {};
   const replayReady = Object.keys(replayResult).length > 0;
+  const filteredHumanReviewItems = humanReviewItems.filter((item) => {
+    if (humanReviewFilter === 'all') return true;
+    return String(item.review_status || '').toLowerCase() === humanReviewFilter;
+  });
+
+  useEffect(() => {
+    if (pendingHumanReviewCount <= 0 && approvedHumanReviewCount <= 0) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void load();
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [approvedHumanReviewCount, pendingHumanReviewCount]);
 
   const recommendedAction = useMemo(() => {
+    if (pendingHumanReviewCount > 0) {
+      return {
+        tone: 'risk',
+        title: '先处理待人工审核会话',
+        description: `当前有 ${pendingHumanReviewCount} 个会话等待人工审核，建议先确认根因结论是否可放行，再决定是否进入修复治理。`,
+      };
+    }
     if (pendingRemediationCount > 0) {
       return {
         tone: 'risk',
         title: '先处理待审批或待执行的修复动作',
         description: `当前有 ${pendingRemediationCount} 个修复动作未闭环，建议先进入“治理动作”确认风险和审批状态。`,
+      };
+    }
+    if (worstTeamQueueTimeoutRate >= 0.1) {
+      return {
+        tone: 'watch',
+        title: '先查看 LLM 队列超时热点',
+        description: `最近 ${metricsWindowDays} 天最高 queue timeout rate 为 ${percent(
+          worstTeamQueueTimeoutRate,
+        )}，建议先检查并发策略和高峰时段的收口链路。`,
+      };
+    }
+    if (worstLimitedAnalysisRate >= 0.15) {
+      return {
+        tone: 'watch',
+        title: '先查看受限分析占比',
+        description: `最近 ${metricsWindowDays} 天最高受限分析占比为 ${percent(
+          worstLimitedAnalysisRate,
+        )}，说明工具未执行但模型仍在推理，建议优先排查工具开关和数据源可用性。`,
+      };
+    }
+    if (worstEvidenceGapRate >= 0.2) {
+      return {
+        tone: 'watch',
+        title: '先查看关键证据覆盖缺口',
+        description: `最近 ${metricsWindowDays} 天最高关键证据缺口会话占比为 ${percent(
+          worstEvidenceGapRate,
+        )}，建议先复盘低置信度结论和关键 Agent 降级情况。`,
       };
     }
     if (worstTeamTimeoutRate >= 0.15) {
@@ -293,7 +368,16 @@ const GovernanceCenterPage: React.FC = () => {
       title: '当前可以按默认策略继续值班',
       description: '没有明显治理阻塞项。优先关注新进 incident，必要时再进入策略或回放区做定向排查。',
     };
-  }, [latestQualityTop1, metricsWindowDays, pendingRemediationCount, worstTeamTimeoutRate]);
+  }, [
+    latestQualityTop1,
+    metricsWindowDays,
+    pendingHumanReviewCount,
+    pendingRemediationCount,
+    worstEvidenceGapRate,
+    worstLimitedAnalysisRate,
+    worstTeamQueueTimeoutRate,
+    worstTeamTimeoutRate,
+  ]);
 
   const governanceSummaryCards = [
     {
@@ -309,6 +393,12 @@ const GovernanceCenterPage: React.FC = () => {
       tone: qualityState.tone,
     },
     {
+      title: '待人工审核会话',
+      value: pendingHumanReviewCount,
+      hint: pendingHumanReviewCount > 0 ? '这些会话还没有被人工放行，建议优先处理。' : '当前没有待人工审核会话',
+      tone: pendingHumanReviewCount > 0 ? 'risk' : 'healthy',
+    },
+    {
       title: '待处理修复动作',
       value: pendingRemediationCount,
       hint: riskState.text,
@@ -319,6 +409,24 @@ const GovernanceCenterPage: React.FC = () => {
       value: percent(worstTeamTimeoutRate),
       hint: worstTeamTimeoutRate >= 0.15 ? '超时偏高，建议先看热点和回放' : '暂无明显超时压力',
       tone: worstTeamTimeoutRate >= 0.15 ? 'watch' : 'healthy',
+    },
+    {
+      title: '最高队列超时率',
+      value: percent(worstTeamQueueTimeoutRate),
+      hint: worstTeamQueueTimeoutRate >= 0.1 ? 'LLM 排队压力偏高，优先检查分析批次和收口链路' : '暂无明显排队拥塞',
+      tone: worstTeamQueueTimeoutRate >= 0.1 ? 'watch' : 'healthy',
+    },
+    {
+      title: '最高受限分析率',
+      value: percent(worstLimitedAnalysisRate),
+      hint: worstLimitedAnalysisRate >= 0.15 ? '工具未执行但仍在推理，建议优先检查工具接入与命令门禁' : '暂无明显受限分析堆积',
+      tone: worstLimitedAnalysisRate >= 0.15 ? 'watch' : 'healthy',
+    },
+    {
+      title: '最高证据缺口率',
+      value: percent(worstEvidenceGapRate),
+      hint: worstEvidenceGapRate >= 0.2 ? '关键证据覆盖偏弱，建议先复盘低置信度 session' : '暂无明显关键证据缺口',
+      tone: worstEvidenceGapRate >= 0.2 ? 'watch' : 'healthy',
     },
     {
       title: '自动外部同步',
@@ -344,6 +452,26 @@ const GovernanceCenterPage: React.FC = () => {
       text: percent(item.timeout_rate),
     }));
 
+  const queueTimeoutBars = teamMetrics
+    .slice()
+    .sort((a, b) => Number(b.queue_timeout_rate || 0) - Number(a.queue_timeout_rate || 0))
+    .slice(0, 5)
+    .map((item) => ({
+      label: String(item.team || '-'),
+      value: Number(item.queue_timeout_rate || 0),
+      text: percent(item.queue_timeout_rate),
+    }));
+
+  const limitedAnalysisBars = teamMetrics
+    .slice()
+    .sort((a, b) => Number(b.limited_analysis_rate || 0) - Number(a.limited_analysis_rate || 0))
+    .slice(0, 5)
+    .map((item) => ({
+      label: String(item.team || '-'),
+      value: Number(item.limited_analysis_rate || 0),
+      text: percent(item.limited_analysis_rate),
+    }));
+
   const costTrendBars = (((teamMetricsMeta.token_cost_trend || []) as Array<Record<string, any>>).slice(-6)).map((item) => ({
     label: String(item.day || '-').slice(5),
     value: Number(item.estimated_model_cost || 0),
@@ -357,6 +485,169 @@ const GovernanceCenterPage: React.FC = () => {
   }));
 
   const tabs = [
+    {
+      key: 'human-review',
+      label: '人工审核',
+      children: (
+        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <Card className="module-card ops-section-card" size="small">
+            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+              <Title level={5} style={{ margin: 0 }}>
+                人工审核队列
+              </Title>
+              <Text type="secondary">这里处理 production_governed 下等待人工确认的会话。先确认结论是否可信，再决定放行或驳回。</Text>
+              <Space wrap>
+                <Tag color={pendingHumanReviewCount > 0 ? 'warning' : 'default'}>待审核 {pendingHumanReviewCount}</Tag>
+                <Tag color={approvedHumanReviewCount > 0 ? 'processing' : 'default'}>已批准待恢复 {approvedHumanReviewCount}</Tag>
+              </Space>
+              <Space wrap>
+                <Select
+                  value={humanReviewFilter}
+                  style={{ width: 150 }}
+                  options={[
+                    { label: '只看待审核', value: 'pending' },
+                    { label: '只看已批准', value: 'approved' },
+                    { label: '查看全部', value: 'all' },
+                  ]}
+                  onChange={(value) => setHumanReviewFilter(value)}
+                />
+                <Input
+                  value={humanReviewOperator}
+                  onChange={(e) => setHumanReviewOperator(e.target.value)}
+                  placeholder="审核人"
+                  style={{ width: 160 }}
+                />
+                <Input
+                  value={humanReviewApproveComment}
+                  onChange={(e) => setHumanReviewApproveComment(e.target.value)}
+                  placeholder="批准备注"
+                  style={{ width: 220 }}
+                />
+                <Input
+                  value={humanReviewRejectReason}
+                  onChange={(e) => setHumanReviewRejectReason(e.target.value)}
+                  placeholder="驳回原因"
+                  style={{ width: 240 }}
+                />
+                <Button onClick={() => void load()}>刷新队列</Button>
+              </Space>
+            </Space>
+          </Card>
+
+          <List
+            className="ops-list-tight"
+            dataSource={filteredHumanReviewItems}
+            locale={{ emptyText: '当前没有待人工审核会话' }}
+            renderItem={(item) => (
+              <List.Item
+                actions={[
+                  <Button
+                    key="approve"
+                    size="small"
+                    type="primary"
+                    disabled={String(item.review_status || '') === 'approved'}
+                    loading={humanReviewActionLoading === `approve:${String(item.session_id || '')}`}
+                    onClick={async () => {
+                      try {
+                        setHumanReviewActionLoading(`approve:${String(item.session_id || '')}`);
+                        await governanceApi.approveHumanReview(
+                          String(item.session_id || ''),
+                          humanReviewOperator || 'sre-oncall',
+                          humanReviewApproveComment,
+                        );
+                        message.success('已批准人工审核');
+                        await load();
+                      } catch (e: any) {
+                        message.error(e?.response?.data?.detail || e?.message || '批准失败');
+                      } finally {
+                        setHumanReviewActionLoading('');
+                      }
+                    }}
+                  >
+                    批准
+                  </Button>,
+                  <Button
+                    key="reject"
+                    size="small"
+                    danger
+                    loading={humanReviewActionLoading === `reject:${String(item.session_id || '')}`}
+                    onClick={async () => {
+                      try {
+                        setHumanReviewActionLoading(`reject:${String(item.session_id || '')}`);
+                        await governanceApi.rejectHumanReview(
+                          String(item.session_id || ''),
+                          humanReviewOperator || 'sre-oncall',
+                          humanReviewRejectReason || 'manual_reject',
+                        );
+                        message.success('已驳回人工审核');
+                        await load();
+                      } catch (e: any) {
+                        message.error(e?.response?.data?.detail || e?.message || '驳回失败');
+                      } finally {
+                        setHumanReviewActionLoading('');
+                      }
+                    }}
+                  >
+                    驳回
+                  </Button>,
+                  <Button
+                    key="resume"
+                    size="small"
+                    disabled={String(item.review_status || '') !== 'approved'}
+                    loading={humanReviewActionLoading === `resume:${String(item.session_id || '')}`}
+                    onClick={async () => {
+                      try {
+                        setHumanReviewActionLoading(`resume:${String(item.session_id || '')}`);
+                        const result = await governanceApi.resumeHumanReview(
+                          String(item.session_id || ''),
+                          humanReviewOperator || 'sre-oncall',
+                        );
+                        message.success(`已提交恢复任务: ${String(result.task_id || '-')}`);
+                        await load();
+                      } catch (e: any) {
+                        message.error(e?.response?.data?.detail || e?.message || '恢复执行失败');
+                      } finally {
+                        setHumanReviewActionLoading('');
+                      }
+                    }}
+                  >
+                    恢复执行
+                  </Button>,
+                  <Button
+                    key="open"
+                    size="small"
+                    onClick={() => {
+                      navigate(`/incident/${String(item.incident_id || '')}?view=analysis`);
+                    }}
+                  >
+                    打开故障分析
+                  </Button>,
+                ]}
+              >
+                <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                  <Space wrap>
+                    <Text strong>{String(item.session_id || '-')}</Text>
+                    <Tag color={String(item.review_status || '') === 'approved' ? 'processing' : 'warning'}>
+                      {String(item.review_status || '') === 'approved' ? '已批准待恢复' : '待人工审核'}
+                    </Tag>
+                    <Tag>{String(item.execution_mode || '-')}</Tag>
+                    <Tag>{String(item.deployment_profile || '-')}</Tag>
+                  </Space>
+                  <Text type="secondary">
+                    incident={String(item.incident_id || '-')} · confidence={percent(item.confidence)} · requested=
+                    {formatBeijingDateTime(String(item.requested_at || item.updated_at || ''))}
+                  </Text>
+                  <Text>{String(item.review_reason || '未提供审核原因')}</Text>
+                  {String(item.root_cause || '').trim() ? (
+                    <Text type="secondary">根因摘要：{String(item.root_cause || '').slice(0, 180)}</Text>
+                  ) : null}
+                </Space>
+              </List.Item>
+            )}
+          />
+        </Space>
+      ),
+    },
     {
       key: 'overview',
       label: '状态总览',
@@ -490,6 +781,24 @@ const GovernanceCenterPage: React.FC = () => {
                     </Card>
                     <Card size="small" className="ops-subtle-block mini-chart-card">
                       <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                        <Text strong>LLM 队列超时分布</Text>
+                        <div className="mini-bar-list">
+                          {queueTimeoutBars.map((item) => (
+                            <div key={item.label} className="mini-bar-row">
+                              <div className="mini-bar-label-wrap">
+                                <Text strong>{item.label}</Text>
+                                <Text type="secondary">{item.text}</Text>
+                              </div>
+                              <div className="mini-bar-track">
+                                <div className="mini-bar-fill tone-watch" style={{ width: `${Math.max(8, item.value * 100)}%` }} />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </Space>
+                    </Card>
+                    <Card size="small" className="ops-subtle-block mini-chart-card">
+                      <Space direction="vertical" size={8} style={{ width: '100%' }}>
                         <Text strong>工具失败集中度</Text>
                         <div className="mini-bar-list">
                           {toolFailureBars.map((item) => (
@@ -509,6 +818,52 @@ const GovernanceCenterPage: React.FC = () => {
                         </div>
                       </Space>
                     </Card>
+                    <Card size="small" className="ops-subtle-block mini-chart-card">
+                      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                        <Text strong>受限分析占比</Text>
+                        <div className="mini-bar-list">
+                          {limitedAnalysisBars.map((item) => (
+                            <div key={item.label} className="mini-bar-row">
+                              <div className="mini-bar-label-wrap">
+                                <Text strong>{item.label}</Text>
+                                <Text type="secondary">{item.text}</Text>
+                              </div>
+                              <div className="mini-bar-track">
+                                <div className="mini-bar-fill tone-watch" style={{ width: `${Math.max(8, item.value * 100)}%` }} />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </Space>
+                    </Card>
+                    <List
+                      size="small"
+                      header={<Text strong>队列超时热点</Text>}
+                      className="ops-list-tight"
+                      dataSource={(teamMetricsMeta.queue_timeout_hotspots || []) as Array<Record<string, any>>}
+                      locale={{ emptyText: '暂无队列超时热点' }}
+                      renderItem={(item) => (
+                        <List.Item>
+                          <Text type="secondary">
+                            {String(item.key || '-')} · count={String(item.count || 0)}
+                          </Text>
+                        </List.Item>
+                      )}
+                    />
+                    <List
+                      size="small"
+                      header={<Text strong>受限分析热点</Text>}
+                      className="ops-list-tight"
+                      dataSource={(teamMetricsMeta.limited_analysis_hotspots || []) as Array<Record<string, any>>}
+                      locale={{ emptyText: '暂无受限分析热点' }}
+                      renderItem={(item) => (
+                        <List.Item>
+                          <Text type="secondary">
+                            {String(item.key || '-')} · count={String(item.count || 0)}
+                          </Text>
+                        </List.Item>
+                      )}
+                    />
                     <List
                       size="small"
                       header={<Text strong>超时热点</Text>}
@@ -979,6 +1334,7 @@ const GovernanceCenterPage: React.FC = () => {
           <div className="ops-question-list">
             <Tag>当前系统是否可信</Tag>
             <Tag>当前策略是否过于激进或保守</Tag>
+            <Tag>是否有待人工审核会话</Tag>
             <Tag>是否有待处理的治理动作</Tag>
           </div>
         </Space>
@@ -1037,6 +1393,7 @@ const GovernanceCenterPage: React.FC = () => {
                   className="ops-list-tight"
                   dataSource={[
                     '感觉最近分析质量变差，想确认是策略、模型还是工具问题。',
+                    '有会话卡在待人工审核，想集中批准或驳回后再恢复执行。',
                     '需要审批或执行修复动作，确认是否触发 No-Regression Gate。',
                     '想复盘某个 session 为什么得出当前根因结论。',
                   ]}

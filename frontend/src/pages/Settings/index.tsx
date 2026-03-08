@@ -5,6 +5,8 @@ import { authApi, settingsApi, type AgentToolingConfig } from '@/services/api';
 const { Paragraph, Text, Title } = Typography;
 const { Panel } = Collapse;
 
+const normalizePath = (value?: string) => String(value || '').trim();
+
 const REMOTE_SOURCE_META = [
   { key: 'telemetry_source', title: 'Telemetry Source（遥测平台入口）', endpointPlaceholder: 'https://telemetry.example.com/api/v1/snapshot' },
   { key: 'cmdb_source', title: 'CMDB Source（资产平台入口）', endpointPlaceholder: 'https://cmdb.example.com/api/v1/services' },
@@ -173,6 +175,61 @@ const SettingsPage: React.FC = () => {
     toolingView.database?.enabled,
   ].filter(Boolean).length;
   const remoteSourceEnabled = REMOTE_SOURCE_META.filter((item) => Boolean((toolingView as any)[item.key]?.enabled)).length;
+  const localRepoPath = normalizePath(toolingView.code_repo?.local_repo_path);
+  const logPath = normalizePath(toolingView.log_file?.file_path);
+  const domainPath = normalizePath(toolingView.domain_excel?.excel_path);
+  const databasePath = normalizePath(toolingView.database?.db_path);
+  const scenarioRoot = useMemo(() => {
+    const candidates = [localRepoPath, logPath, domainPath, databasePath].filter(Boolean);
+    const hit = candidates.find((item) => item.includes('/mock_data/order_timeout_scenario/'));
+    if (!hit) return '';
+    const marker = '/mock_data/order_timeout_scenario/';
+    const index = hit.indexOf(marker);
+    return index >= 0 ? `${hit.slice(0, index)}${marker.slice(0, -1)}` : '';
+  }, [databasePath, domainPath, localRepoPath, logPath]);
+  const metricsWindowPath = scenarioRoot ? `${scenarioRoot}/metrics/order_metrics_window.csv` : '';
+  const metricsDocPath = scenarioRoot ? `${scenarioRoot}/metrics/order_metrics_reference.md` : '';
+  const scenarioBindings = [
+    {
+      agent: 'ProblemAnalysisAgent',
+      source: '责任田映射 + 日志摘要 + 各专家反馈',
+      detail: '负责收拢问题、分发任务、汇总结论，不直接绑定单个外部文件。',
+    },
+    {
+      agent: 'CodeAgent / ChangeAgent',
+      source: localRepoPath || '未配置本地代码仓',
+      detail: '共享同一个 monorepo，本场景用于跨模块追踪 order-service / inventory-service / payment-service 调用链与变更。',
+    },
+    {
+      agent: 'LogAgent',
+      source: logPath || '未配置日志文件',
+      detail: '读取聚合日志与异常时间窗，重建请求时序、错误峰值和上下游放大链路。',
+    },
+    {
+      agent: 'DomainAgent',
+      source: domainPath || '未配置责任田文档',
+      detail: '从责任田 CSV 命中订单、库存、支付三条资产映射，并补充依赖服务与监控项。',
+    },
+    {
+      agent: 'DatabaseAgent',
+      source: databasePath || '未配置数据库快照',
+      detail: '读取 SQLite 快照中的业务表、慢 SQL、会话状态与锁等待，模拟 PostgreSQL 取证过程。',
+    },
+    {
+      agent: 'MetricsAgent',
+      source: metricsWindowPath || '依赖 incident / 日志文本抽取指标',
+      detail: metricsWindowPath
+        ? `当前 mock 还提供了分钟级指标窗口 ${metricsWindowPath}，但运行时主要从日志与 incident 文本中抽取关键指标信号。`
+        : '当前实现优先从 incident 与日志文本中抽取指标信号，远程遥测入口保持关闭。',
+    },
+    {
+      agent: 'RunbookAgent',
+      source: metricsDocPath || '未额外配置本地 runbook 资料',
+      detail: metricsDocPath
+        ? `本场景额外提供指标与数据库参考文档，可作为后续扩展本地 runbook/case library 的基础材料。`
+        : '当前未单独配置本地案例库，仍以系统内置能力和责任田信息为主。',
+    },
+  ];
 
   return (
     <div className="settings-page">
@@ -239,6 +296,40 @@ const SettingsPage: React.FC = () => {
           >
             <Collapse className="settings-collapse" defaultActiveKey={['local-tools', 'skills']} ghost>
               <Panel
+                key="agent-bindings"
+                header={renderPanelHeader('Agent 场景绑定', scenarioRoot ? '已绑定 mock 单仓多服务场景' : '显示当前配置来源')}
+              >
+                <Paragraph type="secondary" style={{ marginTop: 0 }}>
+                  这里直接说明当前设置页里的本地路径分别会被哪些 Agent 使用，避免只看到文件路径但不知道对应哪个分析链路。
+                </Paragraph>
+                {scenarioRoot && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message="当前已切到 mock 单仓多服务事故场景"
+                    description={`场景目录：${scenarioRoot}`}
+                  />
+                )}
+                <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                  {scenarioBindings.map((binding) => (
+                    <Card
+                      key={binding.agent}
+                      size="small"
+                      className="ops-summary-card"
+                      title={binding.agent}
+                      extra={<Text type="secondary">数据源</Text>}
+                    >
+                      <Paragraph style={{ marginBottom: 8 }}>
+                        <Text code>{binding.source}</Text>
+                      </Paragraph>
+                      <Text type="secondary">{binding.detail}</Text>
+                    </Card>
+                  ))}
+                </Space>
+              </Panel>
+
+              <Panel
                 key="local-tools"
                 header={renderPanelHeader('本地工具能力', `已启用 ${localToolsEnabled}/4`)}
               >
@@ -262,6 +353,9 @@ const SettingsPage: React.FC = () => {
                     <Form.Item name={['code_repo', 'local_repo_path']} label="本地仓库路径（可选，优先）">
                       <Input placeholder="/path/to/repo" />
                     </Form.Item>
+                    <Paragraph type="secondary">
+                      `CodeAgent` 与 `ChangeAgent` 共用这一路径。本次 mock 场景建议指向单仓多服务 monorepo。
+                    </Paragraph>
                     <Form.Item name={['code_repo', 'max_hits']} label="最大命中条数">
                       <InputNumber min={1} max={200} style={{ width: 180 }} />
                     </Form.Item>
@@ -277,6 +371,9 @@ const SettingsPage: React.FC = () => {
                     <Form.Item name={['log_file', 'file_path']} label="日志文件路径">
                       <Input placeholder="/var/log/app/app.log" />
                     </Form.Item>
+                    <Paragraph type="secondary">
+                      `LogAgent` 建议读取聚合后的事故时间窗日志，而不是只读单条报错摘录。
+                    </Paragraph>
                     <Form.Item name={['log_file', 'max_lines']} label="最多读取行数">
                       <InputNumber min={50} max={5000} style={{ width: 180 }} />
                     </Form.Item>
@@ -292,6 +389,9 @@ const SettingsPage: React.FC = () => {
                     <Form.Item name={['domain_excel', 'excel_path']} label="Excel/CSV 文件路径">
                       <Input placeholder="/path/to/domain-ownership.xlsx" />
                     </Form.Item>
+                    <Paragraph type="secondary">
+                      `DomainAgent` 会从这里读取责任田映射，字段必须与接口、代码类、数据库表、监控项保持一致。
+                    </Paragraph>
                     <Form.Item name={['domain_excel', 'sheet_name']} label="工作表名称（可选）">
                       <Input placeholder="Sheet1" />
                     </Form.Item>
@@ -322,6 +422,9 @@ const SettingsPage: React.FC = () => {
                     <Form.Item name={['database', 'db_path']} label="SQLite 数据库文件路径">
                       <Input placeholder="/path/to/ops_snapshot.db" />
                     </Form.Item>
+                    <Paragraph type="secondary">
+                      当前 mock 场景下 `DatabaseAgent` 实际读取 SQLite 快照；如果切到 PostgreSQL，再填写 DSN。
+                    </Paragraph>
                     <Form.Item name={['database', 'postgres_dsn']} label="PostgreSQL DSN">
                       <Input.Password placeholder="postgresql://user:password@host:5432/dbname" />
                     </Form.Item>
@@ -365,6 +468,9 @@ const SettingsPage: React.FC = () => {
               >
                 <Paragraph type="secondary" style={{ marginTop: 0 }}>
                   该组用于预留接入监控、日志、APM 与 CMDB 平台。关闭时不影响本地文件模式。
+                </Paragraph>
+                <Paragraph type="secondary" style={{ marginTop: 0 }}>
+                  当前 mock 场景里 `MetricsAgent` 主要依赖日志与 incident 文本抽取指标信号，因此这些远程入口默认保持关闭。
                 </Paragraph>
                 <Collapse className="settings-sub-collapse" size="small" ghost>
                   {REMOTE_SOURCE_META.map((source) => {

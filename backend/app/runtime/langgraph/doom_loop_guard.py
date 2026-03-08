@@ -14,6 +14,7 @@ class DoomLoopGuard:
     forced_step: str = "speak:JudgeAgent"
 
     def should_force(self, next_step: str, recent_steps: List[str]) -> bool:
+        """执行shouldforce相关逻辑，并为当前模块提供可复用的处理能力。"""
         target = str(next_step or "").strip()
         if not target or target in {"speak:JudgeAgent", "JudgeAgent", "judge"}:
             return False

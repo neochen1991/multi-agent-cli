@@ -5,17 +5,18 @@
 - `ProblemAnalysisAgent`
   - phase: `coordination`
   - 职责：拆解问题、分发命令、推进讨论、触发收敛。
+  - 分发原则：主 Agent 只给高层任务方向；系统会把责任田映射出的 `api_endpoints / code_artifacts / class_names / database_tables / monitor_items / dependency_services / trace_ids / error_keywords` 自动注入到各子 Agent 的命令与工具上下文。
   - 关键输出：`commands`、`next_step`、`should_stop`、`stop_reason`。
 
 ## 2. 分析专家 Agent
 
-- `LogAgent`: 日志时序、异常模式、错误链路。
-- `DomainAgent`: 接口到领域/聚合根/责任田映射。
-- `CodeAgent`: 代码路径、热点实现、回归风险。
-- `DatabaseAgent`: 表结构、索引、慢 SQL、Top SQL、会话状态。
-- `MetricsAgent`: CPU/线程/连接池/5xx 及波动窗口。
-- `ChangeAgent`: 变更窗口关联与发布相关性。
-- `RunbookAgent`: 案例库匹配与 SOP 处置建议。
+- `LogAgent`: 基于 `api_endpoints / trace_ids / error_keywords` 重建日志时间线、异常模式和错误链路。
+- `DomainAgent`: 基于 `api_endpoints / domain / aggregate / dependency_services` 输出责任田归属、业务链路和上下游责任边界。
+- `CodeAgent`: 基于 `class_names / code_artifacts / api_endpoints / service_names` 搜索代码仓，定位入口类、服务类、热点实现和回归风险。
+- `DatabaseAgent`: 基于 `database_tables / api_endpoints / error_keywords` 读取表 Meta、索引、慢 SQL、Top SQL 和会话状态。
+- `MetricsAgent`: 基于 `monitor_items / service_names / api_endpoints` 提取 CPU、线程、连接池、5xx 和异常窗口。
+- `ChangeAgent`: 基于 `service_names / code_artifacts / api_endpoints` 关联故障窗口前后的发布、提交和配置变化。
+- `RunbookAgent`: 基于 `domain / aggregate / api_endpoints / error_keywords` 匹配相似案例和 SOP 处置建议。
 - `RuleSuggestionAgent`: 告警规则与阈值优化建议。
 
 ## 3. 对抗与裁决 Agent

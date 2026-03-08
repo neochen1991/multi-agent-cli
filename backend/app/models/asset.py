@@ -11,14 +11,14 @@ from pydantic import BaseModel, Field
 
 
 class AssetType(str, Enum):
-    """资产类型"""
+    """资产大类枚举，用于区分运行态、开发态和设计态信息。"""
     RUNTIME = "runtime"         # 运行态
     DEVELOPMENT = "development" # 开发态
     DESIGN = "design"           # 设计态
 
 
 class RuntimeAssetType(str, Enum):
-    """运行态资产类型"""
+    """运行态资产类型枚举，描述日志、指标、链路等在线证据。"""
     LOG = "log"                 # 日志
     METRIC = "metric"           # 指标
     TRACE = "trace"             # 链路
@@ -27,7 +27,7 @@ class RuntimeAssetType(str, Enum):
 
 
 class DevAssetType(str, Enum):
-    """开发态资产类型"""
+    """开发态资产类型枚举，覆盖代码、配置、测试与流水线等内容。"""
     CODE = "code"               # 代码
     CONFIG = "config"           # 配置
     TEST = "test"               # 测试
@@ -35,7 +35,7 @@ class DevAssetType(str, Enum):
 
 
 class DesignAssetType(str, Enum):
-    """设计态资产类型"""
+    """设计态资产类型枚举，覆盖文档、接口规范和数据库设计等资料。"""
     DDD_DOCUMENT = "ddd_document"       # DDD 文档
     API_SPEC = "api_spec"               # API 规范
     DB_SCHEMA = "db_schema"             # 数据库设计
@@ -46,7 +46,7 @@ class DesignAssetType(str, Enum):
 # ============== 运行态资产 ==============
 
 class RuntimeAsset(BaseModel):
-    """运行态资产"""
+    """运行态资产模型，保存线上运行过程中采集到的原始证据和结构化结果。"""
     id: str = Field(..., description="资产ID")
     type: RuntimeAssetType = Field(..., description="资产类型")
     source: str = Field(..., description="数据来源")
@@ -69,6 +69,7 @@ class RuntimeAsset(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="元数据")
     
     class Config:
+        """提供模型配置项，统一对象序列化与字段行为。"""
         json_schema_extra = {
             "example": {
                 "id": "rt_001",
@@ -88,7 +89,7 @@ class RuntimeAsset(BaseModel):
 
 
 class LogEntry(BaseModel):
-    """日志条目"""
+    """结构化日志条目模型，便于后续按类名、方法、线程等字段检索。"""
     timestamp: datetime = Field(..., description="时间戳")
     level: str = Field(..., description="日志级别")
     logger: str = Field(..., description="日志器")
@@ -103,7 +104,7 @@ class LogEntry(BaseModel):
 
 
 class MetricData(BaseModel):
-    """指标数据"""
+    """单个时间点的指标数据。"""
     name: str = Field(..., description="指标名称")
     value: float = Field(..., description="指标值")
     unit: Optional[str] = Field(None, description="单位")
@@ -112,7 +113,7 @@ class MetricData(BaseModel):
 
 
 class TraceSpan(BaseModel):
-    """链路追踪 Span"""
+    """链路追踪 Span 模型，用于还原跨服务调用路径与耗时。"""
     trace_id: str = Field(..., description="链路ID")
     span_id: str = Field(..., description="Span ID")
     parent_span_id: Optional[str] = Field(None, description="父 Span ID")
@@ -128,7 +129,7 @@ class TraceSpan(BaseModel):
 # ============== 开发态资产 ==============
 
 class DevAsset(BaseModel):
-    """开发态资产"""
+    """开发态资产模型，承载代码文件、配置和 Git 元数据。"""
     id: str = Field(..., description="资产ID")
     type: DevAssetType = Field(..., description="资产类型")
     name: str = Field(..., description="资产名称")
@@ -151,6 +152,7 @@ class DevAsset(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="元数据")
     
     class Config:
+        """提供模型配置项，统一对象序列化与字段行为。"""
         json_schema_extra = {
             "example": {
                 "id": "dev_001",
@@ -165,7 +167,7 @@ class DevAsset(BaseModel):
 
 
 class CodeClass(BaseModel):
-    """代码类"""
+    """代码类结构化模型，供 CodeAgent 分析类层级和注解信息。"""
     name: str = Field(..., description="类名")
     package: Optional[str] = Field(None, description="包名")
     file_path: str = Field(..., description="文件路径")
@@ -189,7 +191,7 @@ class CodeClass(BaseModel):
 
 
 class CodeMethod(BaseModel):
-    """代码方法"""
+    """代码方法结构化模型，记录方法签名和行号范围。"""
     name: str = Field(..., description="方法名")
     class_name: str = Field(..., description="所属类")
     return_type: Optional[str] = Field(None, description="返回类型")
@@ -202,7 +204,7 @@ class CodeMethod(BaseModel):
 # ============== 设计态资产 ==============
 
 class DesignAsset(BaseModel):
-    """设计态资产"""
+    """设计态资产模型，承载领域设计、接口规范等离线资料。"""
     id: str = Field(..., description="资产ID")
     type: DesignAssetType = Field(..., description="资产类型")
     name: str = Field(..., description="资产名称")
@@ -225,6 +227,7 @@ class DesignAsset(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="元数据")
     
     class Config:
+        """提供模型配置项，统一对象序列化与字段行为。"""
         json_schema_extra = {
             "example": {
                 "id": "des_001",
@@ -242,7 +245,7 @@ class DesignAsset(BaseModel):
 
 
 class DomainModel(BaseModel):
-    """领域模型"""
+    """领域模型定义，描述领域内聚合、实体和值对象。"""
     name: str = Field(..., description="领域名称")
     description: Optional[str] = Field(None, description="领域描述")
     
@@ -276,7 +279,7 @@ class DomainModel(BaseModel):
 
 
 class AggregateRoot(BaseModel):
-    """聚合根"""
+    """聚合根定义，连接领域概念、数据库表与接口入口。"""
     name: str = Field(..., description="聚合根名称")
     domain: str = Field(..., description="所属领域")
     
@@ -300,7 +303,7 @@ class AggregateRoot(BaseModel):
 
 
 class CaseLibrary(BaseModel):
-    """案例库"""
+    """案例库条目，沉淀历史故障现象、根因和解决方案。"""
     id: str = Field(..., description="案例ID")
     title: str = Field(..., description="案例标题")
     description: str = Field(..., description="案例描述")
@@ -329,7 +332,7 @@ class CaseLibrary(BaseModel):
 # ============== 三态资产统一模型 ==============
 
 class TriStateAsset(BaseModel):
-    """三态资产统一模型"""
+    """三态资产统一模型，将运行态、开发态、设计态证据聚合到同一对象。"""
     id: str = Field(..., description="资产ID")
     
     # 运行态
@@ -349,6 +352,7 @@ class TriStateAsset(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow, description="更新时间")
     
     class Config:
+        """提供模型配置项，统一对象序列化与字段行为。"""
         json_schema_extra = {
             "example": {
                 "id": "tri_001",

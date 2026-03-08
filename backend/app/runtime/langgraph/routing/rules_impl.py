@@ -59,18 +59,22 @@ class ConsensusRule(RoutingRule):
     """Rule that stops execution when judge confidence reaches threshold."""
 
     def __init__(self, threshold: float = 0.85, priority: int = 10):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
         self._threshold = threshold
         self._priority = priority
 
     @property
     def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
         return "consensus"
 
     @property
     def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._priority
 
     def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
         if ctx.judge_confidence >= self._threshold:
             if "VerificationAgent" not in ctx.seen_agents:
                 return RoutingDecision(
@@ -94,18 +98,22 @@ class JudgeReadyRule(RoutingRule):
     """Rule that checks if judge should be invoked based on agent coverage."""
 
     def __init__(self, priority: int = 15):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
         self._priority = priority
 
     @property
     def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
         return "judge_ready"
 
     @property
     def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._priority
 
     def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
         # Check if all required agents have spoken
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
         seen = ctx.seen_agents
         parallel_agents = set(ctx.parallel_analysis_agents)
 
@@ -128,19 +136,23 @@ class BudgetRule(RoutingRule):
     """Rule that forces judge decision when approaching step budget."""
 
     def __init__(self, threshold_ratio: float = 0.8, priority: int = 20):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
         self._threshold_ratio = threshold_ratio
         self._priority = priority
 
     @property
     def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
         return "budget"
 
     @property
     def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._priority
 
     def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
         # Only apply if judge hasn't decided yet
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
         if ctx.judge_card is not None:
             return None
 
@@ -169,19 +181,23 @@ class RepetitionRule(RoutingRule):
         recent_window: int = 3,
         priority: int = 30,
     ):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
         self._max_repeats = max_repeats
         self._recent_window = recent_window
         self._priority = priority
 
     @property
     def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
         return "repetition"
 
     @property
     def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._priority
 
     def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
         if ctx.judge_card is not None:
             return None
 
@@ -215,19 +231,23 @@ class CritiqueCycleRule(RoutingRule):
     """Rule that prevents infinite loops after critique cycle is complete."""
 
     def __init__(self, min_steps: int = 9, min_commander_calls: int = 4, priority: int = 40):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
         self._min_steps = min_steps
         self._min_commander_calls = min_commander_calls
         self._priority = priority
 
     @property
     def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
         return "critique_cycle"
 
     @property
     def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._priority
 
     def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
         if not ctx.debate_enable_critique:
             return None
 
@@ -265,18 +285,22 @@ class PostRebuttalSettleRule(RoutingRule):
     """Rule that triggers judge after rebuttal phase."""
 
     def __init__(self, min_steps: int = 8, priority: int = 45):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
         self._min_steps = min_steps
         self._priority = priority
 
     @property
     def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
         return "post_rebuttal_settle"
 
     @property
     def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._priority
 
     def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
         if ctx.judge_card is not None:
             return None
 
@@ -308,19 +332,23 @@ class CommanderSettleRule(RoutingRule):
     """Rule that triggers judge when commander has high confidence and no unresolved items."""
 
     def __init__(self, min_steps: int = 5, min_confidence: float = 0.78, priority: int = 50):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
         self._min_steps = min_steps
         self._min_confidence = min_confidence
         self._priority = priority
 
     @property
     def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
         return "commander_settle"
 
     @property
     def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._priority
 
     def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
         if ctx.judge_card is not None:
             return None
 
@@ -355,6 +383,7 @@ class NoCritiqueRevisitRule(RoutingRule):
         min_commander_confidence: float = 0.65,
         priority: int = 55,
     ):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
         self._min_steps = min_steps
         self._min_commander_calls = min_commander_calls
         self._min_agent_repeats = min_agent_repeats
@@ -363,13 +392,16 @@ class NoCritiqueRevisitRule(RoutingRule):
 
     @property
     def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
         return "no_critique_revisit"
 
     @property
     def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._priority
 
     def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
         if ctx.debate_enable_critique:
             return None
 
@@ -408,17 +440,21 @@ class JudgeCoverageRule(RoutingRule):
     """Rule that ensures judge is called when all agents have participated."""
 
     def __init__(self, priority: int = 60):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
         self._priority = priority
 
     @property
     def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
         return "judge_coverage"
 
     @property
     def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._priority
 
     def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
         if ctx.judge_card is not None:
             return None
 

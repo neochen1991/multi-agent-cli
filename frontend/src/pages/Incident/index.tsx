@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   Card,
@@ -23,6 +23,7 @@ import {
 } from '@/services/api';
 import { formatBeijingDateTime, formatBeijingTime } from '@/utils/dateTime';
 import AssetMappingPanel from '@/components/incident/AssetMappingPanel';
+import type { InvestigationLeadsView } from '@/components/incident/AssetMappingPanel';
 import DebateProcessPanel from '@/components/incident/DebateProcessPanel';
 import DebateResultPanel from '@/components/incident/DebateResultPanel';
 import IncidentOverviewPanel from '@/components/incident/IncidentOverviewPanel';
@@ -68,6 +69,41 @@ type DialogueMessage = DialogueViewMessage & {
   detail: string;
 };
 
+type NetworkStepDetailItem = {
+  id: string;
+  timeText: string;
+  agentName: string;
+  kind: string;
+  summary: string;
+  detailLines?: string[];
+  leadGroups?: Array<{ label: string; items: string[] }>;
+};
+
+type LeadFilter = {
+  label: string;
+  value: string;
+} | null;
+
+type SessionQualitySummary = {
+  limitedAnalysis: boolean;
+  limitedAgentNames: string[];
+  limitedCount: number;
+  evidenceGap: boolean;
+  riskFactors: string[];
+  evidenceCoverage: {
+    ok: number;
+    degraded: number;
+    missing: number;
+  };
+};
+
+type QualityFocus = {
+  label: string;
+  agentNames: string[];
+  eventType?: string;
+  statusFilter?: 'all' | 'inferred_without_tool' | 'missing';
+} | null;
+
 const IncidentPage: React.FC = () => {
   const [searchParams] = useSearchParams();
   const { incidentId: routeIncidentId } = useParams();
@@ -94,13 +130,23 @@ const IncidentPage: React.FC = () => {
   const [eventFilterPhase, setEventFilterPhase] = useState<string>('all');
   const [eventFilterType, setEventFilterType] = useState<string>('all');
   const [eventSearchText, setEventSearchText] = useState<string>('');
+  const [selectedLeadFilter, setSelectedLeadFilter] = useState<LeadFilter>(null);
+  const [selectedQualityFocus, setSelectedQualityFocus] = useState<QualityFocus>(null);
   const [selectedNetworkStep, setSelectedNetworkStep] = useState<AgentNetworkStep | null>(null);
+  const [activeProcessTab, setActiveProcessTab] = useState('dialogue');
+  const [navLayout, setNavLayout] = useState<{ left: number; width: number; height: number }>({
+    left: 0,
+    width: 0,
+    height: 0,
+  });
   const [running, setRunning] = useState(false);
   const [debateMaxRounds, setDebateMaxRounds] = useState<number>(1);
   const [executionMode, setExecutionMode] = useState<'standard' | 'quick' | 'background' | 'async'>('standard');
   const [logUploadMeta, setLogUploadMeta] = useState<{ name: string; size: number; lines: number } | null>(null);
   const [bootstrapping, setBootstrapping] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const navShellRef = useRef<HTMLDivElement | null>(null);
+  const navRef = useRef<HTMLDivElement | null>(null);
   const pollingRef = useRef(false);
   const runningRef = useRef(false);
   const assetMappingReadyRef = useRef(false);
@@ -109,8 +155,33 @@ const IncidentPage: React.FC = () => {
   const seenEventIdsRef = useRef<Set<string>>(new Set());
   const seenEventDedupeKeysRef = useRef<Set<string>>(new Set());
   const seenEventFingerprintsRef = useRef<Set<string>>(new Set());
+  const pendingEventRecordsRef = useRef<EventRecord[]>([]);
+  const eventFlushTimerRef = useRef<number | null>(null);
+
+  const isLowLevelRealtimeNoise = (kind: string): boolean => [
+    'llm_stream_delta',
+    'llm_http_request',
+    'llm_http_response',
+    'llm_call_started',
+    'llm_call_completed',
+    'llm_request_started',
+    'llm_request_completed',
+    'llm_invoke_path',
+  ].includes(kind);
+
+  const flushPendingEvents = () => {
+    if (eventFlushTimerRef.current) {
+      window.clearTimeout(eventFlushTimerRef.current);
+      eventFlushTimerRef.current = null;
+    }
+    if (!pendingEventRecordsRef.current.length) return;
+    const buffered = pendingEventRecordsRef.current;
+    pendingEventRecordsRef.current = [];
+    setEventRecords((prev) => [...buffered.reverse(), ...prev].slice(0, 180));
+  };
 
   const appendEvent = (kind: string, text: string, data?: unknown) => {
+    if (isLowLevelRealtimeNoise(kind)) return;
     const dataRecord = asRecord(data);
     const dedupeKey = String(dataRecord.dedupe_key || '').trim();
     const eventId = String(dataRecord.event_id || '').trim();
@@ -151,37 +222,12 @@ const IncidentPage: React.FC = () => {
       text,
       data,
     };
-    setEventRecords((prev) => {
-      if (kind === 'llm_stream_delta') {
-        const streamId = String(dataRecord.stream_id || '').trim();
-        if (streamId) {
-          const idx = prev.findIndex((row) => {
-            if (row.kind !== 'llm_stream_delta') return false;
-            const rowData = asRecord(row.data);
-            return String(rowData.stream_id || '').trim() === streamId;
-          });
-          if (idx >= 0) {
-            const current = prev[idx];
-            const currentData = asRecord(current.data);
-            const mergedData = {
-              ...currentData,
-              ...dataRecord,
-              delta: `${String(currentData.delta || '')}${String(dataRecord.delta || '')}`,
-            };
-            const mergedRow: EventRecord = {
-              ...current,
-              timeText: displayTime,
-              text: formatEventText(kind, mergedData),
-              data: mergedData,
-            };
-            const next = [...prev];
-            next[idx] = mergedRow;
-            return next.slice(0, 300);
-          }
-        }
-      }
-      return [record, ...prev].slice(0, 300);
-    });
+    pendingEventRecordsRef.current.push(record);
+    if (eventFlushTimerRef.current === null) {
+      eventFlushTimerRef.current = window.setTimeout(() => {
+        flushPendingEvents();
+      }, 80);
+    }
   };
 
   const asRecord = (value: unknown): Record<string, unknown> => {
@@ -387,6 +433,111 @@ const IncidentPage: React.FC = () => {
     return '';
   };
 
+  const normalizeStringList = (value: unknown, limit = 16): string[] => {
+    if (!Array.isArray(value)) return [];
+    const picks: string[] = [];
+    value.forEach((item) => {
+      const text = String(item || '').trim();
+      if (text) picks.push(text);
+    });
+    return Array.from(new Set(picks)).slice(0, limit);
+  };
+
+  const extractLeadGroups = (data: Record<string, unknown>): Array<{ label: string; items: string[] }> => {
+    const groups = [
+      { label: '接口', items: normalizeStringList(data.api_endpoints, 12) },
+      { label: '服务', items: normalizeStringList(data.service_names, 12) },
+      { label: '类名', items: normalizeStringList(data.class_names, 16) },
+      { label: '代码线索', items: normalizeStringList(data.code_artifacts, 16) },
+      { label: '数据库表', items: normalizeStringList(data.database_tables, 20) },
+      { label: '监控项', items: normalizeStringList(data.monitor_items, 16) },
+      { label: '依赖服务', items: normalizeStringList(data.dependency_services, 16) },
+      { label: 'Trace', items: normalizeStringList(data.trace_ids, 8) },
+      { label: '异常关键词', items: normalizeStringList(data.error_keywords, 12) },
+    ];
+    return groups.filter((group) => group.items.length > 0);
+  };
+
+  const pickStepKeyClues = (groups: Array<{ label: string; items: string[] }>): string[] => {
+    const priority = ['接口', '数据库表', '类名', '监控项', '依赖服务', '服务', '代码线索', 'Trace', '异常关键词'];
+    const ordered = groups
+      .slice()
+      .sort((left, right) => priority.indexOf(left.label) - priority.indexOf(right.label));
+    const clues: string[] = [];
+    ordered.forEach((group) => {
+      group.items.forEach((item) => {
+        if (clues.length >= 2) return;
+        clues.push(item);
+      });
+    });
+    return clues.slice(0, 2);
+  };
+
+  const toLeadKeys = (groups: Array<{ label: string; items: string[] }>): string[] =>
+    groups.flatMap((group) => group.items.map((item) => `${group.label}:${item}`));
+
+  const extractInvestigationLeadsView = (detail: DebateDetail | null): InvestigationLeadsView | null => {
+    const context = asRecord(detail?.context);
+    const leads = asRecord(context.investigation_leads);
+    if (Object.keys(leads).length === 0) return null;
+    return {
+      apiEndpoints: normalizeStringList(leads.api_endpoints, 12),
+      serviceNames: normalizeStringList(leads.service_names, 12),
+      codeArtifacts: normalizeStringList(leads.code_artifacts, 16),
+      classNames: normalizeStringList(leads.class_names, 16),
+      databaseTables: normalizeStringList(leads.database_tables, 20),
+      monitorItems: normalizeStringList(leads.monitor_items, 16),
+      dependencyServices: normalizeStringList(leads.dependency_services, 16),
+      traceIds: normalizeStringList(leads.trace_ids, 8),
+      errorKeywords: normalizeStringList(leads.error_keywords, 12),
+      domain: String(leads.domain || '').trim(),
+      aggregate: String(leads.aggregate || '').trim(),
+      ownerTeam: String(leads.owner_team || '').trim(),
+      owner: String(leads.owner || '').trim(),
+    };
+  };
+
+  const eventMatchesLead = (row: EventRecord, lead: LeadFilter): boolean => {
+    if (!lead) return true;
+    const data = asRecord(row.data);
+    const value = String(lead.value || '').trim().toLowerCase();
+    if (!value) return true;
+    const haystack = [
+      row.text,
+      toDisplayText(data),
+      ...extractLeadGroups(data).flatMap((group) => group.items),
+      firstTextValue(data, ['command', 'focus', 'expected_output', 'message', 'feedback']),
+    ]
+      .join('\n')
+      .toLowerCase();
+    return haystack.includes(value);
+  };
+
+  const eventMatchesQualityFocus = (row: EventRecord, focus: QualityFocus): boolean => {
+    if (!focus) return true;
+    const agentNames = Array.isArray(focus.agentNames) ? focus.agentNames.map((item) => String(item || '').trim()).filter(Boolean) : [];
+    if (agentNames.length === 0) return true;
+    const data = asRecord(row.data);
+    const eventType = String(focus.eventType || '').trim();
+    if (eventType && row.kind !== eventType) {
+      return false;
+    }
+    if (focus.statusFilter && focus.statusFilter !== 'all') {
+      const evidenceStatus = String(data.evidence_status || '').trim().toLowerCase();
+      if (evidenceStatus !== focus.statusFilter) {
+        return false;
+      }
+    }
+    const candidates = [
+      firstTextValue(data, ['agent_name', 'agent', 'source', 'target', 'target_agent', 'reply_to']),
+      row.text,
+      toDisplayText(data),
+    ]
+      .join('\n')
+      .toLowerCase();
+    return agentNames.some((agent) => candidates.includes(agent.toLowerCase()));
+  };
+
   const normalizeInlineText = (value: string): string =>
     value
       .replace(/`([^`]+)`/g, '$1')
@@ -553,6 +704,30 @@ const IncidentPage: React.FC = () => {
     return !blocked.some((token) => lowered.includes(token));
   };
 
+  const isCoordinationMessageText = (value: string): boolean => {
+    const text = String(value || '').trim();
+    if (!text) return false;
+    const parsed = tryParseJson(text.replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim());
+    if (parsed) {
+      return ['next_agent', 'next_mode', 'should_stop', 'commands'].some((key) => key in parsed);
+    }
+    const normalized = text.toLowerCase();
+    return (
+      normalized.includes('"next_agent"') ||
+      normalized.includes('"should_stop"') ||
+      normalized.includes('"commands"') ||
+      normalized.includes('next_agent') && normalized.includes('should_stop')
+    );
+  };
+
+  const buildConclusionCandidate = (text: string, timeText: string, sourceLabel: string) => {
+    const cleaned = normalizeMarkdownText(extractChatMessageText(text));
+    if (!cleaned || !isEffectiveConclusionText(cleaned) || isCoordinationMessageText(text) || isCoordinationMessageText(cleaned)) {
+      return null;
+    }
+    return { text: cleaned, timeText, sourceLabel };
+  };
+
   const isNearDuplicateText = (leftText: string, rightText: string): boolean => {
     const left = normalizeForCompare(leftText);
     const right = normalizeForCompare(rightText);
@@ -573,6 +748,31 @@ const IncidentPage: React.FC = () => {
     const right = normalizeForCompare(rightText);
     if (!left || !right) return false;
     return left.includes(right) || right.includes(left);
+  };
+
+  const formatEvidenceStatusLabel = (value: unknown): string => {
+    const status = String(value || '').trim().toLowerCase();
+    if (status === 'inferred_without_tool') return '工具不可用，已基于现有证据完成受限分析';
+    if (status === 'missing') return '关键证据缺失，本轮未完成真实取证';
+    if (status === 'degraded') return '本轮为降级结果，需补采关键证据';
+    if (status === 'collected') return '已完成证据采集';
+    return status ? `证据状态：${status}` : '';
+  };
+
+  const formatToolStatusLabel = (value: unknown): string => {
+    const status = String(value || '').trim().toLowerCase();
+    const labelMap: Record<string, string> = {
+      ok: '工具执行成功',
+      disabled: '工具已关闭',
+      unavailable: '工具不可用',
+      error: '工具执行失败',
+      failed: '工具执行失败',
+      timeout: '工具执行超时',
+      skipped: '工具已跳过',
+      skipped_by_command: '按主 Agent 命令跳过',
+      unknown: '工具状态未知',
+    };
+    return labelMap[status] || (status ? `工具状态：${status}` : '');
   };
 
   const parseEventTimestampMs = (data: Record<string, unknown>): number | undefined => {
@@ -719,6 +919,9 @@ const IncidentPage: React.FC = () => {
       const auditText = formatToolAuditLog(auditLog);
       status = toolStatus === 'error' ? 'error' : 'done';
       summary = `${agentName} 工具调用：${toolLabel}（${statusLabel}）`;
+      const limitedAnalysis =
+        !used && ['disabled', 'unavailable', 'error', 'failed', 'timeout'].includes(toolStatus)
+          && commandGate.allow_tool === true;
       toolPayload = {
         toolName: toolLabel,
         statusLabel,
@@ -729,7 +932,12 @@ const IncidentPage: React.FC = () => {
         ]
           .filter(Boolean)
           .join('\n'),
-        responseText: [`工具反馈：${toolSummary}`, `数据摘要：${dataSummaryText}`, `返回详情：${dataDetailText}`]
+        responseText: [
+          limitedAnalysis ? '工具未实际执行，相关 Agent 将基于现有证据继续进行受限分析。' : '',
+          `工具反馈：${toolSummary}`,
+          `数据摘要：${dataSummaryText}`,
+          `返回详情：${dataDetailText}`,
+        ]
           .filter(Boolean)
           .join('\n\n'),
         auditText,
@@ -740,6 +948,7 @@ const IncidentPage: React.FC = () => {
           `开关状态：${enabled ? '开启' : '关闭'}`,
           `是否实际调用：${used ? '是' : '否'}`,
           `执行结果：${statusLabel}`,
+          limitedAnalysis ? '说明：工具不可用，后续会转入“基于现有证据的受限分析”。' : '',
           `命令门禁：允许调用=${commandGateAllow}，原因=${commandGateReason}，来源=${commandGateSource}`,
           `工具反馈：${toolSummary}`,
           `获取数据摘要：\n${dataSummaryText}`,
@@ -845,17 +1054,86 @@ const IncidentPage: React.FC = () => {
     } else if (kind === 'phase_changed' || kind === 'snapshot' || kind === 'session_started' || kind === 'ws_ack' || kind === 'ws_control') {
       summary = normalizeInlineText(messageText || '状态更新');
       detail = normalizeMarkdownText(messageText || '');
+    } else if (kind === 'session_completed') {
+      messageKind = 'status';
+      status = 'done';
+      summary = '辩论结束，已生成最终结果';
+      detail = normalizeMarkdownText(
+        [
+          firstTextValue(data, ['message']) || '系统已结束本次辩论会话。',
+          firstTextValue(data, ['reason']) ? `结束原因：${firstTextValue(data, ['reason'])}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      );
+    } else if (kind === 'debate_timeout_recovered') {
+      messageKind = 'status';
+      status = 'done';
+      summary = '辩论已收口，系统按超时恢复路径结束';
+      detail = normalizeMarkdownText(
+        [
+          firstTextValue(data, ['message']) || '系统检测到讨论超时后，已按恢复策略收口本轮分析。',
+          firstTextValue(data, ['reason']) ? `恢复原因：${firstTextValue(data, ['reason'])}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      );
+    } else if (kind === 'status_changed') {
+      const nextStatus = firstTextValue(data, ['status', 'to_status', 'new_status']).toLowerCase();
+      if (['completed', 'failed', 'cancelled', 'waiting_review', 'waiting_resume'].includes(nextStatus)) {
+        messageKind = 'status';
+        status = nextStatus === 'failed' ? 'error' : 'done';
+        const labelMap: Record<string, string> = {
+          completed: '会话状态：已完成',
+          failed: '会话状态：失败',
+          cancelled: '会话状态：已取消',
+          waiting_review: '会话状态：待人工审核',
+          waiting_resume: '会话状态：审核通过，待恢复执行',
+        };
+        summary = labelMap[nextStatus] || `会话状态：${nextStatus}`;
+        detail = normalizeMarkdownText(
+          [
+            firstTextValue(data, ['message']) || messageText || summary,
+            firstTextValue(data, ['reason']) ? `原因：${firstTextValue(data, ['reason'])}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        );
+      } else {
+        return null;
+      }
     } else if (kind === 'agent_command_feedback') {
       messageKind = 'command';
-      status = 'done';
-      summary = `${agentName} 向主Agent反馈`;
+      const degraded = Boolean(data.degraded);
+      const evidenceStatus = firstTextValue(data, ['evidence_status']);
+      const toolStatus = firstTextValue(data, ['tool_status']);
+      const degradeReason = extractChatMessageText(firstTextValue(data, ['degrade_reason']));
+      const missingInfo = Array.isArray(data.missing_info) ? data.missing_info.map((item) => String(item || '').trim()).filter(Boolean) : [];
+      const nextChecks = Array.isArray(data.next_checks) ? data.next_checks.map((item) => String(item || '').trim()).filter(Boolean) : [];
+      const evidenceStatusLabel = formatEvidenceStatusLabel(evidenceStatus);
+      const toolStatusLabel = formatToolStatusLabel(toolStatus);
+      status = degraded ? 'error' : 'done';
+      summary = evidenceStatus === 'inferred_without_tool'
+        ? `${agentName} 提交受限分析反馈`
+        : degraded
+          ? `${agentName} 提交降级反馈`
+          : `${agentName} 向主Agent反馈`;
       const feedback = extractChatMessageText(firstTextValue(data, ['feedback']));
       const command = extractChatMessageText(firstTextValue(data, ['command']));
       const confidenceRaw = data.confidence;
       const confidenceLine =
         typeof confidenceRaw === 'number' ? `置信度：${(Number(confidenceRaw) * 100).toFixed(1)}%` : '';
       detail = normalizeMarkdownText(
-        [feedback ? `反馈：${feedback}` : '', command ? `命令：${command}` : '', confidenceLine]
+        [
+          feedback ? `反馈：${feedback}` : '',
+          command ? `命令：${command}` : '',
+          evidenceStatusLabel ? `分析类型：${evidenceStatusLabel}` : '',
+          toolStatusLabel ? `${toolStatusLabel}` : '',
+          degradeReason ? `限制原因：${degradeReason}` : '',
+          missingInfo.length > 0 ? `缺失证据：${missingInfo.join('、')}` : '',
+          nextChecks.length > 0 ? `建议补采：${nextChecks.join('；')}` : '',
+          confidenceLine,
+        ]
           .filter(Boolean)
           .join('\n'),
       );
@@ -959,6 +1237,14 @@ const IncidentPage: React.FC = () => {
         return `Agent轮次已降级 [${phase || '-'}] ${agent || ''} ${String(data?.reason || '')}`.trim();
       case 'session_failed':
         return `会话失败 ${String(data?.error_code || '')} ${error || String(data?.error_message || '')} ${String(data?.retry_hint || '')}`.trim();
+      case 'session_completed':
+        return `辩论结束 ${String(data?.reason || data?.message || '')}`.trim();
+      case 'debate_timeout_recovered':
+        return `辩论按超时恢复路径结束 ${String(data?.reason || data?.message || '')}`.trim();
+      case 'status_changed': {
+        const nextStatus = String(data?.status || data?.to_status || data?.new_status || '').trim();
+        return `状态更新 ${nextStatus || '-'} ${String(data?.reason || data?.message || '')}`.trim();
+      }
       case 'ws_ack':
         if (String(data?.message || '').toLowerCase().includes('resume')) {
           const resumeFrom = asRecord(data?.resume_from);
@@ -999,6 +1285,9 @@ const IncidentPage: React.FC = () => {
       kind === 'llm_stream_delta' ||
       kind === 'llm_invoke_path' ||
       kind === 'agent_factory_fallback' ||
+      kind === 'session_completed' ||
+      kind === 'debate_timeout_recovered' ||
+      kind === 'status_changed' ||
       phase === 'analysis' ||
       phase.includes('coordination') ||
       phase.includes('critique') ||
@@ -1062,6 +1351,20 @@ const IncidentPage: React.FC = () => {
     setEventSearchText('');
   };
 
+  const resetQualityFocus = () => {
+    setSelectedQualityFocus(null);
+  };
+
+  const updateQualityFocusStatus = (statusFilter: 'all' | 'inferred_without_tool' | 'missing') => {
+    setSelectedQualityFocus((prev) => (prev ? { ...prev, statusFilter } : prev));
+  };
+
+  const resetProcessFocus = () => {
+    setSelectedNetworkStep(null);
+    setActiveProcessTab('dialogue');
+    setSelectedQualityFocus(null);
+  };
+
   const loadSessionArtifacts = async (sid: string) => {
     const detail = await debateApi.get(sid);
     const status = String(detail.status || '').toLowerCase();
@@ -1101,9 +1404,14 @@ const IncidentPage: React.FC = () => {
         assetMappingReadyRef.current = true;
       }
       setEventRecords((prev) => {
-        if (prev.length > 0) return prev;
+      if (prev.length > 0) return prev;
         return persisted
-          .slice(0, 300)
+          .filter((item) => {
+            const row = (item || {}) as Record<string, unknown>;
+            const event = (row.event || {}) as Record<string, unknown>;
+            return !isLowLevelRealtimeNoise(String(event.type || ''));
+          })
+          .slice(0, 180)
           .map((item, idx) => {
             const row = (item || {}) as Record<string, unknown>;
             const event = (row.event || {}) as Record<string, unknown>;
@@ -1168,7 +1476,7 @@ const IncidentPage: React.FC = () => {
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
-      setSelectedNetworkStep(null);
+      resetProcessFocus();
       resetDialogueFilters();
       assetMappingReadyRef.current = false;
       setReportResult(null);
@@ -1200,7 +1508,7 @@ const IncidentPage: React.FC = () => {
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
-      setSelectedNetworkStep(null);
+      resetProcessFocus();
       resetDialogueFilters();
       assetMappingReadyRef.current = false;
       setReportResult(null);
@@ -1275,6 +1583,20 @@ const IncidentPage: React.FC = () => {
       const status = String(task?.status || 'pending').toLowerCase();
       appendEvent('task_status', `后台任务状态: ${status}`, { task_id: taskId, status });
       if (status === 'completed') {
+        const resultStatus = String(task?.result?.status || '').toLowerCase();
+        if (resultStatus === 'waiting_review') {
+          appendEvent('human_review_requested', `会话进入人工审核: ${String(task?.result?.review_reason || '等待人工审核')}`, {
+            type: 'human_review_requested',
+            phase: 'judgment',
+            status: 'waiting',
+            reason: String(task?.result?.review_reason || ''),
+            resume_from_step: String(task?.result?.resume_from_step || ''),
+          });
+          await loadSessionArtifacts(sid).catch(() => undefined);
+          advanceStep(2);
+          setRunning(false);
+          return;
+        }
         await loadSessionArtifacts(sid);
         advanceStep(3);
         setRunning(false);
@@ -1327,6 +1649,22 @@ const IncidentPage: React.FC = () => {
               await loadSessionArtifacts(targetSessionId).catch(() => undefined);
               return;
             }
+            if (type === 'human_review_requested') {
+              setRunning(false);
+              advanceStep(2);
+              await loadSessionArtifacts(targetSessionId).catch(() => undefined);
+              return;
+            }
+            if (type === 'human_review_approved') {
+              await loadSessionArtifacts(targetSessionId).catch(() => undefined);
+              return;
+            }
+            if (type === 'human_review_rejected') {
+              setRunning(false);
+              advanceStep(2);
+              await loadSessionArtifacts(targetSessionId).catch(() => undefined);
+              return;
+            }
             const eventPhase = String(payload.data?.phase || '').toLowerCase();
             const isAssetEvent =
               type === 'asset_interface_mapping_completed' ||
@@ -1335,6 +1673,7 @@ const IncidentPage: React.FC = () => {
               eventPhase.includes('asset');
             if (type === 'asset_interface_mapping_completed') {
               assetMappingReadyRef.current = true;
+              await loadSessionArtifacts(targetSessionId).catch(() => undefined);
             }
             if (isAssetEvent) {
               advanceStep(1);
@@ -1363,9 +1702,15 @@ const IncidentPage: React.FC = () => {
           }
           if (payload.type === 'snapshot') {
             appendEvent('snapshot', `快照: ${payload.data?.status || 'unknown'}`, payload.data);
-            if (String(payload.data?.status || '').toLowerCase() === 'failed') {
+            const snapshotStatus = String(payload.data?.status || '').toLowerCase();
+            const snapshotReviewStatus = String(payload.data?.human_review?.status || '').toLowerCase();
+            const taskStatus = String(payload.data?.task_state?.status || '').toLowerCase();
+            if (snapshotStatus === 'failed') {
               setRunning(false);
               advanceStep(2);
+            }
+            if (taskStatus === 'waiting_review' || snapshotReviewStatus === 'pending' || snapshotReviewStatus === 'approved') {
+              setRunning(false);
             }
             return;
           }
@@ -1460,14 +1805,20 @@ const IncidentPage: React.FC = () => {
     await startRealtimeDebate({ sessionId: targetSessionId, incidentId: targetIncidentId });
   };
 
-  const sendWsControl = async (action: 'cancel' | 'resume') => {
+  const sendWsControl = async (action: 'cancel' | 'resume' | 'approve' | 'reject') => {
     if (!sessionId) return;
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(action);
       appendEvent(
         'ws_control',
-        action === 'cancel' ? '已发送取消指令' : '已发送恢复指令',
+        action === 'cancel'
+          ? '已发送取消指令'
+          : action === 'resume'
+            ? '已发送恢复指令'
+            : action === 'approve'
+              ? '已发送审核通过指令'
+              : '已发送审核驳回指令',
         { type: 'ws_control', action },
       );
       return;
@@ -1490,6 +1841,57 @@ const IncidentPage: React.FC = () => {
       } catch (e: any) {
         message.error(e?.response?.data?.detail || e?.message || '取消失败');
       }
+      return;
+    }
+    if (action === 'approve' || action === 'reject') {
+      try {
+        if (action === 'approve') {
+          await debateApi.approveHumanReview(sessionId);
+          appendEvent('human_review_approved', '人工审核已批准，等待恢复执行', {
+            type: 'human_review_approved',
+            phase: 'judgment',
+            status: 'waiting',
+          });
+          await loadSessionArtifacts(sessionId).catch(() => undefined);
+          message.success('人工审核已批准');
+        } else {
+          await debateApi.rejectHumanReview(sessionId);
+          appendEvent('human_review_rejected', '人工审核已驳回，本次分析结束', {
+            type: 'human_review_rejected',
+            phase: 'failed',
+            status: 'failed',
+          });
+          setRunning(false);
+          await loadSessionArtifacts(sessionId).catch(() => undefined);
+          message.success('人工审核已驳回');
+        }
+      } catch (e: any) {
+        message.error(e?.response?.data?.detail || e?.message || '人工审核操作失败');
+      }
+      return;
+    }
+    if (action === 'resume') {
+      if (String(humanReviewState?.status || '').toLowerCase() === 'pending') {
+        message.info('当前仍在等待人工审核，请先批准后再恢复');
+        return;
+      }
+      if (String(humanReviewState?.status || '').toLowerCase() === 'approved') {
+        try {
+          setRunning(true);
+          appendEvent('human_review_resume_requested', '已通过后台任务恢复审核后执行', {
+            type: 'human_review_resume_requested',
+            phase: 'judgment',
+            status: 'running',
+          });
+          const task = await debateApi.executeBackground(sessionId);
+          await pollTaskUntilDone(task.task_id, sessionId);
+        } catch (e: any) {
+          setRunning(false);
+          message.error(e?.response?.data?.detail || e?.message || '恢复失败');
+        }
+        return;
+      }
+      void startRealtimeDebate();
       return;
     }
     void startRealtimeDebate();
@@ -1543,7 +1945,7 @@ const IncidentPage: React.FC = () => {
     setEventRecords([]);
     setStreamedMessageText({});
     setExpandedDialogueIds({});
-    setSelectedNetworkStep(null);
+    resetProcessFocus();
     resetDialogueFilters();
     assetMappingReadyRef.current = false;
     setIncidentId(iid);
@@ -1596,6 +1998,10 @@ const IncidentPage: React.FC = () => {
       if (wsRef.current) wsRef.current.close();
       Object.values(streamTimersRef.current).forEach((timerId) => window.clearInterval(timerId));
       streamTimersRef.current = {};
+      if (eventFlushTimerRef.current) {
+        window.clearTimeout(eventFlushTimerRef.current);
+        eventFlushTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -1605,8 +2011,12 @@ const IncidentPage: React.FC = () => {
   );
 
   const debateEvents = useMemo(
-    () => eventRecords.filter((row) => isDebateProcessEvent(row)),
-    [eventRecords],
+    () =>
+      eventRecords
+        .filter((row) => isDebateProcessEvent(row))
+        .filter((row) => eventMatchesLead(row, selectedLeadFilter))
+        .filter((row) => eventMatchesQualityFocus(row, selectedQualityFocus)),
+    [eventRecords, selectedLeadFilter, selectedQualityFocus],
   );
 
   const dialogueMessages = useMemo(
@@ -1768,6 +2178,13 @@ const IncidentPage: React.FC = () => {
       });
     };
 
+    ensureNode('ProblemAnalysisAgent');
+
+    (sessionDetail?.rounds || []).forEach((round) => {
+      const roundAgent = String(round.agent_name || '').trim();
+      if (roundAgent && /agent$/i.test(roundAgent)) ensureNode(roundAgent);
+    });
+
     debateEvents
       .slice()
       .reverse()
@@ -1814,8 +2231,164 @@ const IncidentPage: React.FC = () => {
       return left.label.localeCompare(right.label);
     });
     const edges = Array.from(edgeMap.values()).sort((left, right) => right.count - left.count);
-    return { nodes, edges, steps: sequenceSteps };
-  }, [debateEvents]);
+    const steps = sequenceSteps.map((step) => {
+      const relatedRows = debateEvents.filter((row) => isEventRelatedToNetworkStep(row, step));
+      const leadGroups = relatedRows
+        .filter((row) => row.kind === 'agent_command_issued')
+        .flatMap((row) => extractLeadGroups(asRecord(row.data)));
+      const clueCount = relatedRows
+        .filter((row) => row.kind === 'agent_command_issued')
+        .flatMap((row) => extractLeadGroups(asRecord(row.data)).flatMap((group) => group.items))
+        .filter(Boolean).length;
+      const toolCount = relatedRows.filter((row) => row.kind === 'agent_tool_context_prepared' || row.kind === 'agent_tool_io').length;
+      return {
+        ...step,
+        clueCount,
+        toolCount,
+        keyClues: pickStepKeyClues(leadGroups),
+      };
+    });
+    return { nodes, edges, steps };
+  }, [debateEvents, sessionDetail?.rounds]);
+
+  const selectedNetworkStepDetails = useMemo<NetworkStepDetailItem[]>(() => {
+    if (!selectedNetworkStep) return [];
+    const buildStepDetail = (row: EventRecord): NetworkStepDetailItem => {
+      const data = asRecord(row.data);
+      const leadGroups = row.kind === 'agent_command_issued' ? extractLeadGroups(data) : [];
+      const detailLines =
+        row.kind === 'agent_command_issued'
+          ? [
+              firstTextValue(data, ['command']) ? `任务：${extractChatMessageText(firstTextValue(data, ['command']))}` : '',
+              firstTextValue(data, ['focus']) ? `重点：${extractChatMessageText(firstTextValue(data, ['focus']))}` : '',
+              firstTextValue(data, ['expected_output']) ? `输出：${extractChatMessageText(firstTextValue(data, ['expected_output']))}` : '',
+            ].filter(Boolean)
+          : row.kind === 'agent_command_feedback'
+            ? [
+                firstTextValue(data, ['feedback']) ? `反馈：${extractChatMessageText(firstTextValue(data, ['feedback']))}` : '',
+                firstTextValue(data, ['command']) ? `命令：${extractChatMessageText(firstTextValue(data, ['command']))}` : '',
+                formatEvidenceStatusLabel(firstTextValue(data, ['evidence_status']))
+                  ? `分析类型：${formatEvidenceStatusLabel(firstTextValue(data, ['evidence_status']))}` : '',
+                formatToolStatusLabel(firstTextValue(data, ['tool_status']))
+                  ? `${formatToolStatusLabel(firstTextValue(data, ['tool_status']))}` : '',
+                firstTextValue(data, ['degrade_reason'])
+                  ? `限制原因：${extractChatMessageText(firstTextValue(data, ['degrade_reason']))}` : '',
+                Array.isArray(data.missing_info) && data.missing_info.length > 0
+                  ? `缺失证据：${data.missing_info.map((item) => String(item || '').trim()).filter(Boolean).join('、')}` : '',
+                Array.isArray(data.next_checks) && data.next_checks.length > 0
+                  ? `建议补采：${data.next_checks.map((item) => String(item || '').trim()).filter(Boolean).join('；')}` : '',
+                typeof data.confidence === 'number' ? `置信度：${(Number(data.confidence) * 100).toFixed(1)}%` : '',
+              ].filter(Boolean)
+            : row.kind === 'agent_chat_message'
+              ? [extractChatMessageText(firstTextValue(data, ['message']) || row.text)].filter(Boolean)
+              : [];
+      const richSummary =
+        row.kind === 'agent_command_issued'
+          ? firstTextValue(data, ['command']) || firstTextValue(data, ['message']) || row.text
+          : row.kind === 'agent_command_feedback'
+            ? [
+                firstTextValue(data, ['feedback']) ? `反馈：${extractChatMessageText(firstTextValue(data, ['feedback']))}` : '',
+                firstTextValue(data, ['command']) ? `命令：${extractChatMessageText(firstTextValue(data, ['command']))}` : '',
+                typeof data.confidence === 'number' ? `置信度：${(Number(data.confidence) * 100).toFixed(1)}%` : '',
+              ]
+                .filter(Boolean)
+                .join('\n')
+            : row.kind === 'agent_chat_message'
+              ? extractChatMessageText(firstTextValue(data, ['message']) || row.text)
+              : row.text;
+      return {
+        id: row.id,
+        timeText: row.timeText,
+        agentName: firstTextValue(data, ['agent_name', 'agent']) || '-',
+        kind: row.kind,
+        summary: richSummary || toDisplayText(data).slice(0, 280),
+        detailLines,
+        leadGroups,
+      };
+    };
+    const exactMatches = debateEvents
+      .filter((row) => {
+        const interaction = extractNetworkRelationFromEvent(row);
+        return Boolean(
+          interaction
+          && interaction.source === selectedNetworkStep.source
+          && interaction.target === selectedNetworkStep.target
+          && interaction.relation === selectedNetworkStep.relation,
+        );
+      })
+      .map(buildStepDetail);
+
+    if (exactMatches.length > 0) return exactMatches;
+
+    return debateEvents
+      .filter((row) => isEventRelatedToNetworkStep(row, selectedNetworkStep))
+      .slice(0, 8)
+      .map(buildStepDetail);
+  }, [debateEvents, selectedNetworkStep]);
+
+  useEffect(() => {
+    if (!selectedNetworkStep) return;
+    const stillExists = agentNetworkData.steps.some((step) => step.id === selectedNetworkStep.id);
+    if (!stillExists) {
+      setSelectedNetworkStep(null);
+    }
+  }, [agentNetworkData.steps, selectedNetworkStep]);
+
+  useEffect(() => {
+    if (!selectedLeadFilter) return;
+    const match = agentNetworkData.steps.find((step) =>
+      (step.keyClues || []).some((item) => item.toLowerCase().includes(String(selectedLeadFilter.value || '').toLowerCase())),
+    );
+    if (match) {
+      setSelectedNetworkStep(match);
+    }
+  }, [agentNetworkData.steps, selectedLeadFilter]);
+
+  const selectedNetworkStepJourney = useMemo(() => {
+    if (!selectedNetworkStep) {
+      return {
+        leadGroups: [] as Array<{ label: string; items: string[] }>,
+        toolItems: [] as Array<{ id: string; timeText: string; summary: string; detail: string }>,
+        conclusionItems: [] as Array<{ id: string; timeText: string; summary: string; detail: string }>,
+      };
+    }
+
+    const scopedRows = debateEvents.filter((row) => isEventRelatedToNetworkStep(row, selectedNetworkStep));
+    const commandRow = scopedRows.find((row) => row.kind === 'agent_command_issued');
+    const leadGroups = commandRow ? extractLeadGroups(asRecord(commandRow.data)) : [];
+
+    const toolItems = scopedRows
+      .filter((row) =>
+        row.kind === 'agent_tool_context_prepared'
+        || row.kind === 'agent_tool_io'
+        || row.kind === 'agent_tool_context_failed',
+      )
+      .slice(0, 8)
+      .map((row) => {
+        const built = buildDialogueMessage(row);
+        return {
+          id: row.id,
+          timeText: row.timeText,
+          summary: built?.summary || row.text,
+          detail: built?.toolPayload?.responseText || built?.detail || row.text,
+        };
+      });
+
+    const conclusionItems = scopedRows
+      .filter((row) => row.kind === 'agent_command_feedback' || row.kind === 'agent_chat_message')
+      .slice(0, 8)
+      .map((row) => {
+        const built = buildDialogueMessage(row);
+        return {
+          id: row.id,
+          timeText: row.timeText,
+          summary: built?.summary || row.text,
+          detail: built?.detail || row.text,
+        };
+      });
+
+    return { leadGroups, toolItems, conclusionItems };
+  }, [debateEvents, selectedNetworkStep]);
 
   function isEventRelatedToNetworkStep(row: EventRecord, step: AgentNetworkStep | null): boolean {
     if (!step) return true;
@@ -1904,48 +2477,196 @@ const IncidentPage: React.FC = () => {
   }, [filteredDialogueMessages]);
 
   const renderEventFilters = (
-    <DialogueFilterBar
-      agents={eventFilterOptions.agents}
-      phases={eventFilterOptions.phases}
-      types={eventFilterOptions.types}
-      selectedAgent={eventFilterAgent}
-      selectedPhase={eventFilterPhase}
-      selectedType={eventFilterType}
-      searchText={eventSearchText}
-      onAgentChange={setEventFilterAgent}
-      onPhaseChange={setEventFilterPhase}
-      onTypeChange={setEventFilterType}
-      onSearchChange={setEventSearchText}
-      onReset={() => {
-        setEventFilterAgent('all');
-        setEventFilterPhase('all');
-        setEventFilterType('all');
-        setEventSearchText('');
-      }}
-      filteredCount={filteredDialogueMessages.length}
-      totalCount={dialogueMessages.length}
-    />
+    <Space direction="vertical" size="small" style={{ width: '100%' }}>
+      {selectedLeadFilter ? (
+        <Space wrap>
+          <Tag color="gold">线索过滤中</Tag>
+          <Tag>{selectedLeadFilter.label}</Tag>
+          <Tag color="blue">{selectedLeadFilter.value}</Tag>
+          <Button size="small" onClick={() => setSelectedLeadFilter(null)}>
+            清除线索过滤
+          </Button>
+        </Space>
+      ) : null}
+      {selectedQualityFocus ? (
+        <Space wrap>
+          <Tag color="purple">质量过滤中</Tag>
+          <Tag color="blue">{selectedQualityFocus.label}</Tag>
+          <Tag color={selectedQualityFocus.statusFilter === 'all' ? 'processing' : 'default'}>
+            {selectedQualityFocus.statusFilter === 'missing'
+              ? '仅看缺失反馈'
+              : selectedQualityFocus.statusFilter === 'inferred_without_tool'
+                ? '仅看受限反馈'
+                : '全部质量问题'}
+          </Tag>
+          {selectedQualityFocus.agentNames.map((agent) => (
+            <Tag key={agent}>{agent}</Tag>
+          ))}
+          <Button
+            size="small"
+            type={selectedQualityFocus.statusFilter === 'all' ? 'primary' : 'default'}
+            onClick={() => updateQualityFocusStatus('all')}
+          >
+            全部质量问题
+          </Button>
+          <Button
+            size="small"
+            type={selectedQualityFocus.statusFilter === 'inferred_without_tool' ? 'primary' : 'default'}
+            onClick={() => updateQualityFocusStatus('inferred_without_tool')}
+          >
+            仅看受限反馈
+          </Button>
+          <Button
+            size="small"
+            type={selectedQualityFocus.statusFilter === 'missing' ? 'primary' : 'default'}
+            onClick={() => updateQualityFocusStatus('missing')}
+          >
+            仅看缺失反馈
+          </Button>
+          <Button size="small" onClick={resetQualityFocus}>
+            清除质量过滤
+          </Button>
+        </Space>
+      ) : null}
+      <DialogueFilterBar
+        agents={eventFilterOptions.agents}
+        phases={eventFilterOptions.phases}
+        types={eventFilterOptions.types}
+        selectedAgent={eventFilterAgent}
+        selectedPhase={eventFilterPhase}
+        selectedType={eventFilterType}
+        searchText={eventSearchText}
+        onAgentChange={setEventFilterAgent}
+        onPhaseChange={setEventFilterPhase}
+        onTypeChange={setEventFilterType}
+        onSearchChange={setEventSearchText}
+        onReset={() => {
+          setEventFilterAgent('all');
+          setEventFilterPhase('all');
+          setEventFilterType('all');
+          setEventSearchText('');
+          setSelectedLeadFilter(null);
+          setSelectedQualityFocus(null);
+        }}
+        filteredCount={filteredDialogueMessages.length}
+        totalCount={dialogueMessages.length}
+      />
+    </Space>
   );
 
   const renderNetworkFocus = selectedNetworkStep ? (
     <Card className="module-card network-focus-card" size="small">
-      <Space wrap style={{ justifyContent: 'space-between', width: '100%' }}>
-        <Space wrap>
-          <Tag color="processing">链路过滤中</Tag>
-          <Tag color="blue">{selectedNetworkStep.source}</Tag>
-          <span>{'->'}</span>
-          <Tag color="green">{selectedNetworkStep.target}</Tag>
-          <Tag color="purple">
-            {selectedNetworkStep.relation === 'command'
-              ? '下发指令'
-              : selectedNetworkStep.relation === 'feedback'
-                ? '反馈结果'
-                : '对话回复'} x{selectedNetworkStep.count}
-          </Tag>
+      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+        <Space wrap style={{ justifyContent: 'space-between', width: '100%' }}>
+          <Space wrap>
+            <Tag color="processing">链路过滤中</Tag>
+            <Tag color="blue">{selectedNetworkStep.source}</Tag>
+            <span>{'->'}</span>
+            <Tag color="green">{selectedNetworkStep.target}</Tag>
+            <Tag color="purple">
+              {selectedNetworkStep.relation === 'command'
+                ? '下发指令'
+                : selectedNetworkStep.relation === 'feedback'
+                  ? '反馈结果'
+                  : '对话回复'} x{selectedNetworkStep.count}
+            </Tag>
+          </Space>
+          <Button size="small" onClick={() => setSelectedNetworkStep(null)}>
+            清除过滤
+          </Button>
         </Space>
-        <Button size="small" onClick={() => setSelectedNetworkStep(null)}>
-          清除过滤
-        </Button>
+        <div className="network-step-detail-list">
+          {selectedNetworkStepDetails.length > 0 ? (
+            selectedNetworkStepDetails.map((item) => (
+              <div key={item.id} className="network-step-detail-item">
+                <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                  <Space wrap>
+                    <Tag>{item.kind}</Tag>
+                    <Text type="secondary">{item.timeText}</Text>
+                    <Text type="secondary">{item.agentName}</Text>
+                  </Space>
+                  <Text>{item.summary}</Text>
+                  {item.detailLines && item.detailLines.length > 0 ? (
+                    <div className="network-step-detail-lines">
+                      {item.detailLines.map((line) => (
+                        <Text key={`${item.id}_${line}`} type="secondary">
+                          {line}
+                        </Text>
+                      ))}
+                    </div>
+                  ) : null}
+                  {item.leadGroups && item.leadGroups.length > 0 ? (
+                    <div className="network-step-leads">
+                      {item.leadGroups.map((group) => (
+                        <div key={`${item.id}_${group.label}`} className="network-step-lead-group">
+                          <Text type="secondary" className="network-step-lead-label">
+                            {group.label}
+                          </Text>
+                          <Space wrap>
+                            {group.items.map((value) => (
+                              <Tag key={`${item.id}_${group.label}_${value}`}>{value}</Tag>
+                            ))}
+                          </Space>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </Space>
+              </div>
+            ))
+          ) : (
+            <Text type="secondary">暂无与当前链路直接关联的明细事件。</Text>
+          )}
+        </div>
+        <div className="network-journey-board">
+          <div className="network-journey-column">
+            <Text className="network-journey-title">1. 输入线索</Text>
+            {selectedNetworkStepJourney.leadGroups.length > 0 ? (
+              selectedNetworkStepJourney.leadGroups.map((group) => (
+                <div key={`lead_${group.label}`} className="network-step-lead-group">
+                  <Text type="secondary" className="network-step-lead-label">
+                    {group.label}
+                  </Text>
+                  <Space wrap>
+                    {group.items.map((value) => (
+                      <Tag key={`lead_${group.label}_${value}`}>{value}</Tag>
+                    ))}
+                  </Space>
+                </div>
+              ))
+            ) : (
+              <Text type="secondary">当前链路没有显式结构化线索。</Text>
+            )}
+          </div>
+          <div className="network-journey-column">
+            <Text className="network-journey-title">2. 工具查询</Text>
+            {selectedNetworkStepJourney.toolItems.length > 0 ? (
+              selectedNetworkStepJourney.toolItems.map((item) => (
+                <div key={item.id} className="network-journey-item">
+                  <Text>{item.summary}</Text>
+                  <Text type="secondary">{item.timeText}</Text>
+                  <pre className="network-journey-pre">{item.detail}</pre>
+                </div>
+              ))
+            ) : (
+              <Text type="secondary">当前链路没有记录到独立工具查询事件。</Text>
+            )}
+          </div>
+          <div className="network-journey-column">
+            <Text className="network-journey-title">3. 输出结论</Text>
+            {selectedNetworkStepJourney.conclusionItems.length > 0 ? (
+              selectedNetworkStepJourney.conclusionItems.map((item) => (
+                <div key={item.id} className="network-journey-item">
+                  <Text>{item.summary}</Text>
+                  <Text type="secondary">{item.timeText}</Text>
+                  <pre className="network-journey-pre">{item.detail}</pre>
+                </div>
+              ))
+            ) : (
+              <Text type="secondary">当前链路还没有形成明确结论。</Text>
+            )}
+          </div>
+        </div>
       </Space>
     </Card>
   ) : null;
@@ -2009,10 +2730,93 @@ const IncidentPage: React.FC = () => {
   const workspaceActive = workspaceTabs[activeStep] || workspaceTabs[0];
   const workspaceActiveKey = workspaceActive.key;
 
+  const sessionQualitySummary = useMemo<SessionQualitySummary>(() => {
+    const eventLog = Array.isArray((sessionDetail?.context || {}).event_log)
+      ? ((sessionDetail?.context || {}).event_log as Array<Record<string, unknown>>)
+      : [];
+    const limitedAgents = new Set<string>();
+    let limitedCount = 0;
+    eventLog.forEach((row) => {
+      const event = row && typeof row.event === 'object' && !Array.isArray(row.event)
+        ? (row.event as Record<string, unknown>)
+        : {};
+      if (
+        String(event.type || '').toLowerCase() === 'agent_command_feedback'
+        && String(event.evidence_status || '').toLowerCase() === 'inferred_without_tool'
+      ) {
+        limitedCount += 1;
+        const agentName = String(event.agent_name || event.agent || '').trim();
+        if (agentName) limitedAgents.add(agentName);
+      }
+    });
+    const riskFactors = Array.isArray(debateResult?.risk_assessment?.risk_factors)
+      ? debateResult.risk_assessment.risk_factors.map((item) => String(item || '')).filter(Boolean)
+      : [];
+    const keyAgents = ['LogAgent', 'CodeAgent', 'DatabaseAgent', 'MetricsAgent'];
+    const latestEvidenceStatus = new Map<string, string>();
+    eventLog.forEach((row) => {
+      const event = row && typeof row.event === 'object' && !Array.isArray(row.event)
+        ? (row.event as Record<string, unknown>)
+        : {};
+      if (String(event.type || '').toLowerCase() !== 'agent_command_feedback') return;
+      const agentName = String(event.agent_name || event.agent || '').trim();
+      if (!agentName || !keyAgents.includes(agentName)) return;
+      latestEvidenceStatus.set(agentName, String(event.evidence_status || '').toLowerCase().trim() || 'collected');
+    });
+    const evidenceCoverage = { ok: 0, degraded: 0, missing: 0 };
+    keyAgents.forEach((agentName) => {
+      const status = latestEvidenceStatus.get(agentName);
+      if (status === 'missing') {
+        evidenceCoverage.missing += 1;
+      } else if (status === 'degraded' || status === 'inferred_without_tool') {
+        evidenceCoverage.degraded += 1;
+      } else if (status) {
+        evidenceCoverage.ok += 1;
+      }
+    });
+    return {
+      limitedAnalysis: limitedCount > 0,
+      limitedAgentNames: Array.from(limitedAgents),
+      limitedCount,
+      evidenceGap: riskFactors.some((item) => item.includes('关键证据不足')),
+      riskFactors,
+      evidenceCoverage,
+    };
+  }, [sessionDetail, debateResult]);
+
+  const focusSessionQuality = (mode: 'limited' | 'evidence-gap') => {
+    const agentNames =
+      mode === 'limited'
+        ? sessionQualitySummary.limitedAgentNames
+        : Array.from(
+            new Set([
+              ...sessionQualitySummary.limitedAgentNames,
+              ...(sessionQualitySummary.evidenceCoverage.missing > 0
+                ? ['LogAgent', 'CodeAgent', 'DatabaseAgent', 'MetricsAgent']
+                : []),
+            ]),
+          ).filter(Boolean);
+    setSelectedLeadFilter(null);
+    setSelectedNetworkStep(null);
+    setSelectedQualityFocus({
+      label: mode === 'limited' ? '受限分析' : '关键证据不足',
+      agentNames,
+      eventType: 'agent_command_feedback',
+      statusFilter: mode === 'limited' ? 'inferred_without_tool' : 'all',
+    });
+    setActiveStep(2);
+    setActiveProcessTab('dialogue');
+    resetDialogueFilters();
+    setEventFilterType('agent_command_feedback');
+  };
+
   const switchToStep = async (nextStep: number) => {
     if (nextStep > 0 && !incidentId) {
       message.warning('请先创建故障并初始化会话');
       return;
+    }
+    if (nextStep !== 2) {
+      resetProcessFocus();
     }
     setActiveStep(nextStep);
     if (nextStep === 3 && incidentId && sessionId) {
@@ -2025,8 +2829,25 @@ const IncidentPage: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    if (activeStep !== 2 && selectedNetworkStep) {
+      setSelectedNetworkStep(null);
+    }
+  }, [activeStep, selectedNetworkStep]);
+
+  useEffect(() => {
+    if (activeProcessTab !== 'network' && selectedNetworkStep) {
+      setSelectedNetworkStep(null);
+    }
+  }, [activeProcessTab, selectedNetworkStep]);
+
   const roundCollapseItems = (sessionDetail?.rounds || [])
     .filter((round) => {
+      if (selectedQualityFocus && selectedQualityFocus.agentNames.length > 0) {
+        if (!selectedQualityFocus.agentNames.includes(round.agent_name)) {
+          return false;
+        }
+      }
       if (!selectedNetworkStep) return true;
       if (selectedNetworkStep.relation === 'command') {
         return round.agent_name === selectedNetworkStep.target;
@@ -2054,7 +2875,7 @@ const IncidentPage: React.FC = () => {
 
   const timelineItems = useMemo(
     () =>
-      filteredDebateEvents.map((row) => ({
+      filteredDebateEvents.slice(0, 120).map((row) => ({
         children: `${row.timeText} [${row.kind}] ${row.text}${
           String(asRecord(row.data).trace_id || '') ? ` trace=${String(asRecord(row.data).trace_id || '')}` : ''
         }`,
@@ -2114,28 +2935,60 @@ const IncidentPage: React.FC = () => {
     return '等待分析开始后，这里会展示责任田映射结果。';
   }, [eventRecords, mappingItems.length, running, sessionDetail?.status, sessionId]);
 
+  const humanReviewState = useMemo(() => {
+    const context = asRecord(sessionDetail?.context);
+    const review = asRecord(context.human_review);
+    const status = String(review.status || '').trim();
+    const reason = String(review.reason || '').trim();
+    if (!status && !reason) return null;
+    return {
+      status,
+      reason,
+      resumeFromStep: String(review.resume_from_step || '').trim(),
+      approver: String(review.approver || '').trim(),
+      comment: String(review.comment || review.rejection_reason || '').trim(),
+    };
+  }, [sessionDetail]);
+
+  const investigationLeads = useMemo(() => extractInvestigationLeadsView(sessionDetail), [sessionDetail]);
+  const highlightedLeadKeys = useMemo(() => {
+    if (selectedLeadFilter) return [`${selectedLeadFilter.label}:${selectedLeadFilter.value}`];
+    if (!selectedNetworkStep) return [];
+    const step = agentNetworkData.steps.find((item) => item.id === selectedNetworkStep.id);
+    if (!step) return [];
+    const relatedRows = debateEvents.filter((row) => isEventRelatedToNetworkStep(row, step));
+    const groups = relatedRows
+      .filter((row) => row.kind === 'agent_command_issued')
+      .flatMap((row) => extractLeadGroups(asRecord(row.data)));
+    return Array.from(new Set(toLeadKeys(groups)));
+  }, [agentNetworkData.steps, debateEvents, selectedLeadFilter, selectedNetworkStep]);
+
   const mainAgentConclusion = useMemo(() => {
+    if (debateResult?.root_cause) {
+      const finalConclusion = buildConclusionCandidate(
+        String(debateResult.root_cause || ''),
+        formatBeijingDateTime(debateResult.created_at),
+        '最终裁决',
+      );
+      if (finalConclusion) return finalConclusion;
+    }
+    for (const row of eventRecords) {
+      if (row.kind !== 'agent_chat_message') continue;
+      const data = asRecord(row.data);
+      const agent = firstTextValue(data, ['agent_name', 'agent']);
+      if (agent !== 'JudgeAgent') continue;
+      const messageText = firstTextValue(data, ['conclusion', 'message']);
+      const candidate = buildConclusionCandidate(messageText, row.timeText, 'JudgeAgent');
+      if (candidate) return candidate;
+    }
     for (const row of eventRecords) {
       if (row.kind !== 'agent_chat_message') continue;
       const data = asRecord(row.data);
       const agent = firstTextValue(data, ['agent_name', 'agent']);
       if (agent !== 'ProblemAnalysisAgent') continue;
-      const messageText = firstTextValue(data, ['message']);
-      if (messageText) {
-        return {
-          text: normalizeMarkdownText(extractChatMessageText(messageText)),
-          timeText: row.timeText,
-        };
-      }
-    }
-    if (debateResult?.root_cause) {
-      if (!isEffectiveConclusionText(debateResult.root_cause)) {
-        return null;
-      }
-      return {
-        text: debateResult.root_cause,
-        timeText: formatBeijingDateTime(debateResult.created_at),
-      };
+      const messageText = firstTextValue(data, ['conclusion', 'message']);
+      const candidate = buildConclusionCandidate(messageText, row.timeText, 'ProblemAnalysisAgent');
+      if (candidate) return candidate;
     }
     return null;
   }, [eventRecords, debateResult]);
@@ -2317,25 +3170,82 @@ const IncidentPage: React.FC = () => {
     return Upload.LIST_IGNORE;
   };
 
+  useLayoutEffect(() => {
+    const updateNavLayout = () => {
+      const shell = navShellRef.current;
+      const nav = navRef.current;
+      if (!shell || !nav) return;
+      const rect = shell.getBoundingClientRect();
+      const next = {
+        left: rect.left,
+        width: rect.width,
+        height: nav.offsetHeight,
+      };
+      setNavLayout((prev) =>
+        prev.left === next.left && prev.width === next.width && prev.height === next.height ? prev : next,
+      );
+    };
+
+    updateNavLayout();
+    const resizeObserver = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(() => updateNavLayout())
+      : null;
+    if (resizeObserver) {
+      if (navShellRef.current) resizeObserver.observe(navShellRef.current);
+      if (navRef.current) resizeObserver.observe(navRef.current);
+    }
+    window.addEventListener('resize', updateNavLayout);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', updateNavLayout);
+    };
+  }, []);
+
   return (
     <div className="incident-page">
-      <div className="incident-section-nav">
-        <Tabs
-          className="incident-workspace-tabs"
-          activeKey={workspaceActiveKey}
-          onChange={(key) => {
-            const target = workspaceTabs.find((item) => item.key === key);
-            if (target) {
-              void switchToStep(target.step);
-            }
-          }}
-          items={workspaceTabs.map((item) => ({
-            key: item.key,
-            label: item.label,
-            children: null,
-          }))}
-        />
-        <Text type="secondary">{workspaceActive.hint}</Text>
+      <div
+        ref={navShellRef}
+        className="incident-section-nav-shell"
+        style={{ height: navLayout.height ? navLayout.height + 18 : undefined }}
+      >
+        <div
+          ref={navRef}
+          className="incident-section-nav"
+          style={
+            navLayout.width > 0
+              ? {
+                  left: navLayout.left,
+                  width: navLayout.width,
+                }
+              : undefined
+          }
+        >
+          <Tabs
+            className="incident-workspace-tabs"
+            activeKey={workspaceActiveKey}
+            onChange={(key) => {
+              const target = workspaceTabs.find((item) => item.key === key);
+              if (target) {
+                void switchToStep(target.step);
+              }
+            }}
+            items={workspaceTabs.map((item) => ({
+              key: item.key,
+              label: item.label,
+              children: null,
+            }))}
+          />
+          <Text type="secondary">{workspaceActive.hint}</Text>
+          <Space wrap size={6} className="incident-session-quality-pills">
+            {typeof debateResult?.confidence === 'number' ? (
+              <Tag color="geekblue">{`置信度 ${(debateResult.confidence * 100).toFixed(1)}%`}</Tag>
+            ) : null}
+            {sessionQualitySummary.limitedAnalysis ? (
+              <Tag color="gold">{`受限分析 ${sessionQualitySummary.limitedCount} 次`}</Tag>
+            ) : null}
+            {sessionQualitySummary.evidenceGap ? <Tag color="volcano">关键证据不足</Tag> : null}
+          </Space>
+        </div>
       </div>
 
       <div style={{ marginTop: 24 }}>
@@ -2373,7 +3283,24 @@ const IncidentPage: React.FC = () => {
           />
         )}
 
-        {activeStep === 1 && <AssetMappingPanel mappingItems={mappingItems} mappingEmptyHint={mappingEmptyHint} />}
+        {activeStep === 1 && (
+          <AssetMappingPanel
+            mappingItems={mappingItems}
+            mappingEmptyHint={mappingEmptyHint}
+            investigationLeads={investigationLeads}
+            selectedLeadKey={selectedLeadFilter ? `${selectedLeadFilter.label}:${selectedLeadFilter.value}` : null}
+            highlightedLeadKeys={highlightedLeadKeys}
+            onLeadSelect={(lead) => {
+              setSelectedQualityFocus(null);
+              setSelectedLeadFilter(lead);
+              if (lead) {
+                setActiveStep(2);
+                setActiveProcessTab('network');
+                setSelectedNetworkStep(null);
+              }
+            }}
+          />
+        )}
 
         {activeStep === 2 && (
           <DebateProcessPanel
@@ -2381,11 +3308,18 @@ const IncidentPage: React.FC = () => {
             sessionId={sessionId}
             running={running}
             loading={loading}
+            sessionStatus={String(sessionDetail?.status || '')}
             debateMaxRounds={debateMaxRounds}
             onStartRealtimeDebate={startRealtimeDebate}
             onCancel={() => sendWsControl('cancel')}
             onResume={() => sendWsControl('resume')}
+            onApproveReview={() => sendWsControl('approve')}
+            onRejectReview={() => sendWsControl('reject')}
             onRetryFailed={retryFailedAgents}
+            activeTabKey={activeProcessTab}
+            onTabChange={(key) => {
+              setActiveProcessTab(key);
+            }}
             eventFiltersNode={renderEventFilters}
             networkFocusNode={renderNetworkFocus}
             dialogueNode={renderDialogueStream}
@@ -2393,6 +3327,7 @@ const IncidentPage: React.FC = () => {
             roundCollapseItems={roundCollapseItems}
             timelineItems={timelineItems}
             eventStats={eventStats}
+            humanReview={humanReviewState}
           />
         )}
 
@@ -2409,6 +3344,9 @@ const IncidentPage: React.FC = () => {
             incidentId={incidentId}
             sessionId={sessionId}
             debateConfidence={debateResult?.confidence}
+            sessionQualitySummary={sessionQualitySummary}
+            onFocusLimitedAnalysis={() => focusSessionQuality('limited')}
+            onFocusEvidenceGap={() => focusSessionQuality('evidence-gap')}
             onRegenerateReport={regenerateReport}
           />
         )}

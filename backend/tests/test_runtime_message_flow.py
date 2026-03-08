@@ -1,17 +1,24 @@
-"""Tests for runtime message dedupe and dialogue-driven peer extraction."""
+"""test运行时消息flow相关测试。"""
+
+import asyncio
 
 from langchain_core.messages import AIMessage
 
+from app.runtime.langgraph.phase_executor import PhaseExecutor
 from app.runtime.langgraph_runtime import LangGraphRuntimeOrchestrator
-from app.runtime.langgraph.state import AgentSpec
+from app.runtime.langgraph.state import AgentSpec, DebateTurn
 from app.runtime.messages import AgentEvidence
 
 
 def _orchestrator() -> LangGraphRuntimeOrchestrator:
+    """为测试场景提供orchestrator辅助逻辑。"""
+    
     return LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
 
 
 def test_dedupe_new_messages_skips_same_signature():
+    """验证dedupe新增消息skips相同signature。"""
+    
     orchestrator = _orchestrator()
     existing = [AIMessage(content="同意：先看日志证据", name="DomainAgent")]
     incoming = [AIMessage(content="同意：先看日志证据", name="DomainAgent")]
@@ -22,6 +29,8 @@ def test_dedupe_new_messages_skips_same_signature():
 
 
 def test_build_peer_driven_prompt_prefers_dialogue_items():
+    """验证buildpeerdrivenPromptprefersdialogueitems。"""
+    
     orchestrator = _orchestrator()
     spec = AgentSpec(
         name="LogAgent",
@@ -60,6 +69,8 @@ def test_build_peer_driven_prompt_prefers_dialogue_items():
 
 
 def test_commander_prompt_prefers_dialogue_items_for_peer_summary():
+    """验证主AgentPromptprefersdialogueitemsforpeer摘要。"""
+    
     orchestrator = _orchestrator()
     prompt = orchestrator._build_problem_analysis_commander_prompt(
         loop_round=1,
@@ -90,6 +101,8 @@ def test_commander_prompt_prefers_dialogue_items_for_peer_summary():
 
 
 def test_supervisor_prompt_uses_dialogue_recent_messages():
+    """验证监督者Prompt使用dialogue最近消息。"""
+    
     orchestrator = _orchestrator()
     prompt = orchestrator._build_problem_analysis_supervisor_prompt(
         loop_round=1,
@@ -123,6 +136,8 @@ def test_supervisor_prompt_uses_dialogue_recent_messages():
 
 
 def test_round_cards_for_routing_falls_back_to_messages_when_history_empty():
+    """验证轮次cardsfor路由fallsbackto消息当历史空。"""
+    
     orchestrator = _orchestrator()
     cards = orchestrator._round_cards_for_routing(
         {
@@ -149,6 +164,8 @@ def test_round_cards_for_routing_falls_back_to_messages_when_history_empty():
 
 
 def test_derive_conversation_state_with_messages_and_existing_outputs():
+    """验证deriveconversation状态带消息andexistingoutputs。"""
+    
     orchestrator = _orchestrator()
     state = orchestrator._derive_conversation_state_with_context(
         [],
@@ -178,6 +195,8 @@ def test_derive_conversation_state_with_messages_and_existing_outputs():
 
 
 def test_build_agent_prompt_prefers_dialogue_items():
+    """验证buildAgentPromptprefersdialogueitems。"""
+    
     orchestrator = _orchestrator()
     spec = AgentSpec(
         name="CodeAgent",
@@ -216,6 +235,8 @@ def test_build_agent_prompt_prefers_dialogue_items():
 
 
 def test_build_collaboration_prompt_prefers_dialogue_items():
+    """验证buildcollaborationPromptprefersdialogueitems。"""
+    
     orchestrator = _orchestrator()
     spec = AgentSpec(
         name="DomainAgent",
@@ -253,7 +274,93 @@ def test_build_collaboration_prompt_prefers_dialogue_items():
     assert "线程池拥塞" in prompt
 
 
+def test_create_missing_evidence_turn_marks_payload_as_missing():
+    """验证创建缺失证据turn标记载荷as缺失。"""
+    
+    orchestrator = _orchestrator()
+    spec = AgentSpec(
+        name="DatabaseAgent",
+        role="数据库取证专家",
+        phase="analysis",
+        system_prompt="test",
+    )
+
+    turn = asyncio.run(
+        orchestrator._create_missing_evidence_turn(
+            spec=spec,
+            prompt="test prompt",
+            round_number=1,
+            loop_round=1,
+            tool_name="db_snapshot_reader",
+            tool_status="disabled",
+            reason="数据库工具未启用",
+        )
+    )
+
+    assert turn.output_content["degraded"] is True
+    assert turn.output_content["evidence_status"] == "missing"
+    assert turn.output_content["tool_status"] == "disabled"
+    assert "证据未采集完成" in turn.output_content["conclusion"]
+
+
+def test_apply_tool_limited_semantics_keeps_llm_analysis_when_tool_unavailable():
+    """验证apply工具受限semantics保留LLM分析当工具unavailable。"""
+    
+    orchestrator = _orchestrator()
+    spec = AgentSpec(
+        name="DatabaseAgent",
+        role="数据库取证专家",
+        phase="analysis",
+        system_prompt="test",
+    )
+    turn = DebateTurn(
+        round_number=1,
+        phase="analysis",
+        agent_name="DatabaseAgent",
+        agent_role="数据库取证专家",
+        model={"name": "glm-5"},
+        input_message="",
+        output_content={
+            "chat_message": "我先看现有 SQL 和锁等待现象。",
+            "analysis": "已有日志显示 lock wait timeout，并且订单接口在数据库阶段超时。",
+            "conclusion": "数据库锁等待仍是最高优先级怀疑方向。",
+            "confidence": 0.78,
+            "next_checks": ["确认 ipc_orders_t 最近锁冲突"],
+        },
+        confidence=0.78,
+    )
+
+    updated = orchestrator._apply_tool_limited_semantics(
+        turn=turn,
+        spec=spec,
+        assigned_command={"task": "检查数据库锁等待", "use_tool": True},
+        context_with_tools={
+            "investigation_leads": {
+                "database_tables": ["ipc_orders_t"],
+                "api_endpoints": ["/api/v1/orders"],
+            },
+            "tool_context": {
+                "name": "db_snapshot_reader",
+                "used": False,
+                "enabled": False,
+                "status": "disabled",
+                "summary": "数据库工具未启用",
+                "command_gate": {"has_command": True, "allow_tool": True},
+            },
+        },
+    )
+
+    assert updated.output_content["degraded"] is True
+    assert updated.output_content["evidence_status"] == "inferred_without_tool"
+    assert updated.output_content["tool_status"] == "disabled"
+    assert "受限分析" in updated.output_content["analysis"]
+    assert "ipc_orders_t" in updated.output_content["missing_info"]
+    assert updated.output_content["confidence"] <= 0.58
+
+
 def test_commander_prompt_can_use_existing_agent_outputs():
+    """验证主AgentPrompt可以useexistingAgentoutputs。"""
+    
     orchestrator = _orchestrator()
     prompt = orchestrator._build_problem_analysis_commander_prompt(
         loop_round=1,
@@ -274,6 +381,8 @@ def test_commander_prompt_can_use_existing_agent_outputs():
 
 
 def test_enrich_agent_commands_passes_mapped_tables_to_database_agent():
+    """验证enrichAgentcommandspassesmappedtablestodatabaseAgent。"""
+    
     orchestrator = _orchestrator()
     commands = {
         "DatabaseAgent": {
@@ -298,6 +407,8 @@ def test_enrich_agent_commands_passes_mapped_tables_to_database_agent():
 
 
 def test_extract_agent_commands_preserves_skill_hints_and_tables():
+    """验证提取AgentcommandspreservesSkill提示andtables。"""
+    
     orchestrator = _orchestrator()
     payload = {
         "commands": [
@@ -319,6 +430,8 @@ def test_extract_agent_commands_preserves_skill_hints_and_tables():
 
 
 def test_enrich_agent_commands_adds_default_skill_hints():
+    """验证enrichAgentcommandsadds默认Skill提示。"""
+    
     orchestrator = _orchestrator()
     commands = {
         "LogAgent": {
@@ -373,6 +486,8 @@ def test_enrich_agent_commands_adds_default_skill_hints():
 
 
 def test_enrich_agent_commands_does_not_override_existing_skill_hints():
+    """验证enrichAgentcommandsdoesnotoverrideexistingSkill提示。"""
+    
     orchestrator = _orchestrator()
     commands = {
         "CodeAgent": {
@@ -389,9 +504,94 @@ def test_enrich_agent_commands_does_not_override_existing_skill_hints():
     assert enriched["CodeAgent"]["skill_hints"] == ["custom-skill"]
 
 
+def test_enrich_agent_commands_with_investigation_leads():
+    """验证enrichAgentcommands带investigation线索。"""
+    
+    orchestrator = _orchestrator()
+    commands = {
+        "LogAgent": {"target_agent": "LogAgent", "task": "分析日志", "focus": "", "expected_output": ""},
+        "CodeAgent": {"target_agent": "CodeAgent", "task": "分析代码", "focus": "", "expected_output": ""},
+        "DatabaseAgent": {"target_agent": "DatabaseAgent", "task": "分析数据库", "focus": "", "expected_output": ""},
+        "MetricsAgent": {"target_agent": "MetricsAgent", "task": "分析指标", "focus": "", "expected_output": ""},
+    }
+    compact_context = {
+        "investigation_leads": {
+            "api_endpoints": ["POST /api/v1/orders"],
+            "service_names": ["order-service"],
+            "code_artifacts": ["order/service/OrderService.java"],
+            "class_names": ["OrderController", "OrderService"],
+            "database_tables": ["t_order", "t_order_item"],
+            "monitor_items": ["order.error.rate", "order.latency.p99"],
+            "dependency_services": ["inventory-service"],
+            "trace_ids": ["trace-001"],
+            "error_keywords": ["timeout", "inventory-service"],
+            "domain": "order",
+            "aggregate": "Order",
+            "owner_team": "order-sre",
+            "owner": "neo",
+        }
+    }
+
+    enriched = orchestrator._enrich_agent_commands_with_asset_mapping(commands, compact_context)
+
+    assert enriched["LogAgent"]["api_endpoints"] == ["POST /api/v1/orders"]
+    assert enriched["LogAgent"]["trace_ids"] == ["trace-001"]
+    assert "错误时间线" in enriched["LogAgent"]["expected_output"]
+    assert enriched["CodeAgent"]["class_names"] == ["OrderController", "OrderService"]
+    assert enriched["CodeAgent"]["code_artifacts"] == ["order/service/OrderService.java"]
+    assert enriched["DatabaseAgent"]["database_tables"] == ["t_order", "t_order_item"]
+    assert enriched["MetricsAgent"]["monitor_items"] == ["order.error.rate", "order.latency.p99"]
+
+
 def test_judge_timeout_plan_has_retry_in_quick_mode():
+    """验证裁决超时planhasretryinquick模式。"""
+    
     orchestrator = _orchestrator()
     orchestrator._require_verification_plan = False
     plan = orchestrator._agent_timeout_plan("JudgeAgent")
     assert len(plan) == 2
     assert float(plan[1]) >= float(plan[0])
+
+
+def test_queue_timeout_prioritizes_commander_and_judge():
+    """验证队列超时prioritizes主Agentand裁决。"""
+    
+    orchestrator = _orchestrator()
+
+    analysis_timeout = orchestrator._agent_queue_timeout("LogAgent")
+    commander_timeout = orchestrator._agent_queue_timeout("ProblemAnalysisAgent")
+    judge_timeout = orchestrator._agent_queue_timeout("JudgeAgent")
+
+    assert commander_timeout > analysis_timeout
+    assert judge_timeout > commander_timeout
+
+
+def test_analysis_batch_limit_reserves_slot_for_settlement_agents():
+    """验证分析batchlimitreservesslotforsettlementAgent。"""
+    
+    orchestrator = _orchestrator()
+    orchestrator._llm_semaphore_limit = 3
+
+    assert orchestrator._analysis_batch_limit(collaboration=False) == 2
+    assert orchestrator._analysis_batch_limit(collaboration=True) == 2
+
+    orchestrator._llm_semaphore_limit = 2
+    assert orchestrator._analysis_batch_limit(collaboration=False) == 1
+
+
+def test_phase_executor_batches_by_priority_and_limit():
+    """验证phaseexecutorbatchesby优先级andlimit。"""
+    
+    batches = PhaseExecutor._analysis_batches(
+        ["DatabaseAgent", "MetricsAgent", "LogAgent", "CodeAgent", "DomainAgent"],
+        [["DatabaseAgent", "MetricsAgent"], ["LogAgent", "CodeAgent"]],
+        1,
+    )
+
+    assert batches == [
+        ["DatabaseAgent"],
+        ["MetricsAgent"],
+        ["LogAgent"],
+        ["CodeAgent"],
+        ["DomainAgent"],
+    ]

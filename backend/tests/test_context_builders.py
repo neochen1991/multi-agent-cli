@@ -1,4 +1,4 @@
-"""Unit tests for langgraph context builder helpers."""
+"""test上下文builders相关测试。"""
 
 from app.runtime.langgraph.context_builders import (
     collect_peer_items_from_cards,
@@ -9,6 +9,8 @@ from app.runtime.messages import AgentEvidence
 
 
 def _card(agent: str, conclusion: str, confidence: float = 0.7) -> AgentEvidence:
+    """为测试场景提供卡片辅助逻辑。"""
+    
     return AgentEvidence(
         agent_name=agent,
         phase="analysis",
@@ -21,6 +23,8 @@ def _card(agent: str, conclusion: str, confidence: float = 0.7) -> AgentEvidence
 
 
 def test_collect_peer_items_from_dialogue_filters_self_and_dedup():
+    """验证collectpeeritems从dialoguefiltersselfanddedup。"""
+    
     items = collect_peer_items_from_dialogue(
         [
             {"speaker": "CodeAgent", "message": "m1", "conclusion": "c1", "phase": "analysis"},
@@ -36,6 +40,8 @@ def test_collect_peer_items_from_dialogue_filters_self_and_dedup():
 
 
 def test_collect_peer_items_from_cards_respects_limit():
+    """验证collectpeeritems从cards遵守limit。"""
+    
     cards = [
         _card("LogAgent", "l"),
         _card("CodeAgent", "c"),
@@ -47,6 +53,8 @@ def test_collect_peer_items_from_cards_respects_limit():
 
 
 def test_coordination_peer_items_falls_back_to_agent_outputs():
+    """验证coordinationpeeritemsfallsbacktoAgentoutputs。"""
+    
     items = coordination_peer_items(
         history_cards=[],
         dialogue_items=[],

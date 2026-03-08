@@ -1,6 +1,6 @@
-"""
-辩论 API
-Debate API Endpoints
+"""辩论会话 API。
+
+负责创建会话、同步/异步执行、多种恢复与取消操作，以及结果、谱系、回放等查询接口。
 """
 
 import asyncio
@@ -18,7 +18,8 @@ from app.models.debate import (
     DebateRound,
 )
 from app.models.incident import IncidentStatus, IncidentUpdate
-from app.services.debate_service import debate_service
+from app.runtime.task_registry import runtime_task_registry
+from app.services.debate_service import HumanReviewRequired, debate_service
 from app.services.incident_service import incident_service
 from app.core.task_queue import task_queue
 from app.config import settings
@@ -32,7 +33,7 @@ router = APIRouter()
 # ==================== API 数据模型 ====================
 
 class DebateSessionResponse(BaseModel):
-    """辩论会话响应"""
+    """辩论会话基础响应。"""
     id: str
     incident_id: str
     status: str
@@ -43,11 +44,12 @@ class DebateSessionResponse(BaseModel):
     completed_at: Optional[datetime] = None
 
     class Config:
+        """提供模型配置项，统一对象序列化与字段行为。"""
         from_attributes = True
 
 
 class DebateRoundResponse(BaseModel):
-    """辩论轮次响应"""
+    """单轮 Agent 执行结果响应。"""
     round_number: int
     phase: str
     agent_name: str
@@ -61,7 +63,7 @@ class DebateRoundResponse(BaseModel):
 
 
 class EvidenceItemResponse(BaseModel):
-    """证据项响应"""
+    """证据项响应。"""
     type: str
     description: str
     source: str
@@ -70,6 +72,8 @@ class EvidenceItemResponse(BaseModel):
 
 
 class RootCauseCandidateResponse(BaseModel):
+    """根因候选摘要响应。"""
+
     rank: int
     summary: str
     source_agent: Optional[str] = None
@@ -79,7 +83,7 @@ class RootCauseCandidateResponse(BaseModel):
 
 
 class FixRecommendationResponse(BaseModel):
-    """修复建议响应"""
+    """修复建议响应。"""
     summary: str
     steps: List[Dict[str, Any]]
     code_changes_required: bool
@@ -88,7 +92,7 @@ class FixRecommendationResponse(BaseModel):
 
 
 class ImpactAnalysisResponse(BaseModel):
-    """影响分析响应"""
+    """影响分析响应。"""
     affected_services: List[str]
     affected_users: Optional[str]
     business_impact: Optional[str]
@@ -96,14 +100,14 @@ class ImpactAnalysisResponse(BaseModel):
 
 
 class RiskAssessmentResponse(BaseModel):
-    """风险评估响应"""
+    """风险评估响应。"""
     risk_level: str
     risk_factors: List[str]
     mitigation_suggestions: List[str]
 
 
 class DebateResultResponse(BaseModel):
-    """辩论结果响应"""
+    """辩论最终结果响应。"""
     session_id: str
     incident_id: str
     root_cause: str
@@ -122,13 +126,13 @@ class DebateResultResponse(BaseModel):
 
 
 class DebateDetailResponse(DebateSessionResponse):
-    """辩论详情响应"""
+    """辩论详情响应，附带轮次历史和上下文快照。"""
     rounds: List[DebateRoundResponse]
     context: Dict[str, Any]
 
 
 class DebateListResponse(BaseModel):
-    """辩论列表响应"""
+    """分页辩论会话列表响应。"""
     items: List[DebateSessionResponse]
     total: int
     page: int
@@ -136,6 +140,8 @@ class DebateListResponse(BaseModel):
 
 
 class TaskResponse(BaseModel):
+    """异步任务状态响应。"""
+
     task_id: str
     status: str
     result: Optional[Dict[str, Any]] = None
@@ -143,11 +149,38 @@ class TaskResponse(BaseModel):
 
 
 class CancelResponse(BaseModel):
+    """取消会话后的响应。"""
+
     session_id: str
     cancelled: bool
 
 
+class HumanReviewActionRequest(BaseModel):
+    """人工审核批准请求。"""
+
+    approver: str = "sre-oncall"
+    comment: str = ""
+
+
+class HumanReviewRejectRequest(BaseModel):
+    """人工审核驳回请求。"""
+
+    approver: str = "sre-oncall"
+    reason: str = ""
+
+
+class HumanReviewActionResponse(BaseModel):
+    """人工审核动作执行结果。"""
+
+    session_id: str
+    success: bool
+    review_status: str
+    message: str
+
+
 class LineageResponse(BaseModel):
+    """会话谱系查询响应。"""
+
     session_id: str
     resolved_session_id: Optional[str] = None
     records: int
@@ -160,6 +193,8 @@ class LineageResponse(BaseModel):
 
 
 class ReplayResponse(BaseModel):
+    """会话关键流程回放响应。"""
+
     session_id: str
     resolved_session_id: Optional[str] = None
     count: int
@@ -172,6 +207,8 @@ class ReplayResponse(BaseModel):
 
 
 class OutputReferenceResponse(BaseModel):
+    """截断输出引用回查结果。"""
+
     ref_id: str
     found: bool
     session_id: str = ""
@@ -204,9 +241,14 @@ async def create_debate_session(
         pattern="^(standard|quick|background|async)$",
         description="会话执行模式：standard|quick|background|async",
     ),
+    deployment_profile: str = Query(
+        default="",
+        pattern="^(|baseline|skill_enabled|investigation_full|production_governed)$",
+        description="可选部署图模板：baseline|skill_enabled|investigation_full|production_governed",
+    ),
 ):
-    """创建辩论会话"""
-    # 获取故障事件
+    """为指定 incident 创建辩论会话，并同步把 incident 状态推进到分析中。"""
+    # 先校验 incident 存在，避免创建孤儿会话。
     incident = await incident_service.get_incident(incident_id)
     if not incident:
         raise HTTPException(
@@ -214,14 +256,15 @@ async def create_debate_session(
             detail=f"Incident {incident_id} not found"
         )
     
-    # 创建辩论会话
+    # 创建会话时会把执行模式、最大轮次和部署图模板写入 session.context。
     session = await debate_service.create_session(
         incident,
         max_rounds=max_rounds,
         execution_mode=normalize_execution_mode(mode).value,
+        deployment_profile=deployment_profile,
     )
     
-    # 更新故障状态
+    # incident 与 debate session 之间保持显式关联，便于前端从 incident 详情跳到会话详情。
     await incident_service.update_incident(
         incident_id,
         IncidentUpdate(
@@ -255,7 +298,7 @@ async def execute_debate(
         description="是否仅重试失败的 Agent（当前为兼容参数，默认 false）",
     ),
 ):
-    """执行辩论流程"""
+    """同步执行完整辩论流程，并在成功后回填 incident 结果。"""
     session = await debate_service.get_session(session_id)
     if not session:
         raise HTTPException(
@@ -264,7 +307,7 @@ async def execute_debate(
         )
     
     if session.status == DebateStatus.COMPLETED:
-        # 已完成，返回已有结果
+        # 已完成会话直接返回已保存结果，避免重复执行。
         result = await debate_service.get_result(session_id)
         if result:
             return _build_result_response(result)
@@ -275,7 +318,7 @@ async def execute_debate(
             retry_failed_only=retry_failed_only,
         )
         
-        # 更新故障状态和结果
+        # 成功完成后，把裁决结果写回 incident，保证首页和列表页状态一致。
         await incident_service.update_incident(
             session.incident_id,
             IncidentUpdate(
@@ -287,6 +330,16 @@ async def execute_debate(
         )
         
         return _build_result_response(result)
+    except HumanReviewRequired as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": exc.reason or "human review required",
+                "review_status": "pending",
+                "resume_from_step": exc.resume_from_step,
+                "review_payload": exc.review_payload,
+            },
+        )
         
     except Exception as e:
         raise HTTPException(
@@ -308,6 +361,7 @@ async def execute_debate_async(
         description="是否仅重试失败的 Agent（当前为兼容参数，默认 false）",
     ),
 ):
+    """以任务队列方式异步执行辩论流程。"""
     session = await debate_service.get_session(session_id)
     if not session:
         raise HTTPException(
@@ -316,7 +370,13 @@ async def execute_debate_async(
         )
 
     async def _run():
+        """异步任务主体，负责运行辩论并同步 runtime_task_registry/incident 状态。"""
         try:
+            await runtime_task_registry.mark_started(
+                session_id=session_id,
+                task_type="debate",
+                trace_id=str((session.context or {}).get("trace_id") or ""),
+            )
             result = await asyncio.wait_for(
                 debate_service.execute_debate(
                     session_id,
@@ -324,6 +384,7 @@ async def execute_debate_async(
                 ),
                 timeout=max(60, int(settings.DEBATE_TIMEOUT or 600)),
             )
+            await runtime_task_registry.mark_done(session_id, status="completed")
             await incident_service.update_incident(
                 session.incident_id,
                 IncidentUpdate(
@@ -342,7 +403,23 @@ async def execute_debate_async(
                 "incident_id": result.incident_id,
                 "confidence": result.confidence,
             }
+        except HumanReviewRequired as exc:
+            await runtime_task_registry.mark_waiting_review(
+                session_id,
+                review_reason=exc.reason,
+                resume_from_step=exc.resume_from_step,
+                phase="waiting_review",
+                event_type="human_review_requested",
+            )
+            return {
+                "session_id": session_id,
+                "status": "waiting_review",
+                "review_status": "pending",
+                "review_reason": exc.reason,
+                "resume_from_step": exc.resume_from_step,
+            }
         except Exception as exc:
+            await runtime_task_registry.mark_done(session_id, status="failed", error=str(exc))
             await incident_service.update_incident(
                 session.incident_id,
                 IncidentUpdate(
@@ -369,6 +446,7 @@ async def execute_debate_background(
         description="是否仅重试失败的 Agent（当前为兼容参数，默认 false）",
     ),
 ):
+    """以后台恢复模式执行辩论，适用于前端断开后继续跑完整流程。"""
     session = await debate_service.get_session(session_id)
     if not session:
         raise HTTPException(
@@ -382,7 +460,13 @@ async def execute_debate_background(
     await debate_service.update_session(session)
 
     async def _run():
+        """后台模式任务主体。"""
         try:
+            await runtime_task_registry.mark_started(
+                session_id=session_id,
+                task_type="debate",
+                trace_id=str((session.context or {}).get("trace_id") or ""),
+            )
             result = await asyncio.wait_for(
                 debate_service.execute_debate(
                     session_id,
@@ -390,6 +474,7 @@ async def execute_debate_background(
                 ),
                 timeout=max(60, int(settings.DEBATE_TIMEOUT or 600)),
             )
+            await runtime_task_registry.mark_done(session_id, status="completed")
             await incident_service.update_incident(
                 session.incident_id,
                 IncidentUpdate(
@@ -408,7 +493,23 @@ async def execute_debate_background(
                 "incident_id": result.incident_id,
                 "confidence": result.confidence,
             }
+        except HumanReviewRequired as exc:
+            await runtime_task_registry.mark_waiting_review(
+                session_id,
+                review_reason=exc.reason,
+                resume_from_step=exc.resume_from_step,
+                phase="waiting_review",
+                event_type="human_review_requested",
+            )
+            return {
+                "session_id": session_id,
+                "status": "waiting_review",
+                "review_status": "pending",
+                "review_reason": exc.reason,
+                "resume_from_step": exc.resume_from_step,
+            }
         except Exception as exc:
+            await runtime_task_registry.mark_done(session_id, status="failed", error=str(exc))
             await incident_service.update_incident(
                 session.incident_id,
                 IncidentUpdate(
@@ -429,6 +530,7 @@ async def execute_debate_background(
     description="将会话标记为取消状态（若运行中会由 WS 任务协同中断）",
 )
 async def cancel_debate(session_id: str):
+    """取消指定辩论会话，并在成功时同步关闭 incident。"""
     session = await debate_service.get_session(session_id)
     if not session:
         raise HTTPException(
@@ -436,7 +538,97 @@ async def cancel_debate(session_id: str):
             detail=f"Debate session {session_id} not found",
         )
     cancelled = await debate_service.cancel_session(session_id, reason="api_cancel")
+    if cancelled:
+        await incident_service.update_incident(
+            session.incident_id,
+            IncidentUpdate(
+                status=IncidentStatus.CLOSED,
+                fix_suggestion="analysis cancelled",
+            ),
+        )
     return CancelResponse(session_id=session_id, cancelled=cancelled)
+
+
+@router.post(
+    "/{session_id}/human-review/approve",
+    response_model=HumanReviewActionResponse,
+    summary="批准人工审核",
+    description="将待人工审核会话标记为已批准，允许后续 resume",
+)
+async def approve_human_review(session_id: str, body: HumanReviewActionRequest):
+    """批准待人工审核的会话。"""
+    session = await debate_service.get_session(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Debate session {session_id} not found",
+        )
+    approved = await debate_service.approve_human_review(
+        session_id,
+        approver=body.approver,
+        comment=body.comment,
+    )
+    if not approved:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="no pending human review to approve",
+        )
+    await runtime_task_registry.mark_review_decision(
+        session_id,
+        review_status="approved",
+        status="waiting_review",
+    )
+    return HumanReviewActionResponse(
+        session_id=session_id,
+        success=True,
+        review_status="approved",
+        message="human review approved",
+    )
+
+
+@router.post(
+    "/{session_id}/human-review/reject",
+    response_model=HumanReviewActionResponse,
+    summary="驳回人工审核",
+    description="驳回待人工审核会话并结束本次分析",
+)
+async def reject_human_review(session_id: str, body: HumanReviewRejectRequest):
+    """驳回待人工审核的会话，并结束本次分析。"""
+    session = await debate_service.get_session(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Debate session {session_id} not found",
+        )
+    rejected = await debate_service.reject_human_review(
+        session_id,
+        approver=body.approver,
+        reason=body.reason,
+    )
+    if not rejected:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="no pending human review to reject",
+        )
+    await runtime_task_registry.mark_review_decision(
+        session_id,
+        review_status="rejected",
+        status="failed",
+        error="human_review_rejected",
+    )
+    await incident_service.update_incident(
+        session.incident_id,
+        IncidentUpdate(
+            status=IncidentStatus.CLOSED,
+            fix_suggestion=body.reason or "human_review_rejected",
+        ),
+    )
+    return HumanReviewActionResponse(
+        session_id=session_id,
+        success=True,
+        review_status="rejected",
+        message="human review rejected",
+    )
 
 
 @router.get(
@@ -445,6 +637,7 @@ async def cancel_debate(session_id: str):
     summary="查询异步辩论任务状态",
 )
 async def get_task_status(task_id: str):
+    """查询异步辩论任务状态。"""
     try:
         task = task_queue.get(task_id)
     except KeyError:
@@ -472,7 +665,7 @@ async def list_debates(
     incident_id: Optional[str] = Query(None, description="按故障ID筛选"),
     status: Optional[str] = Query(None, description="按状态筛选"),
 ):
-    """获取辩论会话列表"""
+    """分页获取辩论会话列表。"""
     status_filter = DebateStatus(status) if status else None
     
     result = await debate_service.list_sessions(
@@ -511,7 +704,7 @@ async def list_debates(
     description="根据ID获取辩论会话详情"
 )
 async def get_debate(session_id: str):
-    """获取辩论会话详情"""
+    """读取单个辩论会话详情。"""
     session = await debate_service.get_session(session_id)
     
     if not session:
@@ -557,7 +750,7 @@ async def get_debate(session_id: str):
     description="获取辩论会话的最终结果"
 )
 async def get_debate_result(session_id: str):
-    """获取辩论结果"""
+    """读取单个辩论会话的最终结果。"""
     result = await debate_service.get_result(session_id)
     
     if not result:
@@ -579,6 +772,7 @@ async def get_session_lineage(
     session_id: str,
     limit: int = Query(200, ge=1, le=2000, description="最多返回记录数"),
 ):
+    """读取指定 session 的谱系记录，并自动尝试 llm/runtime session 映射。"""
     resolved_session_id, rows = await _resolve_lineage_session_rows(session_id)
     subset = rows[: max(1, int(limit))]
     summary = await lineage_recorder.summarize(resolved_session_id)
@@ -607,6 +801,7 @@ async def replay_session(
     phase: str = Query("", description="按阶段过滤（可选）"),
     agent: str = Query("", description="按 Agent 过滤（可选）"),
 ):
+    """按时间线回放指定 session 的关键执行步骤。"""
     resolved_session_id, rows = await _resolve_lineage_session_rows(session_id)
     if rows:
         payload = await replay_session_lineage(resolved_session_id, limit=limit, phase=phase, agent=agent)
@@ -632,6 +827,7 @@ async def replay_session(
     description="通过 ref_id 读取本地保存的完整输出",
 )
 async def get_output_ref(ref_id: str):
+    """根据 ref_id 读取被截断输出的完整内容。"""
     payload = get_output_reference(ref_id)
     if not payload:
         return OutputReferenceResponse(ref_id=ref_id, found=False)
@@ -647,6 +843,9 @@ async def get_output_ref(ref_id: str):
 
 
 async def _resolve_lineage_session_rows(session_id: str) -> tuple[str, List[Any]]:
+    """为谱系查询解析真实写盘的 session 标识。
+
+    有些轨迹会写到 llm_session_id 或 runtime_session_id，下游查询时需要自动回查。"""
     session_key = str(session_id or "").strip()
     if not session_key:
         return "unknown", []
@@ -675,7 +874,7 @@ async def _resolve_lineage_session_rows(session_id: str) -> tuple[str, List[Any]
 
 
 def _build_result_response(result: DebateResult) -> DebateResultResponse:
-    """构建辩论结果响应"""
+    """把服务层 `DebateResult` 对象转换为标准 API 响应结构。"""
     evidence_chain = [
         EvidenceItemResponse(
             type=e.type,

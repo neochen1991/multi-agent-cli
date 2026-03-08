@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List
 
 
 def _source_diversity(evidence: Iterable[Dict[str, Any]]) -> float:
+    """执行来源diversity相关逻辑，并为当前模块提供可复用的处理能力。"""
     sources = {str(item.get("source") or "").strip() for item in evidence if str(item.get("source") or "").strip()}
     if not sources:
         return 0.0
@@ -13,6 +14,7 @@ def _source_diversity(evidence: Iterable[Dict[str, Any]]) -> float:
 
 
 def _strength_score(evidence: Iterable[Dict[str, Any]]) -> float:
+    """执行strength评分相关逻辑，并为当前模块提供可复用的处理能力。"""
     mapping = {"strong": 1.0, "medium": 0.6, "weak": 0.3}
     values: List[float] = []
     for item in evidence:
@@ -42,6 +44,7 @@ def causal_score(
 
 
 def has_cross_source_evidence(evidence: List[Dict[str, Any]]) -> bool:
+    """执行hascross来源evidence相关逻辑，并为当前模块提供可复用的处理能力。"""
     normalized = {str(item.get("source") or "").strip().lower() for item in evidence if str(item.get("source") or "").strip()}
     # Require at least one log-like source and one code/domain/metrics-like source.
     has_log = any(token in src for src in normalized for token in ("log", "trace", "runtime"))

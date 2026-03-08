@@ -26,11 +26,13 @@ _COMMON_PROMPT_GUARDRAILS = (
 
 
 def _compose_prompt(role_prompt: str) -> str:
+    """构建composePrompt，供后续节点或调用方直接使用。"""
     return f"{_COMMON_PROMPT_GUARDRAILS}\n{role_prompt}".strip()
 
 
 @dataclass(frozen=True)
 class _SpecConfig:
+    """封装SpecConfig相关内部辅助结构，供当前模块复用。"""
     name: str
     role: str
     phase: str
@@ -297,6 +299,7 @@ _DEFAULT_SPECS: Dict[str, _SpecConfig] = {
 
 
 def _to_spec(config: _SpecConfig) -> AgentSpec:
+    """执行to规格相关逻辑，并为当前模块提供可复用的处理能力。"""
     return AgentSpec(
         name=config.name,
         role=config.role,
@@ -310,6 +313,7 @@ def _to_spec(config: _SpecConfig) -> AgentSpec:
 
 
 def _optional_external_configs() -> Optional[Dict[str, Any]]:
+    """执行optional外部configs相关逻辑，并为当前模块提供可复用的处理能力。"""
     try:
         from app.runtime.agents.config import get_all_agent_configs
     except Exception:
@@ -322,6 +326,7 @@ def _optional_external_configs() -> Optional[Dict[str, Any]]:
 
 
 def _build_spec_map() -> Dict[str, AgentSpec]:
+    """构建构建规格map，供后续节点或调用方直接使用。"""
     defaults = {name: _to_spec(cfg) for name, cfg in _DEFAULT_SPECS.items() if cfg.enabled}
     external_configs = _optional_external_configs()
     if external_configs:

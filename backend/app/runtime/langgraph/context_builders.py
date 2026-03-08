@@ -12,6 +12,7 @@ from app.runtime.messages import AgentEvidence
 
 
 def _cap(limit: int, floor: int = 1) -> int:
+    """执行cap相关逻辑，并为当前模块提供可复用的处理能力。"""
     return max(floor, int(limit or 0))
 
 
@@ -21,6 +22,7 @@ def collect_peer_items_from_dialogue(
     exclude_agent: str,
     limit: int,
 ) -> List[Dict[str, Any]]:
+    """执行收集同伴itemsfromdialogue相关逻辑，并为当前模块提供可复用的处理能力。"""
     peers: List[Dict[str, Any]] = []
     seen_agents: set[str] = set()
     for item in reversed(list(dialogue_items or [])):
@@ -53,6 +55,7 @@ def collect_peer_items_from_cards(
     exclude_agent: str,
     limit: int,
 ) -> List[Dict[str, Any]]:
+    """执行收集同伴itemsfromcards相关逻辑，并为当前模块提供可复用的处理能力。"""
     peers: List[Dict[str, Any]] = []
     for card in reversed(list(history_cards or [])):
         if card.agent_name == exclude_agent:
@@ -78,6 +81,7 @@ def _merge_peer_items(
     *,
     limit: int,
 ) -> List[Dict[str, Any]]:
+    """执行合并同伴items相关逻辑，并为当前模块提供可复用的处理能力。"""
     merged = list(primary or [])
     known: set[Tuple[str, str]] = {
         (str(item.get("agent") or ""), str(item.get("conclusion") or ""))
@@ -101,6 +105,7 @@ def coordination_peer_items(
     existing_agent_outputs: Dict[str, Dict[str, Any]],
     limit: int,
 ) -> List[Dict[str, Any]]:
+    """执行coordination同伴items相关逻辑，并为当前模块提供可复用的处理能力。"""
     peers = collect_peer_items_from_dialogue(
         dialogue_items,
         exclude_agent="ProblemAnalysisAgent",
@@ -147,6 +152,7 @@ def supervisor_recent_messages(
     dialogue_items: Sequence[Dict[str, Any]],
     limit: int,
 ) -> List[Dict[str, Any]]:
+    """执行监督者recentmessages相关逻辑，并为当前模块提供可复用的处理能力。"""
     items: List[Dict[str, Any]] = []
     for item in list(dialogue_items or [])[-_cap(limit) :]:
         agent = str(item.get("speaker") or "").strip()
@@ -183,6 +189,7 @@ def history_items_for_agent_prompt(
     dialogue_items: Sequence[Dict[str, Any]],
     limit: int,
 ) -> List[Dict[str, Any]]:
+    """执行历史itemsforAgentPrompt相关逻辑，并为当前模块提供可复用的处理能力。"""
     items: List[Dict[str, Any]] = []
     seen: set[Tuple[str, str]] = set()
     for entry in collect_peer_items_from_dialogue(
@@ -237,6 +244,7 @@ def peer_items_for_collaboration_prompt(
     dialogue_items: Sequence[Dict[str, Any]],
     limit: int,
 ) -> List[Dict[str, Any]]:
+    """执行同伴itemsforcollaborationPrompt相关逻辑，并为当前模块提供可复用的处理能力。"""
     items: List[Dict[str, Any]] = []
     seen_agents: set[str] = set()
     for entry in collect_peer_items_from_dialogue(

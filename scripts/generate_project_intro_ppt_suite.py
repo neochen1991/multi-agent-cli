@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Generate two polished decks:
-1) Executive concise version (8 slides)
-2) Technical full version (18 slides)
-"""
+"""generate项目介绍PPT套件脚本。"""
 
 from __future__ import annotations
 
@@ -27,6 +23,8 @@ OUT_TECH = Path(
 
 
 class C:
+    """封装C相关常量或数据结构。"""
+    
     BG = RGBColor(246, 250, 255)
     NAVY = RGBColor(10, 34, 70)
     BLUE = RGBColor(34, 104, 201)
@@ -46,6 +44,8 @@ class C:
 
 
 def mk_prs() -> Presentation:
+    """执行mkprs相关逻辑。"""
+    
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
@@ -53,6 +53,8 @@ def mk_prs() -> Presentation:
 
 
 def bg(slide, prs: Presentation) -> None:
+    """执行背景相关逻辑。"""
+    
     r = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
     r.fill.solid()
     r.fill.fore_color.rgb = C.BG
@@ -60,6 +62,8 @@ def bg(slide, prs: Presentation) -> None:
 
 
 def header(slide, title: str, sub: str, page: int) -> None:
+    """执行页眉相关逻辑。"""
+    
     bar = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(0.86)
     )
@@ -72,6 +76,8 @@ def header(slide, title: str, sub: str, page: int) -> None:
 
 
 def card(slide, x: float, y: float, w: float, h: float, fill: RGBColor = C.WHITE):
+    """执行卡片相关逻辑。"""
+    
     s = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h)
     )
@@ -93,6 +99,8 @@ def txt(
     color: RGBColor = C.TEXT,
     align: str = "left",
 ) -> None:
+    """执行txt相关逻辑。"""
+    
     b = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
     tf = b.text_frame
     tf.clear()
@@ -118,6 +126,8 @@ def bullets(
     size: int = 12,
     color: RGBColor = C.TEXT,
 ) -> None:
+    """执行bullets相关逻辑。"""
+    
     b = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
     tf = b.text_frame
     tf.clear()
@@ -130,6 +140,8 @@ def bullets(
 
 
 def arr(slide, x: float, y: float, w: float, h: float, color: RGBColor = C.BLUE) -> None:
+    """执行arr相关逻辑。"""
+    
     a = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RIGHT_ARROW, Inches(x), Inches(y), Inches(w), Inches(h))
     a.fill.solid()
     a.fill.fore_color.rgb = color
@@ -137,6 +149,8 @@ def arr(slide, x: float, y: float, w: float, h: float, color: RGBColor = C.BLUE)
 
 
 def left_arr(slide, x: float, y: float, w: float, h: float, color: RGBColor = C.BLUE) -> None:
+    """执行leftarr相关逻辑。"""
+    
     a = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.LEFT_ARROW, Inches(x), Inches(y), Inches(w), Inches(h))
     a.fill.solid()
     a.fill.fore_color.rgb = color
@@ -144,6 +158,8 @@ def left_arr(slide, x: float, y: float, w: float, h: float, color: RGBColor = C.
 
 
 def cover(prs: Presentation, title: str, subtitle: str) -> None:
+    """执行封面相关逻辑。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6])
     bg(s, prs)
     band = s.shapes.add_shape(
@@ -202,6 +218,8 @@ def cover(prs: Presentation, title: str, subtitle: str) -> None:
 
 
 def agenda(prs: Presentation, page: int) -> None:
+    """执行议程相关逻辑。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6])
     bg(s, prs)
     header(s, "目录", "Roadmap", page)
@@ -225,6 +243,8 @@ def agenda(prs: Presentation, page: int) -> None:
 
 
 def business_value(prs: Presentation, page: int) -> None:
+    """执行business价值相关逻辑。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6])
     bg(s, prs)
     header(s, "1) 目标与业务价值", "Business Value", page)
@@ -278,6 +298,8 @@ def business_value(prs: Presentation, page: int) -> None:
 
 
 def architecture_e2e(prs: Presentation, page: int) -> None:
+    """执行架构e2e相关逻辑。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6])
     bg(s, prs)
     header(s, "2) 系统总体架构图", "End-to-end", page)
@@ -394,6 +416,8 @@ def architecture_e2e(prs: Presentation, page: int) -> None:
 
 
 def architecture_runtime(prs: Presentation, page: int) -> None:
+    """执行架构运行时相关逻辑。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6])
     bg(s, prs)
     header(s, "3) LangGraph 运行时架构图", "Runtime Internal", page)
@@ -439,6 +463,8 @@ def architecture_runtime(prs: Presentation, page: int) -> None:
 
 
 def agent_network(prs: Presentation, page: int) -> None:
+    """执行Agent链路图相关逻辑。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6])
     bg(s, prs)
     header(s, "4) 多 Agent 协作网络图", "Network & Debate", page)
@@ -475,6 +501,8 @@ def agent_network(prs: Presentation, page: int) -> None:
 
 
 def tool_chain(prs: Presentation, page: int) -> None:
+    """执行工具chain相关逻辑。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6])
     bg(s, prs)
     header(s, "5) 工具调用与审计链路", "Tooling Traceability", page)
@@ -525,6 +553,8 @@ def tool_chain(prs: Presentation, page: int) -> None:
 
 
 def flow_diagram(prs: Presentation, page: int) -> None:
+    """执行flowdiagram相关逻辑。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6])
     bg(s, prs)
     header(s, "6) 端到端流程图", "Incident to Report", page)
@@ -566,6 +596,8 @@ def flow_diagram(prs: Presentation, page: int) -> None:
 
 
 def state_machine(prs: Presentation, page: int) -> None:
+    """执行状态machine相关逻辑。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6])
     bg(s, prs)
     header(s, "7) 状态机与数据模型", "State & Data", page)
@@ -610,6 +642,8 @@ def state_machine(prs: Presentation, page: int) -> None:
 
 
 def frontend_ux(prs: Presentation, page: int) -> None:
+    """执行前端ux相关逻辑。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6])
     bg(s, prs)
     header(s, "8) 前端体验与页面结构", "UX Surface", page)
@@ -647,6 +681,8 @@ def frontend_ux(prs: Presentation, page: int) -> None:
 
 
 def quality_governance(prs: Presentation, page: int) -> None:
+    """执行质量治理相关逻辑。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6])
     bg(s, prs)
     header(s, "9) 质量保障与治理", "Benchmark & Governance", page)
@@ -676,6 +712,8 @@ def quality_governance(prs: Presentation, page: int) -> None:
 
 
 def roadmap(prs: Presentation, page: int) -> None:
+    """执行路线图相关逻辑。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6])
     bg(s, prs)
     header(s, "10) 路线图", "P0~P3", page)
@@ -695,6 +733,8 @@ def roadmap(prs: Presentation, page: int) -> None:
 
 
 def ending(prs: Presentation, page: int, kind: str) -> None:
+    """执行ending相关逻辑。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6])
     bg(s, prs)
     header(s, "总结", f"{kind} Summary", page)
@@ -730,6 +770,8 @@ def ending(prs: Presentation, page: int, kind: str) -> None:
 def add_tech_extra(prs: Presentation) -> None:
     # 11 extra technical slides to reach 18 total
     # 1 API
+    """向当前页补充技术版扩展相关元素，并统一样式与布局。"""
+    
     s = prs.slides.add_slide(prs.slide_layouts[6]); bg(s, prs); header(s, "11) API 与扩展能力", "API Surface", 11)
     card(s, 0.65, 1.2, 6.2, 5.95, C.WHITE); txt(s, 0.95, 1.48, 5.6, 0.35, "核心接口", 16, True, C.INDIGO)
     bullets(s, 0.95, 1.9, 5.5, 4.9, ["POST /api/v1/incidents/", "POST /api/v1/debates/?incident_id=...", "POST /api/v1/debates/{session_id}/execute", "GET /api/v1/debates/{session_id}/result", "POST /api/v1/reports/{incident_id}/regenerate", "GET/PUT /api/v1/settings/tooling", "WS /ws/debates/{session_id}?auto_start=true"], 12)
@@ -869,6 +911,8 @@ def add_tech_extra(prs: Presentation) -> None:
 
 
 def build_exec() -> Path:
+    """构建执行版相关产物或页面内容。"""
+    
     prs = mk_prs()
     cover(prs, "生产问题根因分析系统", "管理层汇报版（Executive Deck）")
     agenda(prs, 2)
@@ -884,6 +928,8 @@ def build_exec() -> Path:
 
 
 def build_tech() -> Path:
+    """构建技术版相关产物或页面内容。"""
+    
     prs = mk_prs()
     cover(prs, "生产问题根因分析系统", "技术详版（Technical Deep Dive）")
     agenda(prs, 2)
@@ -902,6 +948,8 @@ def build_tech() -> Path:
 
 
 def main() -> None:
+    """执行脚本主流程，串联参数解析、内容生成与结果输出。"""
+    
     e = build_exec()
     t = build_tech()
     print(f"Generated: {e}")

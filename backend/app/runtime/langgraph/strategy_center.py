@@ -13,6 +13,7 @@ from app.config import settings
 
 @dataclass(frozen=True)
 class StrategyProfile:
+    """封装StrategyProfile相关数据结构或服务能力。"""
     name: str
     description: str
     suggested_max_rounds: int
@@ -23,6 +24,7 @@ class StrategyProfile:
     phase_mode: str
 
     def to_dict(self) -> Dict[str, Any]:
+        """执行todict相关逻辑，并为当前模块提供可复用的处理能力。"""
         return {
             "name": self.name,
             "description": self.description,
@@ -36,7 +38,9 @@ class StrategyProfile:
 
 
 class RuntimeStrategyCenter:
+    """封装RuntimeStrategyCenter相关数据结构或服务能力。"""
     def __init__(self) -> None:
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
         self._profiles: Dict[str, StrategyProfile] = {
             "balanced": StrategyProfile(
                 name="balanced",
@@ -83,15 +87,18 @@ class RuntimeStrategyCenter:
         self._file.parent.mkdir(parents=True, exist_ok=True)
 
     def list_profiles(self) -> List[Dict[str, Any]]:
+        """负责列出profiles，并返回后续流程可直接消费的数据结果。"""
         return [row.to_dict() for row in self._profiles.values()]
 
     def get_profile(self, name: str) -> Dict[str, Any]:
+        """负责获取配置档，并返回后续流程可直接消费的数据结果。"""
         profile = self._profiles.get(str(name or "").strip())
         if not profile:
             profile = self._profiles["balanced"]
         return profile.to_dict()
 
     def get_active(self) -> Dict[str, Any]:
+        """负责获取激活，并返回后续流程可直接消费的数据结果。"""
         if not self._file.exists():
             return {"active_profile": "balanced", "updated_at": ""}
         try:
@@ -106,6 +113,7 @@ class RuntimeStrategyCenter:
         }
 
     def set_active(self, profile_name: str) -> Dict[str, Any]:
+        """执行set激活相关逻辑，并为当前模块提供可复用的处理能力。"""
         profile = str(profile_name or "").strip()
         if profile not in self._profiles:
             profile = "balanced"
@@ -117,6 +125,7 @@ class RuntimeStrategyCenter:
         return payload
 
     def select(self, *, severity: str, execution_mode: str) -> Dict[str, Any]:
+        """执行选择，用于驱动当前阶段的策略选择或状态流转。"""
         severity_text = str(severity or "").strip().lower()
         mode_text = str(execution_mode or "").strip().lower()
         manual = self.get_active()

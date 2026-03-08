@@ -8,9 +8,11 @@ from app.runtime_ext.integrations.base_adapter import AdapterBuildResult
 
 
 class JiraAdapter:
+    """封装JiraAdapter相关数据结构或服务能力。"""
     provider = "jira"
 
     def build(self, *, action: str, payload: Dict[str, Any]) -> AdapterBuildResult:
+        """构建构建，供后续节点或调用方直接使用。"""
         body = {
             "fields": {
                 "project": {"key": str(payload.get("project_key") or "SRE")},

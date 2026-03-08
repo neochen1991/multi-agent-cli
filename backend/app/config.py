@@ -1,5 +1,18 @@
 """
 应用配置模块
+
+本模块负责管理应用的所有配置项，包括：
+1. LLM 配置（模型、API端点、超时等）
+2. 数据库配置（PostgreSQL、Redis、Neo4j）
+3. 辩论参数配置（最大轮次、共识阈值等）
+4. 安全配置（密钥、认证、限流）
+5. 日志配置
+
+使用 pydantic-settings 实现配置管理：
+- 支持从 .env 文件加载环境变量
+- 支持类型验证和默认值
+- 使用 @lru_cache 实现单例模式
+
 Application configuration module
 """
 
@@ -11,8 +24,29 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """应用配置"""
+    """
+    应用配置类
 
+    使用 Pydantic BaseSettings 实现配置管理：
+    - 支持从环境变量和 .env 文件加载配置
+    - 自动类型转换和验证
+    - 提供默认值，确保开箱即用
+
+    配置分组说明：
+    ----------------
+    1. 应用基础配置：APP_NAME, APP_VERSION, DEBUG, ENVIRONMENT
+    2. API 配置：API_PREFIX, CORS_ORIGINS
+    3. 数据库配置：DATABASE_URL, REDIS_URL, NEO4J_*
+    4. 本地存储配置：LOCAL_STORE_BACKEND, LOCAL_STORE_DIR
+    5. LLM 配置：LLM_MODEL, LLM_BASE_URL, LLM_API_KEY 等
+    6. 辩论配置：DEBATE_MAX_ROUNDS, DEBATE_CONSENSUS_THRESHOLD 等
+    7. 安全配置：SECRET_KEY, AUTH_ENABLED 等
+    8. 限流与熔断：RATE_LIMIT_*, CIRCUIT_BREAKER_*
+    9. 日志配置：LOG_LEVEL, LOG_FORMAT
+    10. Checkpointer 配置：CHECKPOINT_BACKEND, CHECKPOINT_SQLITE_PATH
+    """
+
+    # Pydantic-settings 配置：从 .env 文件加载，忽略大小写，允许额外字段
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -49,71 +83,118 @@ class Settings(BaseSettings):
     NEO4J_PASSWORD: str = "password"
 
     # 本地存储配置（无外部数据库场景）
+    # file: 使用文件存储，数据持久化到 LOCAL_STORE_DIR
+    # memory: 使用内存存储，重启后数据丢失
     LOCAL_STORE_BACKEND: str = Field(default="file")  # file | memory
     LOCAL_STORE_DIR: str = Field(default="/tmp/sre_debate_store")
 
     # LLM / LangGraph 配置
+    # 模型名称，默认使用 kimi-k2.5
     LLM_MODEL: str = Field(default="kimi-k2.5")
+    # LLM 最大对话轮次（None 表示不限制）
     LLM_MAX_TURNS: Optional[int] = None
-    LLM_TIMEOUT: Optional[int] = None
-    LLM_CONNECT_TIMEOUT: Optional[int] = None
-    LLM_REQUEST_TIMEOUT: Optional[int] = None
-    LLM_TOTAL_TIMEOUT: Optional[int] = None
-    LLM_QUEUE_TIMEOUT: Optional[int] = None
-    LLM_ASSET_TIMEOUT: Optional[int] = None
-    LLM_ANALYSIS_TIMEOUT: Optional[int] = None
-    LLM_REVIEW_TIMEOUT: Optional[int] = None
-    LLM_JUDGE_TIMEOUT: Optional[int] = None
-    LLM_JUDGE_RETRY_TIMEOUT: Optional[int] = None
-    LLM_REPORT_TIMEOUT_FIRST: Optional[int] = None
-    LLM_REPORT_TIMEOUT_RETRY: Optional[int] = None
+    # 各类超时配置（秒），用于控制 LLM API 调用的超时行为
+    LLM_TIMEOUT: Optional[int] = None  # 通用超时
+    LLM_CONNECT_TIMEOUT: Optional[int] = None  # 连接超时
+    LLM_REQUEST_TIMEOUT: Optional[int] = None  # 请求超时
+    LLM_TOTAL_TIMEOUT: Optional[int] = None  # 总超时
+    LLM_QUEUE_TIMEOUT: Optional[int] = None  # 队列等待超时
+    LLM_ASSET_TIMEOUT: Optional[int] = None  # 资产处理超时
+    LLM_ANALYSIS_TIMEOUT: Optional[int] = None  # 分析阶段超时
+    LLM_REVIEW_TIMEOUT: Optional[int] = None  # 审查阶段超时
+    LLM_JUDGE_TIMEOUT: Optional[int] = None  # 裁决阶段超时
+    LLM_JUDGE_RETRY_TIMEOUT: Optional[int] = None  # 裁决重试超时
+    LLM_REPORT_TIMEOUT_FIRST: Optional[int] = None  # 报告首次生成超时
+    LLM_REPORT_TIMEOUT_RETRY: Optional[int] = None  # 报告重试生成超时
+    # 最大重试次数，0 表示不重试
     LLM_MAX_RETRIES: int = 0
+    # 最大并发 LLM 调用数，用于控制 API 调用频率
     LLM_MAX_CONCURRENCY: int = 3
+    # 遇到限流错误时是否快速失败
     LLM_FAILFAST_ON_RATE_LIMIT: bool = True
+    # 是否使用 Agent 工厂模式创建 Agent
     AGENT_USE_FACTORY: bool = False
+    # LLM 提供商标识
     LLM_PROVIDER_ID: Optional[str] = None
     # OpenAI-compatible endpoint (LangGraph config_list)
+    # LLM API 基础 URL，默认使用火山引擎 API
     LLM_BASE_URL: str = Field(default="https://ark.cn-beijing.volces.com/api/coding")
+    # LLM API 密钥
     LLM_API_KEY: str = Field(default="7b446c97-7172-4c90-a4ef-3f3ff5a8f894")
 
     # 辩论配置
+    # 最大辩论轮次，默认 1 轮
     DEBATE_MAX_ROUNDS: int = 1
+    # 共识阈值（0-1），当 JudgeAgent 置信度超过此值时认为达成共识
     DEBATE_CONSENSUS_THRESHOLD: float = 0.75
+    # 辩论超时时间（秒），默认 10 分钟
     DEBATE_TIMEOUT: int = 600  # 10 minutes
+    # 是否启用质疑阶段（CriticAgent）
     DEBATE_ENABLE_CRITIQUE: bool = True
+    # 是否启用协作模式
     DEBATE_ENABLE_COLLABORATION: bool = False
-    DEBATE_ANALYSIS_MAX_TOKENS: int = 320
-    DEBATE_REVIEW_MAX_TOKENS: int = 420
-    DEBATE_JUDGE_MAX_TOKENS: int = 900
-    DEBATE_REPORT_MAX_TOKENS: int = 700
+    # 各阶段最大 token 数
+    DEBATE_ANALYSIS_MAX_TOKENS: int = 320  # 分析阶段
+    DEBATE_REVIEW_MAX_TOKENS: int = 420  # 审查阶段
+    DEBATE_JUDGE_MAX_TOKENS: int = 900  # 裁决阶段
+    DEBATE_REPORT_MAX_TOKENS: int = 700  # 报告生成
+    # 是否要求 LLM 产出有效结论
     DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION: bool = True
 
     # 安全配置
+    # JWT 密钥，生产环境必须更换
     SECRET_KEY: str = Field(default="your-secret-key-change-in-production")
+    # Token 过期时间（分钟）
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    # JWT 签名算法
     ALGORITHM: str = "HS256"
+    # 是否启用认证
     AUTH_ENABLED: bool = False
 
-    # 限流与熔断
+    # 限流与熔断配置
+    # 是否启用限流
     RATE_LIMIT_ENABLED: bool = True
+    # 每分钟最大请求数
     RATE_LIMIT_REQUESTS_PER_MINUTE: int = 120
+    # 熔断器失败阈值，超过此数量触发熔断
     CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
+    # 熔断器恢复时间（秒）
     CIRCUIT_BREAKER_RECOVERY_SECONDS: int = 30
 
     # 日志配置
+    # 日志级别：DEBUG, INFO, WARNING, ERROR, CRITICAL
     LOG_LEVEL: str = "INFO"
+    # 日志格式：json 或 console
     LOG_FORMAT: str = "json"
+    # 错误率告警阈值
     ALERT_ERROR_RATE_THRESHOLD: float = 0.2
+    # Git 工具允许访问的主机白名单
     TOOL_GIT_HOST_ALLOWLIST: List[str] = Field(default=["github.com", "gitlab.com", "gitee.com"])
+    # 远程 HTTP 工具允许访问的 URL 白名单
     TOOL_REMOTE_HTTP_ALLOWLIST: List[str] = Field(default=[])
 
-    # Checkpointer 配置
+    # Checkpointer 配置（LangGraph 状态持久化）
+    # 后端类型：memory（内存）或 sqlite（SQLite 数据库）
     CHECKPOINT_BACKEND: str = Field(default="memory")  # memory | sqlite
+    # SQLite 检查点文件路径
     CHECKPOINT_SQLITE_PATH: str = Field(default="/tmp/sre_debate_checkpoints/checkpoints.db")
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def parse_cors_origins(cls, v):
+        """
+        解析 CORS 允许源配置
+
+        支持两种输入格式：
+        - 字符串：逗号分隔的 URL 列表
+        - 列表：直接返回
+
+        Args:
+            v: 输入值（字符串或列表）
+
+        Returns:
+            List[str]: URL 列表
+        """
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",")]
         return v
@@ -121,6 +202,17 @@ class Settings(BaseSettings):
     @field_validator("TOOL_GIT_HOST_ALLOWLIST", "TOOL_REMOTE_HTTP_ALLOWLIST", mode="before")
     @classmethod
     def parse_host_allowlists(cls, v):
+        """
+        解析主机白名单配置
+
+        将输入转换为小写主机名列表，过滤空值。
+
+        Args:
+            v: 输入值（字符串、列表或 None）
+
+        Returns:
+            List[str]: 小写主机名列表
+        """
         if isinstance(v, str):
             return [item.strip().lower() for item in v.split(",") if item.strip()]
         if isinstance(v, list):
@@ -130,6 +222,17 @@ class Settings(BaseSettings):
     @field_validator("LOCAL_STORE_BACKEND", mode="before")
     @classmethod
     def normalize_local_store_backend(cls, v):
+        """
+        标准化本地存储后端配置
+
+        确保值为 "file" 或 "memory" 之一，默认为 "file"。
+
+        Args:
+            v: 输入值
+
+        Returns:
+            str: 标准化后的值
+        """
         if not v:
             return "file"
         value = str(v).strip().lower()
@@ -139,14 +242,24 @@ class Settings(BaseSettings):
 
     @property
     def is_development(self) -> bool:
+        """检查是否为开发环境"""
         return self.ENVIRONMENT == "development"
 
     @property
     def is_production(self) -> bool:
+        """检查是否为生产环境"""
         return self.ENVIRONMENT == "production"
 
     @property
     def llm_options(self) -> Dict[str, str]:
+        """
+        获取 LLM 选项配置
+
+        返回 LangChain/OpenAI 客户端所需的选项。
+
+        Returns:
+            Dict[str, str]: 包含 baseURL 和 apiKey 的字典
+        """
         return {
             "baseURL": self.LLM_BASE_URL,
             "apiKey": self.LLM_API_KEY,
@@ -154,6 +267,12 @@ class Settings(BaseSettings):
 
     @property
     def llm_models(self) -> Dict[str, Dict[str, str]]:
+        """
+        获取 LLM 模型配置
+
+        Returns:
+            Dict[str, Dict[str, str]]: 模型名称到模型配置的映射
+        """
         return {
             self.llm_model: {
                 "name": self.llm_model,
@@ -162,6 +281,14 @@ class Settings(BaseSettings):
 
     @property
     def llm_config(self) -> Dict[str, Dict[str, str]]:
+        """
+        获取完整的 LLM 配置
+
+        合并选项和模型配置，用于 LangChain 初始化。
+
+        Returns:
+            Dict[str, Dict[str, str]]: 包含 options 和 models 的字典
+        """
         return {
             "options": self.llm_options,
             "models": self.llm_models,
@@ -169,6 +296,14 @@ class Settings(BaseSettings):
 
     @property
     def default_model_config(self) -> Dict[str, str]:
+        """
+        获取默认模型配置
+
+        用于前端展示当前使用的模型。
+
+        Returns:
+            Dict[str, str]: 包含模型名称和提供者信息的字典
+        """
         return {
             "name": self.llm_model,
             "providerID": self.llm_provider_id,
@@ -177,70 +312,93 @@ class Settings(BaseSettings):
 
     @property
     def llm_model(self) -> str:
+        """获取 LLM 模型名称"""
         return self.LLM_MODEL
 
     @property
     def llm_max_turns(self) -> int:
+        """获取 LLM 最大对话轮次，默认为 1"""
         return self.LLM_MAX_TURNS or 1
 
     @property
     def llm_timeout(self) -> int:
+        """获取通用 LLM 超时时间（秒），默认为 120 秒"""
         return self.LLM_TIMEOUT or 120
 
     @property
     def llm_connect_timeout(self) -> int:
+        """获取连接超时时间（秒），默认为 10 秒"""
         return self.LLM_CONNECT_TIMEOUT or 10
 
     @property
     def llm_request_timeout(self) -> int:
+        """获取请求超时时间（秒），不超过 120 秒"""
         return self.LLM_REQUEST_TIMEOUT or min(self.llm_timeout, 120)
 
     @property
     def llm_total_timeout(self) -> int:
+        """获取总超时时间（秒），范围 25-60 秒"""
         return self.LLM_TOTAL_TIMEOUT or max(25, min(self.llm_timeout, 60))
 
     @property
     def llm_queue_timeout(self) -> int:
+        """获取队列等待超时时间（秒），范围 4-15 秒"""
         return self.LLM_QUEUE_TIMEOUT or max(4, min(self.llm_total_timeout, 15))
 
     @property
     def llm_asset_timeout(self) -> int:
+        """获取资产处理超时时间（秒），范围 20-60 秒"""
         return self.LLM_ASSET_TIMEOUT or max(20, min(self.llm_request_timeout, 60))
 
     @property
     def llm_analysis_timeout(self) -> int:
+        """获取分析阶段超时时间（秒），范围 20-35 秒"""
         return self.LLM_ANALYSIS_TIMEOUT or max(20, min(self.llm_total_timeout, 35))
 
     @property
     def llm_review_timeout(self) -> int:
+        """获取审查阶段超时时间（秒），范围 24-40 秒"""
         return self.LLM_REVIEW_TIMEOUT or max(24, min(self.llm_total_timeout, 40))
 
     @property
     def llm_judge_timeout(self) -> int:
+        """获取裁决阶段超时时间（秒），范围 35-60 秒"""
         return self.LLM_JUDGE_TIMEOUT or max(35, min(self.llm_total_timeout, 60))
 
     @property
     def llm_judge_retry_timeout(self) -> int:
+        """获取裁决重试超时时间（秒），至少 45 秒"""
         return self.LLM_JUDGE_RETRY_TIMEOUT or max(self.llm_judge_timeout, 45)
 
     @property
     def llm_report_timeout_first(self) -> int:
+        """获取报告首次生成超时时间（秒），范围 16-35 秒"""
         return self.LLM_REPORT_TIMEOUT_FIRST or max(16, min(self.llm_total_timeout, 35))
 
     @property
     def llm_report_timeout_retry(self) -> int:
+        """获取报告重试生成超时时间（秒），至少 50 秒"""
         return self.LLM_REPORT_TIMEOUT_RETRY or max(self.llm_report_timeout_first, 50)
 
     @property
     def llm_provider_id(self) -> str:
+        """获取 LLM 提供者 ID，默认为 'langgraph'"""
         return self.LLM_PROVIDER_ID or "langgraph"
 
 
 @lru_cache
 def get_settings() -> Settings:
-    """获取配置单例"""
+    """
+    获取配置单例
+
+    使用 functools.lru_cache 装饰器确保整个应用只创建一个 Settings 实例。
+    这样可以避免重复读取环境变量和 .env 文件。
+
+    Returns:
+        Settings: 配置实例
+    """
     return Settings()
 
 
-# 导出配置实例
+# 导出配置实例，供其他模块直接使用
 settings = get_settings()

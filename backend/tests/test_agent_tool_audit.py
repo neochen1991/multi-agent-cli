@@ -1,7 +1,11 @@
+"""testAgent工具audit相关测试。"""
+
 from app.services.agent_tool_context_service import AgentToolContextService
 
 
 def test_audit_record_contains_call_id_and_summaries():
+    """验证auditrecord包含调用IDand摘要。"""
+    
     service = AgentToolContextService()
     row = service._audit(  # noqa: SLF001 - unit test internal contract
         tool_name="git_repo_search",

@@ -1,7 +1,23 @@
-"""Session service for LangGraph debate runtime.
+"""
+会话服务模块
 
-This module provides session lifecycle management, including
-creation, state persistence, and failure handling.
+本模块提供 LangGraph 辩论运行时的会话生命周期管理。
+
+核心功能：
+1. 会话创建和初始化
+2. 状态持久化和检索
+3. 会话失败处理
+4. 会话完成标记
+
+会话生命周期：
+created -> active -> completed/failed
+
+使用场景：
+- 运行时编排器管理会话状态
+- 断点恢复时加载会话
+- 故障处理时标记失败
+
+Session service for LangGraph debate runtime.
 """
 
 from __future__ import annotations
@@ -15,16 +31,34 @@ logger = structlog.get_logger()
 
 
 class SessionService:
-    """Session lifecycle management.
+    """
+    会话生命周期管理服务
 
-    This service handles:
-    - Session creation and initialization
-    - State persistence and retrieval
-    - Session failure handling
+    提供会话的完整生命周期管理：
+    - 创建：初始化会话元数据
+    - 状态管理：保存和加载状态
+    - 完成：标记成功或失败
+
+    属性：
+    - _sessions: 会话字典（session_id -> 会话数据）
+
+    会话数据结构：
+    {
+        "session_id": "会话ID",
+        "trace_id": "追踪ID",
+        "context": "上下文数据",
+        "created_at": "创建时间",
+        "status": "状态（active/completed/failed）",
+        "state": "运行时状态"
+    }
     """
 
     def __init__(self) -> None:
-        """Initialize the session service."""
+        """
+        初始化会话服务
+
+        创建空的会话字典。
+        """
         self._sessions: Dict[str, Dict[str, Any]] = {}
 
     async def create(
@@ -33,12 +67,15 @@ class SessionService:
         trace_id: str,
         context: Dict[str, Any],
     ) -> None:
-        """Create a new session.
+        """
+        创建新会话
+
+        初始化会话元数据和状态。
 
         Args:
-            session_id: Unique session identifier.
-            trace_id: Trace ID for correlation.
-            context: Initial context for the session.
+            session_id: 唯一会话标识
+            trace_id: 追踪 ID，用于日志关联
+            context: 会话初始上下文
         """
         self._sessions[session_id] = {
             "session_id": session_id,
@@ -56,13 +93,14 @@ class SessionService:
         )
 
     async def get_state(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Get the current state for a session.
+        """
+        获取会话状态
 
         Args:
-            session_id: The session identifier.
+            session_id: 会话标识
 
         Returns:
-            The current state, or None if not found.
+            Optional[Dict[str, Any]]: 当前状态，不存在则返回 None
         """
         session = self._sessions.get(session_id)
         if session:
@@ -70,11 +108,12 @@ class SessionService:
         return None
 
     async def save_state(self, session_id: str, state: Dict[str, Any]) -> None:
-        """Save state for a session.
+        """
+        保存会话状态
 
         Args:
-            session_id: The session identifier.
-            state: The state to save.
+            session_id: 会话标识
+            state: 要保存的状态
         """
         if session_id in self._sessions:
             self._sessions[session_id]["state"] = state
@@ -86,11 +125,12 @@ class SessionService:
             )
 
     async def fail(self, session_id: str, reason: str = "") -> None:
-        """Mark a session as failed.
+        """
+        标记会话失败
 
         Args:
-            session_id: The session identifier.
-            reason: Optional reason for failure.
+            session_id: 会话标识
+            reason: 失败原因
         """
         if session_id in self._sessions:
             self._sessions[session_id]["status"] = "failed"
@@ -104,10 +144,11 @@ class SessionService:
             )
 
     async def complete(self, session_id: str) -> None:
-        """Mark a session as completed.
+        """
+        标记会话完成
 
         Args:
-            session_id: The session identifier.
+            session_id: 会话标识
         """
         if session_id in self._sessions:
             self._sessions[session_id]["status"] = "completed"
@@ -119,35 +160,40 @@ class SessionService:
             )
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Get session metadata.
+        """
+        获取会话元数据
 
         Args:
-            session_id: The session identifier.
+            session_id: 会话标识
 
         Returns:
-            Session metadata, or None if not found.
+            Optional[Dict[str, Any]]: 会话元数据，不存在则返回 None
         """
         return self._sessions.get(session_id)
 
     def has_session(self, session_id: str) -> bool:
-        """Check if a session exists.
+        """
+        检查会话是否存在
 
         Args:
-            session_id: The session identifier.
+            session_id: 会话标识
 
         Returns:
-            True if the session exists.
+            bool: 是否存在
         """
         return session_id in self._sessions
 
     def clear_session(self, session_id: str) -> bool:
-        """Clear a session from memory.
+        """
+        清理会话
+
+        从内存中移除会话。
 
         Args:
-            session_id: The session identifier.
+            session_id: 会话标识
 
         Returns:
-            True if the session was cleared.
+            bool: 是否成功清理
         """
         if session_id in self._sessions:
             del self._sessions[session_id]

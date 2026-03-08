@@ -1,9 +1,14 @@
+"""test规格Promptprecedence相关测试。"""
+
 from app.runtime.agents.config import AgentConfig
 from app.runtime.langgraph import specs as specs_module
 
 
 def test_builtin_prompt_has_higher_priority_than_external_config(monkeypatch):
+    """验证内置Prompthas更高优先级于外部配置。"""
+    
     def fake_get_all_agent_configs():
+        """为测试场景提供fakegetallAgentconfigs辅助逻辑。"""
         return {
             "LogAgent": AgentConfig(
                 name="LogAgent",
@@ -30,7 +35,10 @@ def test_builtin_prompt_has_higher_priority_than_external_config(monkeypatch):
 
 
 def test_external_config_can_disable_builtin_agent(monkeypatch):
+    """验证外部配置可以禁用内置Agent。"""
+    
     def fake_get_all_agent_configs():
+        """为测试场景提供fakegetallAgentconfigs辅助逻辑。"""
         return {
             "LogAgent": AgentConfig(
                 name="LogAgent",

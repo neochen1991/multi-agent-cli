@@ -1,5 +1,11 @@
 """
-Agent tooling configuration models.
+Agent 工具配置模型。
+
+这里集中定义各类本地工具、远端连接器和 Skill 路由的配置结构，
+用于：
+- 配置存储
+- API 入参与出参校验
+- 前后端共享统一字段语义
 """
 
 from __future__ import annotations
@@ -10,6 +16,7 @@ from pydantic import BaseModel, Field
 
 
 class CodeRepoToolConfig(BaseModel):
+    """CodeAgent 的代码仓检索配置。"""
     enabled: bool = Field(default=False, description="是否启用 CodeAgent Git 工具")
     repo_url: str = Field(default="", description="Git 仓库地址")
     access_token: str = Field(default="", description="Git 访问 Token")
@@ -19,12 +26,14 @@ class CodeRepoToolConfig(BaseModel):
 
 
 class LogFileToolConfig(BaseModel):
+    """LogAgent 的本地日志文件读取配置。"""
     enabled: bool = Field(default=False, description="是否启用 LogAgent 日志文件工具")
     file_path: str = Field(default="", description="日志文件本地路径")
     max_lines: int = Field(default=300, ge=50, le=5000, description="最多读取日志行数")
 
 
 class DomainExcelToolConfig(BaseModel):
+    """DomainAgent 的责任田 Excel/CSV 检索配置。"""
     enabled: bool = Field(default=False, description="是否启用 DomainAgent 责任田文档工具")
     excel_path: str = Field(default="", description="Excel/CSV 文件路径")
     sheet_name: str = Field(default="", description="工作表名称（可选）")
@@ -33,6 +42,7 @@ class DomainExcelToolConfig(BaseModel):
 
 
 class DatabaseToolConfig(BaseModel):
+    """DatabaseAgent 的数据库元信息/慢 SQL 查询配置。"""
     enabled: bool = Field(default=False, description="是否启用 DatabaseAgent 数据库工具")
     engine: str = Field(default="sqlite", description="数据库引擎类型：sqlite/postgresql")
     db_path: str = Field(default="", description="SQLite 数据库文件路径")
@@ -43,6 +53,7 @@ class DatabaseToolConfig(BaseModel):
 
 
 class TelemetrySourceConfig(BaseModel):
+    """统一遥测入口配置，用于接入外部遥测平台。"""
     enabled: bool = Field(default=False, description="是否启用远程遥测数据源入口")
     endpoint: str = Field(default="", description="遥测平台 API 地址（占位）")
     api_token: str = Field(default="", description="遥测平台访问 Token（占位）")
@@ -51,6 +62,7 @@ class TelemetrySourceConfig(BaseModel):
 
 
 class CMDBSourceConfig(BaseModel):
+    """CMDB 连接器配置。"""
     enabled: bool = Field(default=False, description="是否启用远程 CMDB 数据源入口")
     endpoint: str = Field(default="", description="CMDB API 地址（占位）")
     api_token: str = Field(default="", description="CMDB 访问 Token（占位）")
@@ -59,6 +71,7 @@ class CMDBSourceConfig(BaseModel):
 
 
 class PrometheusSourceConfig(BaseModel):
+    """Prometheus 连接器配置。"""
     enabled: bool = Field(default=False, description="是否启用 Prometheus 入口")
     endpoint: str = Field(default="", description="Prometheus HTTP API 地址")
     api_token: str = Field(default="", description="Prometheus 访问 Token（可选）")
@@ -67,6 +80,7 @@ class PrometheusSourceConfig(BaseModel):
 
 
 class LokiSourceConfig(BaseModel):
+    """Loki 连接器配置。"""
     enabled: bool = Field(default=False, description="是否启用 Loki 入口")
     endpoint: str = Field(default="", description="Loki HTTP API 地址")
     api_token: str = Field(default="", description="Loki 访问 Token（可选）")
@@ -75,6 +89,7 @@ class LokiSourceConfig(BaseModel):
 
 
 class GrafanaSourceConfig(BaseModel):
+    """Grafana 连接器配置。"""
     enabled: bool = Field(default=False, description="是否启用 Grafana 入口")
     endpoint: str = Field(default="", description="Grafana API 地址")
     api_token: str = Field(default="", description="Grafana 访问 Token（可选）")
@@ -83,6 +98,7 @@ class GrafanaSourceConfig(BaseModel):
 
 
 class APMSourceConfig(BaseModel):
+    """APM 链路平台连接器配置。"""
     enabled: bool = Field(default=False, description="是否启用 APM 链路平台入口")
     endpoint: str = Field(default="", description="APM API 地址")
     api_token: str = Field(default="", description="APM 访问 Token（可选）")
@@ -91,6 +107,7 @@ class APMSourceConfig(BaseModel):
 
 
 class LogCloudSourceConfig(BaseModel):
+    """日志云平台连接器配置。"""
     enabled: bool = Field(default=False, description="是否启用日志云平台入口")
     endpoint: str = Field(default="", description="日志云 API 地址")
     api_token: str = Field(default="", description="日志云访问 Token（可选）")
@@ -99,6 +116,7 @@ class LogCloudSourceConfig(BaseModel):
 
 
 class AlertPlatformSourceConfig(BaseModel):
+    """告警平台连接器配置。"""
     enabled: bool = Field(default=False, description="是否启用监控告警平台入口")
     endpoint: str = Field(default="", description="告警平台 API 地址")
     api_token: str = Field(default="", description="告警平台访问 Token（可选）")
@@ -107,6 +125,7 @@ class AlertPlatformSourceConfig(BaseModel):
 
 
 class AgentSkillConfig(BaseModel):
+    """本地 Skill 路由配置。"""
     enabled: bool = Field(default=True, description="是否启用 Agent Skill 路由")
     skills_dir: str = Field(default="backend/skills", description="Skill 文档目录（本地）")
     max_skills: int = Field(default=3, ge=1, le=10, description="单次最多注入 Skill 数量")
@@ -115,6 +134,7 @@ class AgentSkillConfig(BaseModel):
 
 
 class AgentToolingConfig(BaseModel):
+    """整套 Agent Tooling 配置聚合模型。"""
     code_repo: CodeRepoToolConfig = Field(default_factory=CodeRepoToolConfig)
     log_file: LogFileToolConfig = Field(default_factory=LogFileToolConfig)
     domain_excel: DomainExcelToolConfig = Field(default_factory=DomainExcelToolConfig)

@@ -124,6 +124,8 @@ export interface DebateResult {
   };
   risk_assessment?: {
     risk_level: string;
+    risk_factors?: string[];
+    mitigation_suggestions?: string[];
   };
   created_at: string;
 }
@@ -577,6 +579,28 @@ export const debateApi = {
     const { data } = await api.post(`/debates/${sessionId}/cancel`);
     return data;
   },
+  async approveHumanReview(
+    sessionId: string,
+    approver = 'sre-oncall',
+    comment = '',
+  ): Promise<{ session_id: string; success: boolean; review_status: string; message: string }> {
+    const { data } = await api.post(`/debates/${sessionId}/human-review/approve`, {
+      approver,
+      comment,
+    });
+    return data;
+  },
+  async rejectHumanReview(
+    sessionId: string,
+    approver = 'sre-oncall',
+    reason = 'manual_reject',
+  ): Promise<{ session_id: string; success: boolean; review_status: string; message: string }> {
+    const { data } = await api.post(`/debates/${sessionId}/human-review/reject`, {
+      approver,
+      reason,
+    });
+    return data;
+  },
   async getTask(taskId: string): Promise<{ task_id: string; status: string; result?: Record<string, unknown>; error?: string }> {
     const { data } = await api.get(`/debates/tasks/${taskId}`);
     return data;
@@ -919,6 +943,47 @@ export const governanceApi = {
   async updateRuntimeStrategyActive(profile: string): Promise<Record<string, unknown>> {
     const { data } = await api.put<Record<string, unknown>>('/governance/runtime-strategies/active', {
       profile,
+    });
+    return data;
+  },
+  async deploymentProfiles(): Promise<Record<string, unknown>> {
+    const { data } = await api.get<Record<string, unknown>>('/governance/deployment-profiles');
+    return data;
+  },
+  async deploymentProfileActive(): Promise<Record<string, unknown>> {
+    const { data } = await api.get<Record<string, unknown>>('/governance/deployment-profiles/active');
+    return data;
+  },
+  async updateDeploymentProfileActive(profile: string): Promise<Record<string, unknown>> {
+    const { data } = await api.put<Record<string, unknown>>('/governance/deployment-profiles/active', {
+      profile,
+    });
+    return data;
+  },
+  async listHumanReview(limit = 50): Promise<{ items: Array<Record<string, unknown>>; summary: Record<string, unknown> }> {
+    const { data } = await api.get<{ items: Array<Record<string, unknown>>; summary: Record<string, unknown> }>(
+      '/governance/human-review',
+      { params: { limit } },
+    );
+    return data;
+  },
+  async approveHumanReview(sessionId: string, approver = 'sre-oncall', comment = ''): Promise<Record<string, unknown>> {
+    const { data } = await api.post<Record<string, unknown>>(`/governance/human-review/${sessionId}/approve`, {
+      approver,
+      comment,
+    });
+    return data;
+  },
+  async rejectHumanReview(sessionId: string, approver = 'sre-oncall', reason = 'manual_reject'): Promise<Record<string, unknown>> {
+    const { data } = await api.post<Record<string, unknown>>(`/governance/human-review/${sessionId}/reject`, {
+      approver,
+      reason,
+    });
+    return data;
+  },
+  async resumeHumanReview(sessionId: string, operator = 'sre-oncall'): Promise<Record<string, unknown>> {
+    const { data } = await api.post<Record<string, unknown>>(`/governance/human-review/${sessionId}/resume`, {
+      operator,
     });
     return data;
   },

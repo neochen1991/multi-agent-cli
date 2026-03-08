@@ -1,5 +1,10 @@
 """
-Build per-agent external tool context with on/off switches.
+按 Agent 角色构建外部工具上下文。
+
+这个服务负责把“主 Agent 的命令”转换成真正可执行的工具上下文：
+- 先做 command gate 决策
+- 再按 Agent 类型选择具体工具
+- 最后输出统一结构和审计日志
 """
 
 from __future__ import annotations
@@ -71,6 +76,7 @@ GIT_LOCAL_TIMEOUT = 20
 
 @dataclass
 class ToolContextResult:
+    """统一的工具上下文返回结构，供 runtime、前端和审计链复用。"""
     name: str
     enabled: bool
     used: bool
@@ -83,6 +89,7 @@ class ToolContextResult:
     permission_decision: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
+        """转成普通字典，便于直接塞进运行时上下文。"""
         return {
             "name": self.name,
             "enabled": self.enabled,
@@ -98,7 +105,9 @@ class ToolContextResult:
 
 
 class AgentToolContextService:
+    """封装AgentToolContextService相关数据结构或服务能力。"""
     def __init__(self) -> None:
+        """初始化本地工具、远端连接器和审计计数器。"""
         self._case_library = CaseLibraryTool()
         self._telemetry_connector = TelemetryConnector()
         self._cmdb_connector = CMDBConnector()
@@ -118,8 +127,18 @@ class AgentToolContextService:
         incident_context: Dict[str, Any],
         assigned_command: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        """
+        构建某个 Agent 当前轮次可用的工具上下文。
+
+        这是服务主入口，负责：
+        1. 根据命令判断是否允许调用工具。
+        2. 根据 Agent 角色路由到对应 `_build_*_context`。
+        3. 把 skill 注入和工具审计并入同一份结果。
+        """
         command_gate = self._decide_tool_invocation(agent_name=agent_name, assigned_command=assigned_command)
         cfg = await tooling_service.get_config()
+        # 这里的分支不是简单按名字分发，而是在定义“每类 Agent 允许看什么证据源”。
+        # 这样主 Agent 只需要下发方向，具体的工具接入边界由系统统一控制。
         if agent_name == "CodeAgent":
             result = await self._build_code_context(
                 cfg, compact_context, incident_context, assigned_command, command_gate
@@ -225,6 +244,16 @@ class AgentToolContextService:
             incident_context=incident_context,
             assigned_command=assigned_command,
         )
+        # 无论实际是否命中工具，最终都会把标准化 investigation leads 带回去，
+        # 让 Agent 在工具不可用时仍可基于已有线索完成受限分析。
+        result.data = {
+            **dict(result.data or {}),
+            "investigation_leads": self._extract_investigation_leads(
+                compact_context,
+                incident_context,
+                assigned_command,
+            ),
+        }
         result.permission_decision = {
             "allow_tool": bool(command_gate.get("allow_tool")),
             "reason": str(command_gate.get("reason") or ""),
@@ -255,6 +284,7 @@ class AgentToolContextService:
         incident_context: Dict[str, Any],
         assigned_command: Optional[Dict[str, Any]],
     ) -> ToolContextResult:
+        """把 skill 命中结果并入已有工具上下文，形成统一的注入视图。"""
         gate = dict(result.command_gate or {})
         if not bool(gate.get("has_command")):
             return result
@@ -348,6 +378,7 @@ class AgentToolContextService:
         assigned_command: Optional[Dict[str, Any]],
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
+        """构建构建代码上下文，供后续节点或调用方直接使用。"""
         tool_cfg = cfg.code_repo
         audit_log: List[Dict[str, Any]] = [
             self._audit(
@@ -473,6 +504,7 @@ class AgentToolContextService:
         assigned_command: Optional[Dict[str, Any]],
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
+        """构建构建日志上下文，供后续节点或调用方直接使用。"""
         tool_cfg = cfg.log_file
         audit_log: List[Dict[str, Any]] = [
             self._audit(
@@ -539,13 +571,15 @@ class AgentToolContextService:
             )
         try:
             keywords = self._extract_keywords(compact_context, incident_context, assigned_command)
+            service_name = self._primary_service_name(compact_context, incident_context, assigned_command)
+            trace_id = self._primary_trace_id(compact_context, incident_context, assigned_command)
             remote_logcloud_payload: Dict[str, Any] = {}
             if bool(getattr(cfg, "logcloud_source", None) and cfg.logcloud_source.enabled):
                 logcloud_result = await self._logcloud_connector.fetch(
                     cfg.logcloud_source,
                     {
-                        "service_name": str(incident_context.get("service_name") or ""),
-                        "trace_id": str(incident_context.get("trace_id") or ""),
+                        "service_name": service_name,
+                        "trace_id": trace_id,
                         "query": " ".join(keywords[:6]),
                     },
                 )
@@ -630,6 +664,7 @@ class AgentToolContextService:
         assigned_command: Optional[Dict[str, Any]],
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
+        """构建构建domain上下文，供后续节点或调用方直接使用。"""
         tool_cfg = cfg.domain_excel
         audit_log: List[Dict[str, Any]] = [
             self._audit(
@@ -696,6 +731,7 @@ class AgentToolContextService:
             )
         try:
             keywords = self._extract_keywords(compact_context, incident_context, assigned_command)
+            service_name = self._primary_service_name(compact_context, incident_context, assigned_command)
             result = await asyncio.to_thread(
                 self._lookup_domain_file,
                 path,
@@ -709,7 +745,7 @@ class AgentToolContextService:
                 cmdb_result = await self._cmdb_connector.fetch(
                     cfg.cmdb_source,
                     {
-                        "service_name": str(incident_context.get("service_name") or ""),
+                        "service_name": service_name,
                         "keywords": keywords[:8],
                     },
                 )
@@ -793,6 +829,7 @@ class AgentToolContextService:
         assigned_command: Optional[Dict[str, Any]],
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
+        """构建构建metrics上下文，供后续节点或调用方直接使用。"""
         audit_log: List[Dict[str, Any]] = [
             self._audit(
                 tool_name="metrics_snapshot_analyzer",
@@ -822,12 +859,14 @@ class AgentToolContextService:
         remote_loki_payload: Dict[str, Any] = {}
         remote_grafana_payload: Dict[str, Any] = {}
         remote_apm_payload: Dict[str, Any] = {}
+        service_name = self._primary_service_name(compact_context, incident_context, assigned_command)
+        trace_id = self._primary_trace_id(compact_context, incident_context, assigned_command)
         if bool(cfg.telemetry_source.enabled):
             telemetry_result = await self._telemetry_connector.fetch(
                 cfg.telemetry_source,
                 {
-                    "service_name": str(incident_context.get("service_name") or ""),
-                    "trace_id": str(incident_context.get("trace_id") or ""),
+                    "service_name": service_name,
+                    "trace_id": trace_id,
                 },
             )
             telemetry_status = str(telemetry_result.get("status") or "unknown")
@@ -851,7 +890,7 @@ class AgentToolContextService:
             prometheus_result = await self._prometheus_connector.fetch(
                 cfg.prometheus_source,
                 {
-                    "service_name": str(incident_context.get("service_name") or ""),
+                    "service_name": service_name,
                     "query": str(assigned_command.get("focus") if isinstance(assigned_command, dict) else ""),
                 },
             )
@@ -876,8 +915,8 @@ class AgentToolContextService:
             loki_result = await self._loki_connector.fetch(
                 cfg.loki_source,
                 {
-                    "service_name": str(incident_context.get("service_name") or ""),
-                    "trace_id": str(incident_context.get("trace_id") or ""),
+                    "service_name": service_name,
+                    "trace_id": trace_id,
                     "query": str(assigned_command.get("focus") if isinstance(assigned_command, dict) else ""),
                 },
             )
@@ -902,7 +941,7 @@ class AgentToolContextService:
             grafana_result = await self._grafana_connector.fetch(
                 cfg.grafana_source,
                 {
-                    "service_name": str(incident_context.get("service_name") or ""),
+                    "service_name": service_name,
                     "query": str(assigned_command.get("focus") if isinstance(assigned_command, dict) else ""),
                 },
             )
@@ -927,8 +966,8 @@ class AgentToolContextService:
             apm_result = await self._apm_connector.fetch(
                 cfg.apm_source,
                 {
-                    "service_name": str(incident_context.get("service_name") or ""),
-                    "trace_id": str(incident_context.get("trace_id") or ""),
+                    "service_name": service_name,
+                    "trace_id": trace_id,
                     "query": str(assigned_command.get("focus") if isinstance(assigned_command, dict) else ""),
                 },
             )
@@ -1050,6 +1089,7 @@ class AgentToolContextService:
         assigned_command: Optional[Dict[str, Any]],
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
+        """构建构建change上下文，供后续节点或调用方直接使用。"""
         tool_cfg = cfg.code_repo
         audit_log: List[Dict[str, Any]] = [
             self._audit(
@@ -1170,6 +1210,7 @@ class AgentToolContextService:
         assigned_command: Optional[Dict[str, Any]],
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
+        """构建构建database上下文，供后续节点或调用方直接使用。"""
         tool_cfg = getattr(cfg, "database", None)
         audit_log: List[Dict[str, Any]] = [
             self._audit(
@@ -1369,6 +1410,7 @@ class AgentToolContextService:
         assigned_command: Optional[Dict[str, Any]],
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
+        """构建构建runbook上下文，供后续节点或调用方直接使用。"""
         audit_log: List[Dict[str, Any]] = [
             self._audit(
                 tool_name="runbook_case_library",
@@ -1459,6 +1501,7 @@ class AgentToolContextService:
         assigned_command: Optional[Dict[str, Any]],
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
+        """构建构建rulesuggestion上下文，供后续节点或调用方直接使用。"""
         metrics = await self._build_metrics_context(
             cfg=cfg,
             compact_context=compact_context,
@@ -1534,6 +1577,7 @@ class AgentToolContextService:
         local_repo_path: str,
         audit_log: List[Dict[str, Any]],
     ) -> str:
+        """执行resolverepopath相关逻辑，并为当前模块提供可复用的处理能力。"""
         raw_local_path = str(local_repo_path or "").strip()
         local_path = Path(raw_local_path) if raw_local_path else None
         if local_path and local_path.exists() and local_path.is_dir():
@@ -1714,6 +1758,7 @@ class AgentToolContextService:
         repo_url: str,
         timeout_seconds: int,
     ) -> None:
+        """负责运行git，并处理调用过程中的超时、错误与返回结果。"""
         started = datetime.utcnow()
         safe_cmd = [self._sanitize_command_part(item) for item in cmd]
         try:
@@ -1799,6 +1844,7 @@ class AgentToolContextService:
         repo_url: str,
         timeout_plan: tuple[int, ...],
     ) -> None:
+        """负责运行gitwithretry，并处理调用过程中的超时、错误与返回结果。"""
         last_error: Optional[Exception] = None
         for index, timeout_seconds in enumerate(timeout_plan, start=1):
             try:
@@ -1832,12 +1878,14 @@ class AgentToolContextService:
         raise RuntimeError(str(last_error) if last_error else f"{action} failed")
 
     def _git_env(self) -> Dict[str, str]:
+        """执行gitenv相关逻辑，并为当前模块提供可复用的处理能力。"""
         env = dict(os.environ)
         env.setdefault("GIT_TERMINAL_PROMPT", "0")
         env.setdefault("GIT_ASKPASS", "echo")
         return env
 
     def _is_allowed_git_host(self, repo_url: str) -> bool:
+        """执行isallowedgithost相关逻辑，并为当前模块提供可复用的处理能力。"""
         raw = str(repo_url or "").strip()
         if not raw:
             return False
@@ -1851,6 +1899,7 @@ class AgentToolContextService:
         return host in allowlist
 
     def _inject_token(self, repo_url: str, token: str) -> str:
+        """执行injecttoken相关逻辑，并为当前模块提供可复用的处理能力。"""
         raw = str(repo_url or "").strip()
         tk = str(token or "").strip()
         if not tk:
@@ -1869,6 +1918,7 @@ class AgentToolContextService:
         max_items: int,
         audit_log: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
+        """执行收集recentgitchanges相关逻辑，并为当前模块提供可复用的处理能力。"""
         cmd = [
             "git",
             "--no-pager",
@@ -1943,6 +1993,7 @@ class AgentToolContextService:
         compact_context: Dict[str, Any],
         incident_context: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
+        """执行收集metrics信号相关逻辑，并为当前模块提供可复用的处理能力。"""
         signals: List[Dict[str, Any]] = []
         text_sources = [
             str(compact_context.get("log_excerpt") or ""),
@@ -1998,6 +2049,7 @@ class AgentToolContextService:
         target_tables: List[str],
         timeout_seconds: int,
     ) -> Dict[str, Any]:
+        """执行收集postgressnapshot相关逻辑，并为当前模块提供可复用的处理能力。"""
         conn = await asyncpg.connect(dsn=dsn, timeout=timeout_seconds)  # type: ignore[union-attr]
         try:
             table_records = await conn.fetch(
@@ -2138,6 +2190,7 @@ class AgentToolContextService:
         keywords: List[str],
         target_tables: List[str],
     ) -> Dict[str, Any]:
+        """执行收集databasesnapshot相关逻辑，并为当前模块提供可复用的处理能力。"""
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         try:
@@ -2250,6 +2303,7 @@ class AgentToolContextService:
 
     @staticmethod
     def _query_first_existing(cur: sqlite3.Cursor, queries: List[str], params: List[Any]) -> List[Dict[str, Any]]:
+        """执行queryfirstexisting相关逻辑，并为当前模块提供可复用的处理能力。"""
         for sql in queries:
             try:
                 cur.execute(sql, params)
@@ -2260,6 +2314,7 @@ class AgentToolContextService:
 
     @staticmethod
     async def _pg_fetch_rows(conn: Any, queries: List[str], max_rows: int) -> List[Dict[str, Any]]:
+        """执行pg抓取rows相关逻辑，并为当前模块提供可复用的处理能力。"""
         for sql in queries:
             try:
                 rows = await conn.fetch(sql, max_rows)
@@ -2270,6 +2325,7 @@ class AgentToolContextService:
 
     @staticmethod
     def _escape_sql_identifier(name: str) -> str:
+        """执行escapesqlidentifier相关逻辑，并为当前模块提供可复用的处理能力。"""
         return str(name or "").replace("'", "''")
 
     def _decide_tool_invocation(
@@ -2278,6 +2334,7 @@ class AgentToolContextService:
         agent_name: str,
         assigned_command: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        """根据命令文本和显式开关决定本轮是否允许工具调用。"""
         command = dict(assigned_command or {})
         text_fields = [
             str(command.get("task") or "").strip(),
@@ -2373,6 +2430,7 @@ class AgentToolContextService:
         }
 
     def _command_preview(self, assigned_command: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """执行commandpreview相关逻辑，并为当前模块提供可复用的处理能力。"""
         command = dict(assigned_command or {})
         skill_hints_raw = command.get("skill_hints")
         skill_hints = (
@@ -2396,6 +2454,7 @@ class AgentToolContextService:
         status: str,
         detail: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """生成标准化工具审计记录，统一请求/响应摘要和明细预览。"""
         detail_payload = detail if isinstance(detail, dict) else {"value": str(detail or "")}
         call_id = self._next_audit_call_id(tool_name=tool_name, action=action)
         return {
@@ -2412,12 +2471,14 @@ class AgentToolContextService:
         }
 
     def _next_audit_call_id(self, *, tool_name: str, action: str) -> str:
+        """执行nextaudit调用id相关逻辑，并为当前模块提供可复用的处理能力。"""
         self._audit_seq += 1
         tool = re.sub(r"[^a-z0-9]+", "_", str(tool_name or "tool").lower()).strip("_") or "tool"
         act = re.sub(r"[^a-z0-9]+", "_", str(action or "action").lower()).strip("_") or "action"
         return f"{tool}_{act}_{self._audit_seq:06d}"
 
     def _detail_preview(self, detail: Dict[str, Any], *, max_chars: int = 420) -> str:
+        """执行detailpreview相关逻辑，并为当前模块提供可复用的处理能力。"""
         try:
             text = json.dumps(detail, ensure_ascii=False, separators=(",", ":"))
         except Exception:
@@ -2428,6 +2489,7 @@ class AgentToolContextService:
         return f"{text[:max_chars]}..."
 
     def _request_summary(self, detail: Dict[str, Any]) -> str:
+        """执行request摘要相关逻辑，并为当前模块提供可复用的处理能力。"""
         picks: List[str] = []
         for key in ("path", "repo_url", "endpoint", "sheet_name", "keywords", "query", "service_name"):
             value = detail.get(key)
@@ -2437,6 +2499,7 @@ class AgentToolContextService:
         return "；".join(picks)[:260]
 
     def _response_summary(self, detail: Dict[str, Any]) -> str:
+        """执行response摘要相关逻辑，并为当前模块提供可复用的处理能力。"""
         picks: List[str] = []
         for key in (
             "status",
@@ -2454,6 +2517,7 @@ class AgentToolContextService:
         return "；".join(picks)[:260]
 
     def _coerce_duration_ms(self, detail: Dict[str, Any]) -> Optional[float]:
+        """执行coercedurationms相关逻辑，并为当前模块提供可复用的处理能力。"""
         for key in ("duration_ms", "latency_ms", "elapsed_ms"):
             value = detail.get(key)
             if value is None:
@@ -2465,11 +2529,13 @@ class AgentToolContextService:
         return None
 
     def _sanitize_command_part(self, item: str) -> str:
+        """执行sanitizecommandpart相关逻辑，并为当前模块提供可复用的处理能力。"""
         text = str(item or "")
         masked = self._mask_url_secret(text)
         return re.sub(r"(?i)(token|apikey|api_key|access_token)=([^&\s]+)", r"\1=***", masked)
 
     def _mask_url_secret(self, raw_url: str) -> str:
+        """执行maskurlsecret相关逻辑，并为当前模块提供可复用的处理能力。"""
         raw = str(raw_url or "").strip()
         if not raw:
             return raw
@@ -2493,11 +2559,25 @@ class AgentToolContextService:
         incident_context: Dict[str, Any],
         assigned_command: Optional[Dict[str, Any]],
     ) -> List[str]:
+        """对输入执行提取keywords，将原始数据整理为稳定的内部结构。"""
         bucket: List[str] = []
+        leads = self._extract_investigation_leads(compact_context, incident_context, assigned_command)
         endpoint = (((compact_context.get("interface_mapping") or {}).get("endpoint") or {}) if isinstance(compact_context.get("interface_mapping"), dict) else {})
         for key in ("path", "service", "interface", "method"):
             value = str(endpoint.get(key) or "").strip()
             if value:
+                bucket.append(value)
+        for field in (
+            "api_endpoints",
+            "service_names",
+            "code_artifacts",
+            "class_names",
+            "monitor_items",
+            "dependency_services",
+            "trace_ids",
+            "error_keywords",
+        ):
+            for value in leads.get(field) or []:
                 bucket.append(value)
         for table in self._extract_database_tables(compact_context, incident_context, assigned_command):
             bucket.append(table)
@@ -2530,7 +2610,47 @@ class AgentToolContextService:
                     continue
                 tokens.append(tk[:80])
         deduped = list(dict.fromkeys(tokens))
-        return deduped[:12]
+        return deduped[:20]
+
+    def _extract_investigation_leads(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """从命令、compact_context、incident_context 中抽取统一的调查线索包。"""
+        picks: Dict[str, List[str]] = {
+            "api_endpoints": [],
+            "service_names": [],
+            "code_artifacts": [],
+            "class_names": [],
+            "database_tables": [],
+            "monitor_items": [],
+            "dependency_services": [],
+            "trace_ids": [],
+            "error_keywords": [],
+        }
+        scalar = {"domain": "", "aggregate": "", "owner_team": "", "owner": ""}
+        command = dict(assigned_command or {})
+        sources = [
+            command,
+            compact_context.get("investigation_leads") if isinstance(compact_context.get("investigation_leads"), dict) else {},
+            incident_context.get("investigation_leads") if isinstance(incident_context.get("investigation_leads"), dict) else {},
+        ]
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            for key in picks:
+                for item in source.get(key) or []:
+                    text = str(item or "").strip()
+                    if text:
+                        picks[key].append(text[:180])
+            for key in scalar:
+                if not scalar[key]:
+                    scalar[key] = str(source.get(key) or "").strip()[:120]
+        normalized = {key: list(dict.fromkeys(value))[:20] for key, value in picks.items()}
+        normalized.update(scalar)
+        return normalized
 
     def _extract_database_tables(
         self,
@@ -2538,6 +2658,7 @@ class AgentToolContextService:
         incident_context: Dict[str, Any],
         assigned_command: Optional[Dict[str, Any]],
     ) -> List[str]:
+        """提取并规范化数据库表线索，统一返回有序去重后的表名列表。"""
         picks: List[str] = []
         command = dict(assigned_command or {})
         for table in command.get("database_tables") or []:
@@ -2546,21 +2667,64 @@ class AgentToolContextService:
                 picks.append(text[:120])
         interface_mapping = compact_context.get("interface_mapping")
         if isinstance(interface_mapping, dict):
-            for table in interface_mapping.get("database_tables") or []:
+            for table in (interface_mapping.get("database_tables") or interface_mapping.get("db_tables") or []):
                 text = str(table or "").strip()
                 if text:
                     picks.append(text[:120])
         incident_mapping = incident_context.get("interface_mapping")
         if isinstance(incident_mapping, dict):
-            for table in incident_mapping.get("database_tables") or []:
+            for table in (incident_mapping.get("database_tables") or incident_mapping.get("db_tables") or []):
                 text = str(table or "").strip()
                 if text:
                     picks.append(text[:120])
+        for table in self._extract_investigation_leads(compact_context, incident_context, assigned_command).get("database_tables") or []:
+            text = str(table or "").strip()
+            if text:
+                picks.append(text[:120])
         # keep order and unique
         return list(dict.fromkeys(picks))[:20]
 
+    def _primary_service_name(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> str:
+        """返回最可信的服务名，供日志、指标、代码和变更工具共享。"""
+        leads = self._extract_investigation_leads(compact_context, incident_context, assigned_command)
+        candidates = [
+            incident_context.get("service_name"),
+            ((compact_context.get("interface_mapping") or {}).get("endpoint") or {}).get("service") if isinstance(compact_context.get("interface_mapping"), dict) else "",
+            *((leads.get("service_names") or [])[:4]),
+        ]
+        for item in candidates:
+            text = str(item or "").strip()
+            if text:
+                return text[:160]
+        return ""
+
+    def _primary_trace_id(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> str:
+        """返回最可信的 Trace ID，供日志/APM 等链路工具复用。"""
+        leads = self._extract_investigation_leads(compact_context, incident_context, assigned_command)
+        candidates = [
+            incident_context.get("trace_id"),
+            ((compact_context.get("parsed_data") or {}).get("trace_id") if isinstance(compact_context.get("parsed_data"), dict) else ""),
+            *((leads.get("trace_ids") or [])[:4]),
+        ]
+        for item in candidates:
+            text = str(item or "").strip()
+            if text:
+                return text[:160]
+        return ""
+
     @staticmethod
     def _normalize_table_name(name: str) -> str:
+        """对输入执行归一化tablename，将原始数据整理为稳定的内部结构。"""
         text = str(name or "").strip().lower().strip('"')
         if "." in text:
             return text.split(".")[-1].strip('"')
@@ -2572,6 +2736,7 @@ class AgentToolContextService:
         keywords: List[str],
         max_hits: int,
     ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """在本地代码仓执行受限搜索，返回结构化命中片段和扫描摘要。"""
         path = Path(repo_path)
         if not path.exists():
             return [], {"repo_path": repo_path, "files_scanned": 0, "hits": 0}
@@ -2629,6 +2794,7 @@ class AgentToolContextService:
         max_lines: int,
         keywords: Iterable[str],
     ) -> tuple[str, int, Dict[str, Any]]:
+        """从日志文件提取局部窗口，优先返回命中关键词的片段。"""
         kw = [k.lower() for k in keywords if k]
         window = deque(maxlen=max(50, max_lines))
         scanned_lines = 0
@@ -2667,6 +2833,7 @@ class AgentToolContextService:
         max_matches: int,
         keywords: List[str],
     ) -> Dict[str, Any]:
+        """从责任田/领域文件中查找与当前关键词最相关的记录。"""
         suffix = path.suffix.lower()
         sheet_used = ""
         if suffix == ".csv":
@@ -2695,6 +2862,7 @@ class AgentToolContextService:
         }
 
     def _read_csv_rows(self, path: Path, max_rows: int) -> List[Dict[str, Any]]:
+        """负责读取csvrows，并返回后续流程可直接消费的数据结果。"""
         rows: List[Dict[str, Any]] = []
         with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -2705,6 +2873,7 @@ class AgentToolContextService:
         return rows
 
     def _read_xlsx_rows(self, path: Path, sheet_name: str, max_rows: int) -> tuple[List[Dict[str, Any]], str]:
+        """负责读取xlsxrows，并返回后续流程可直接消费的数据结果。"""
         try:
             from openpyxl import load_workbook  # type: ignore
         except Exception as exc:

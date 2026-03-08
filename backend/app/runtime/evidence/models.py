@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 
 class Evidence(BaseModel):
+    """封装Evidence相关数据结构或服务能力。"""
     evidence_id: str = ""
     source: str = ""
     source_ref: str = ""
@@ -19,6 +20,7 @@ class Evidence(BaseModel):
 
 
 class Claim(BaseModel):
+    """封装Claim相关数据结构或服务能力。"""
     claim_id: str = ""
     summary: str = ""
     owner_agent: str = ""
@@ -27,6 +29,7 @@ class Claim(BaseModel):
 
 
 class Hypothesis(BaseModel):
+    """封装Hypothesis相关数据结构或服务能力。"""
     hypothesis_id: str = ""
     statement: str = ""
     status: str = "open"

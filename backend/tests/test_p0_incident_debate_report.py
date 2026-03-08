@@ -1,8 +1,12 @@
+"""testp0故障辩论报告相关测试。"""
+
 import asyncio
 from datetime import datetime
 import os
 import sys
 import importlib
+import tempfile
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -25,13 +29,18 @@ report_service_module = importlib.import_module("app.services.report_service")
 
 
 def _reset_state() -> None:
+    """为测试场景提供reset状态辅助逻辑。"""
+    
     incident_service._repository = InMemoryIncidentRepository()
     debate_service._repository = InMemoryDebateRepository()
     report_service._repository = InMemoryReportRepository()
     asset_service._repository = InMemoryAssetRepository()
+    asset_service._responsibility_asset_file = Path(tempfile.mkdtemp()) / "responsibility_assets.json"
 
 
 def _create_fake_report_generator():
+    """为测试场景提供创建fake报告generator辅助逻辑。"""
+    
     async def _fake_generate_report(
         incident,
         debate_result,
@@ -39,6 +48,7 @@ def _create_fake_report_generator():
         format="markdown",
         event_callback=None,
     ):
+        """为测试场景提供generate报告模拟实现。"""
         _ = event_callback
         return {
             "report_id": "rpt_test_001",
@@ -53,6 +63,8 @@ def _create_fake_report_generator():
 
 
 def test_create_debate_session_updates_incident_without_type_error():
+    """验证创建辩论sessionupdates故障无typeerror。"""
+    
     _reset_state()
     client = TestClient(app)
 
@@ -71,6 +83,8 @@ def test_create_debate_session_updates_incident_without_type_error():
 
 
 def test_create_debate_session_supports_configurable_max_rounds():
+    """验证创建辩论session支持configurablemaxrounds。"""
+    
     _reset_state()
     client = TestClient(app)
 
@@ -88,7 +102,33 @@ def test_create_debate_session_supports_configurable_max_rounds():
     assert debate_config.get("max_rounds") == 4
 
 
+def test_cancel_debate_closes_incident():
+    """验证cancel辩论closes故障。"""
+    
+    _reset_state()
+    client = TestClient(app)
+
+    created = client.post("/api/v1/incidents/", json={"title": "cancel incident"})
+    assert created.status_code == 201
+    incident_id = created.json()["id"]
+
+    session_resp = client.post(f"/api/v1/debates/?incident_id={incident_id}")
+    assert session_resp.status_code == 201
+    session_id = session_resp.json()["id"]
+
+    cancel_resp = client.post(f"/api/v1/debates/{session_id}/cancel")
+    assert cancel_resp.status_code == 200
+    assert cancel_resp.json()["cancelled"] is True
+
+    incident_detail = client.get(f"/api/v1/incidents/{incident_id}")
+    assert incident_detail.status_code == 200
+    assert incident_detail.json()["status"] == "closed"
+    assert incident_detail.json()["fix_suggestion"] == "analysis cancelled"
+
+
 def test_report_endpoints_work_with_in_memory_storage(monkeypatch):
+    """验证报告endpointswork带inmemorystorage。"""
+    
     _reset_state()
     client = TestClient(app)
 
@@ -159,6 +199,8 @@ def test_report_endpoints_work_with_in_memory_storage(monkeypatch):
 
 
 def test_asset_repository_backed_endpoints_work():
+    """验证资产repositorybackedendpointswork。"""
+    
     _reset_state()
     client = TestClient(app)
 
@@ -205,6 +247,8 @@ def test_asset_repository_backed_endpoints_work():
 
 
 def test_asset_fusion_endpoint_returns_session_assets():
+    """验证资产fusionendpoint返回sessionassets。"""
+    
     _reset_state()
     client = TestClient(app)
 
@@ -234,6 +278,8 @@ def test_asset_fusion_endpoint_returns_session_assets():
 
 
 def test_auth_login_and_guard_when_enabled():
+    """验证authloginand门禁当enabled。"""
+    
     _reset_state()
     client = TestClient(app)
     previous = settings.AUTH_ENABLED
@@ -254,15 +300,20 @@ def test_auth_login_and_guard_when_enabled():
 
 
 def test_collect_assets_tolerates_none_metadata_and_parsed_data(monkeypatch):
+    """验证collectassetstoleratesnonemetadataandparseddata。"""
+    
     _reset_state()
 
     async def _fake_runtime_assets(*args, **kwargs):
+        """为测试场景提供运行时assets模拟实现。"""
         return []
 
     async def _fake_dev_assets(*args, **kwargs):
+        """为测试场景提供devassets模拟实现。"""
         return []
 
     async def _fake_design_assets(*args, **kwargs):
+        """为测试场景提供designassets模拟实现。"""
         return []
 
     monkeypatch.setattr(asset_collection_service, "collect_runtime_assets", _fake_runtime_assets)
@@ -284,7 +335,77 @@ def test_collect_assets_tolerates_none_metadata_and_parsed_data(monkeypatch):
     assert assets["design_assets"] == []
 
 
+def test_collect_assets_builds_investigation_leads(monkeypatch):
+    """验证collectassets构建investigation线索。"""
+    
+    _reset_state()
+
+    async def _fake_runtime_assets(*args, **kwargs):
+        """为测试场景提供运行时assets模拟实现。"""
+        return []
+
+    async def _fake_dev_assets(*args, **kwargs):
+        """为测试场景提供devassets模拟实现。"""
+        return []
+
+    async def _fake_design_assets(*args, **kwargs):
+        """为测试场景提供designassets模拟实现。"""
+        return []
+
+    async def _fake_mapping(*args, **kwargs):
+        """为测试场景提供映射模拟实现。"""
+        return {
+            "matched": True,
+            "confidence": 0.88,
+            "domain": "order",
+            "aggregate": "Order",
+            "owner_team": "order-sre",
+            "owner": "neo",
+            "matched_endpoint": {
+                "method": "POST",
+                "path": "/api/v1/orders",
+                "service": "order-service",
+                "interface": "POST /api/v1/orders",
+            },
+            "code_artifacts": [{"path": "order/service/OrderService.java", "symbol": "OrderService"}],
+            "db_tables": ["t_order", "t_order_item"],
+            "monitor_items": ["order.error.rate", "order.latency.p99"],
+            "dependency_services": ["inventory-service", "payment-service"],
+        }
+
+    monkeypatch.setattr(asset_collection_service, "collect_runtime_assets", _fake_runtime_assets)
+    monkeypatch.setattr(asset_collection_service, "collect_dev_assets", _fake_dev_assets)
+    monkeypatch.setattr(asset_collection_service, "collect_design_assets", _fake_design_assets)
+    monkeypatch.setattr(asset_service, "locate_interface_context", _fake_mapping)
+
+    assets = asyncio.run(
+        debate_service._collect_assets(
+            {
+                "incident": {"id": "inc_test_02", "metadata": {}},
+                "log_content": "traceId=abc-123 timeout when POST /api/v1/orders",
+                "parsed_data": {
+                    "trace_id": "abc-123",
+                    "class_names": ["OrderController", "OrderService"],
+                    "error_message": "Timeout waiting for downstream inventory-service",
+                },
+            }
+        )
+    )
+
+    leads = assets["investigation_leads"]
+    assert "POST /api/v1/orders" in leads["api_endpoints"]
+    assert "order-service" in leads["service_names"]
+    assert "OrderService" in leads["class_names"]
+    assert "OrderService" in leads["code_artifacts"][0]
+    assert leads["database_tables"] == ["t_order", "t_order_item"]
+    assert leads["monitor_items"] == ["order.error.rate", "order.latency.p99"]
+    assert leads["dependency_services"] == ["inventory-service", "payment-service"]
+    assert leads["trace_ids"] == ["abc-123"]
+
+
 def test_execute_debate_degrades_when_llm_unavailable(monkeypatch):
+    """验证execute辩论degrades当LLMunavailable。"""
+    
     _reset_state()
     client = TestClient(app)
     monkeypatch.setattr(settings, "DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION", False)
@@ -296,6 +417,7 @@ def test_execute_debate_degrades_when_llm_unavailable(monkeypatch):
     )
 
     async def _always_fail_ai_debate(*args, **kwargs):
+        """为测试场景提供alwaysfailai辩论辅助逻辑。"""
         raise RuntimeError("LLM_RATE_LIMITED: mock 429")
 
     monkeypatch.setattr(debate_service, "_execute_ai_debate", _always_fail_ai_debate)
@@ -320,6 +442,8 @@ def test_execute_debate_degrades_when_llm_unavailable(monkeypatch):
 
 
 def test_execute_debate_accepts_coordination_phase_in_history(monkeypatch):
+    """验证execute辩论接受coordinationphasein历史。"""
+    
     _reset_state()
     client = TestClient(app)
     monkeypatch.setattr(settings, "DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION", False)
@@ -330,6 +454,7 @@ def test_execute_debate_accepts_coordination_phase_in_history(monkeypatch):
     )
 
     async def _fake_ai_debate(*args, **kwargs):
+        """为测试场景提供ai辩论模拟实现。"""
         return (
             {
                 "confidence": 0.84,
@@ -401,6 +526,8 @@ def test_execute_debate_accepts_coordination_phase_in_history(monkeypatch):
 
 
 def test_interface_locate_endpoint_maps_to_domain_aggregate():
+    """验证interfacelocateendpoint映射todomainaggregate。"""
+    
     _reset_state()
     client = TestClient(app)
 

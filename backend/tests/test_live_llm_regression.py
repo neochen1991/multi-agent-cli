@@ -1,3 +1,5 @@
+"""test在线LLMregression相关测试。"""
+
 import os
 
 import pytest
@@ -10,6 +12,8 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.asyncio
 async def test_live_llm_minimal_roundtrip():
+    """验证在线LLM最小往返。"""
+    
     if os.getenv("RUN_LIVE_LLM_TESTS", "0") != "1":
         pytest.skip("set RUN_LIVE_LLM_TESTS=1 to enable live LLM regression tests")
     if not os.getenv("LLM_API_KEY"):

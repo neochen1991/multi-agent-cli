@@ -1,6 +1,4 @@
-"""
-Unit tests for GraphBuilder.
-"""
+"""test图构建器相关测试。"""
 
 import pytest
 from unittest.mock import MagicMock, patch
@@ -10,10 +8,10 @@ from app.runtime.langgraph.state import AgentSpec
 
 
 class TestGraphBuilder:
-    """Tests for GraphBuilder."""
+    """归档GraphBuilder相关测试场景。"""
 
     def _create_mock_orchestrator(self):
-        """Create a mock orchestrator for testing."""
+        """为测试场景提供创建mockorchestrator辅助逻辑。"""
         orchestrator = MagicMock()
         orchestrator.session_id = "test_session"
         orchestrator._route_after_supervisor_decide = lambda state: "round_evaluate"
@@ -21,14 +19,14 @@ class TestGraphBuilder:
         return orchestrator
 
     def test_builder_initialization(self):
-        """Should initialize GraphBuilder with orchestrator."""
+        """验证构建器initialization。"""
         orchestrator = self._create_mock_orchestrator()
         builder = GraphBuilder(orchestrator)
 
         assert builder._orchestrator is orchestrator
 
     def test_agent_to_node_name(self):
-        """Should convert agent name to node name correctly."""
+        """验证Agenttonodename。"""
         orchestrator = self._create_mock_orchestrator()
         builder = GraphBuilder(orchestrator)
 
@@ -37,7 +35,7 @@ class TestGraphBuilder:
         assert builder._agent_to_node_name("JudgeAgent") == "judge_agent_node"
 
     def test_get_route_table(self):
-        """Should generate correct route table."""
+        """验证get路由table。"""
         orchestrator = self._create_mock_orchestrator()
         builder = GraphBuilder(orchestrator)
 
@@ -60,7 +58,7 @@ class TestGraphBuilder:
         assert "judge_agent_node" in route_table
 
     def test_get_route_table_with_collaboration(self):
-        """Should include collaboration node when enabled."""
+        """验证get路由table带collaboration。"""
         orchestrator = self._create_mock_orchestrator()
         builder = GraphBuilder(orchestrator)
 
@@ -73,7 +71,7 @@ class TestGraphBuilder:
             assert "analysis_collaboration_node" in route_table
 
     def test_build_creates_graph(self):
-        """Should build a valid StateGraph."""
+        """验证buildcreates图。"""
         orchestrator = self._create_mock_orchestrator()
         builder = GraphBuilder(orchestrator)
 
@@ -94,10 +92,10 @@ class TestGraphBuilder:
 
 
 class TestGraphBuilderNodeConstants:
-    """Tests for GraphBuilder node name constants."""
+    """归档GraphBuilderNodeConstants相关测试场景。"""
 
     def test_node_constants_exist(self):
-        """Should have node name constants defined."""
+        """验证nodeconstantsexist。"""
         assert GraphBuilder.NODE_INIT_SESSION == "init_session"
         assert GraphBuilder.NODE_ROUND_START == "round_start"
         assert GraphBuilder.NODE_SUPERVISOR_DECIDE == "supervisor_decide"

@@ -31,6 +31,7 @@ class AssetKnowledgeService:
     CASE_FILE = "operations-case-library.md"
 
     def __init__(self, base_dir: Optional[Path] = None):
+        """初始化知识库目录和缓存。"""
         default_dir = Path(__file__).resolve().parents[2] / "examples" / "assets"
         self._base_dir = base_dir or Path(os.getenv("ASSET_SAMPLE_DIR", str(default_dir)))
         self._cache: Optional[Dict[str, Any]] = None
@@ -138,6 +139,9 @@ class AssetKnowledgeService:
             "matched_endpoint": matched_endpoint,
             "code_artifacts": mapping.get("code_artifacts", []),
             "db_tables": mapping.get("db_tables", []),
+            "database_tables": mapping.get("db_tables", []),
+            "dependency_services": (design_detail or {}).get("domain_services", []) if isinstance(design_detail, dict) else [],
+            "monitor_items": mapping.get("monitor_items", []),
             "design_ref": (mapping.get("design_refs") or [None])[0],
             "design_details": design_detail,
             "similar_cases": similar_cases,
@@ -243,6 +247,7 @@ class AssetKnowledgeService:
         }
 
     def _is_changed(self, files: Dict[str, Path]) -> bool:
+        """执行ischanged相关逻辑，并为当前模块提供可复用的处理能力。"""
         for path in files.values():
             if not path.exists():
                 return True
@@ -253,6 +258,7 @@ class AssetKnowledgeService:
         return False
 
     def _read_frontmatter_json(self, path: Path) -> Dict[str, Any]:
+        """负责读取frontmatterjson，并返回后续流程可直接消费的数据结果。"""
         if not path.exists():
             logger.warning("asset_sample_missing", path=str(path))
             return {}
@@ -273,6 +279,7 @@ class AssetKnowledgeService:
             return {}
 
     def _extract_interface_hints(self, text: str) -> List[Dict[str, str]]:
+        """对输入执行提取interfacehints，将原始数据整理为稳定的内部结构。"""
         hints: List[Dict[str, str]] = []
         seen = set()
 
@@ -316,6 +323,7 @@ class AssetKnowledgeService:
         return hints[:10]
 
     def _normalize_path(self, raw_path: str) -> str:
+        """对输入执行归一化path，将原始数据整理为稳定的内部结构。"""
         path = raw_path.strip().rstrip('.,;:)')
         if "//" in path and path.startswith("http"):
             match = re.match(r"https?://[^/]+(/.*)", path)
@@ -337,6 +345,7 @@ class AssetKnowledgeService:
         hints: List[Dict[str, str]],
         corpus: str,
     ) -> Tuple[int, Optional[Dict[str, Any]]]:
+        """计算评分mapping，为治理、裁决或展示提供量化依据。"""
         best_score = 0
         best_endpoint: Optional[Dict[str, Any]] = None
 
@@ -386,6 +395,7 @@ class AssetKnowledgeService:
         return best_score + keyword_bonus, best_endpoint
 
     def _path_template_to_regex(self, template: str) -> str:
+        """执行pathtemplatetoregex相关逻辑，并为当前模块提供可复用的处理能力。"""
         escaped = re.escape(template)
         escaped = re.sub(r"\\\{[^}]+\\\}", r"[^/]+", escaped)
         return f"^{escaped}$"
@@ -396,6 +406,7 @@ class AssetKnowledgeService:
         domain: Optional[str],
         aggregate: Optional[str],
     ) -> Optional[Dict[str, Any]]:
+        """执行finddesigndetail相关逻辑，并为当前模块提供可复用的处理能力。"""
         if not domain or not aggregate:
             return None
 
@@ -424,6 +435,7 @@ class AssetKnowledgeService:
         endpoint: Optional[Dict[str, Any]],
         corpus: str,
     ) -> List[Dict[str, Any]]:
+        """执行findsimilarcases相关逻辑，并为当前模块提供可复用的处理能力。"""
         domain = mapping.get("domain")
         aggregate = mapping.get("aggregate")
         corpus_lower = corpus.lower()
@@ -476,6 +488,7 @@ class AssetKnowledgeService:
         return output
 
     def _expand_terms(self, text: str) -> List[str]:
+        """执行expandterms相关逻辑，并为当前模块提供可复用的处理能力。"""
         aliases = {
             "下单": ["create order", "place order", "order create", "/orders"],
             "支付": ["pay", "payment", "/payments"],
@@ -496,6 +509,7 @@ class AssetKnowledgeService:
 
     @staticmethod
     def _text_similarity(a: str, b: str) -> float:
+        """执行文本similarity相关逻辑，并为当前模块提供可复用的处理能力。"""
         if not a or not b:
             return 0.0
         span = b[: min(len(b), max(len(a) * 3, 400))]

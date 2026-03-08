@@ -1,15 +1,23 @@
+"""test状态迁移服务相关测试。"""
+
 from app.runtime.langgraph.services.state_transition_service import StateTransitionService
 from app.runtime.messages import AgentEvidence
 
 
 class DummyMsg:
+    """为测试场景提供DummyMsg辅助对象。"""
+    
     def __init__(self, content: str, name: str):
+        """为测试场景提供init辅助逻辑。"""
+        
         self.content = content
         self.name = name
         self.additional_kwargs = {"phase": "analysis", "confidence": 0.7}
 
 
 def test_state_transition_projects_history_from_messages():
+    """验证状态迁移projects历史从消息。"""
+    
     service = StateTransitionService(
         dedupe_new_messages=lambda existing, new: list(new),
         message_deltas_from_cards=lambda cards: [DummyMsg(c.conclusion, c.agent_name) for c in cards],
@@ -79,6 +87,8 @@ def test_state_transition_projects_history_from_messages():
 
 
 def test_state_transition_accepts_structured_history_update():
+    """验证状态迁移接受结构化历史更新。"""
+    
     service = StateTransitionService(
         dedupe_new_messages=lambda existing, new: list(new),
         message_deltas_from_cards=lambda cards: [DummyMsg(c.conclusion, c.agent_name) for c in cards],

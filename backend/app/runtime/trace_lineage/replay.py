@@ -8,6 +8,7 @@ from app.runtime.trace_lineage.recorder import lineage_recorder
 
 
 def _render_step(row: Dict[str, Any]) -> str:
+    """执行renderstep相关逻辑，并为当前模块提供可复用的处理能力。"""
     kind = str(row.get("kind") or "")
     ts = str(row.get("timestamp") or "")
     phase = str(row.get("phase") or "")

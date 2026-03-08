@@ -1,4 +1,4 @@
-"""Connector observability and degraded-mode tests."""
+"""test连接器HTTP可观测性相关测试。"""
 
 from __future__ import annotations
 
@@ -22,7 +22,10 @@ from app.runtime.connectors.telemetry_connector import TelemetryConnector
 
 @pytest.mark.asyncio
 async def test_telemetry_connector_includes_request_meta(monkeypatch):
+    """验证telemetry连接器包含requestmeta。"""
+    
     async def _fake_http_get_json(**kwargs):  # noqa: ANN003
+        """为测试场景提供HTTPgetjson模拟实现。"""
         assert kwargs.get("include_meta") is True
         return {
             "data": {"cpu": 0.91},
@@ -53,7 +56,10 @@ async def test_telemetry_connector_includes_request_meta(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cmdb_connector_returns_degraded_on_http_error(monkeypatch):
+    """验证cmdb连接器返回降级onHTTPerror。"""
+    
     async def _fake_http_get_json(**kwargs):  # noqa: ANN003
+        """为测试场景提供HTTPgetjson模拟实现。"""
         raise RuntimeError("http_error:503")
 
     monkeypatch.setattr(
@@ -73,6 +79,8 @@ async def test_cmdb_connector_returns_degraded_on_http_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_new_platform_connectors_disabled_by_default():
+    """验证新增platform连接器禁用by默认。"""
+    
     grafana = await GrafanaConnector().fetch(GrafanaSourceConfig(enabled=False), {})
     apm = await APMConnector().fetch(APMSourceConfig(enabled=False), {})
     logcloud = await LogCloudConnector().fetch(LogCloudSourceConfig(enabled=False), {})

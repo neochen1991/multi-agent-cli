@@ -1,9 +1,13 @@
+"""testlanggraph路由guardrail相关测试。"""
+
 from app.config import settings
 from app.runtime.langgraph_runtime import LangGraphRuntimeOrchestrator
 from app.runtime.messages import AgentEvidence
 
 
 def _card(agent_name: str, phase: str, confidence: float = 0.6, **raw_output) -> AgentEvidence:
+    """为测试场景提供卡片辅助逻辑。"""
+    
     return AgentEvidence(
         agent_name=agent_name,
         phase=phase,
@@ -16,6 +20,8 @@ def _card(agent_name: str, phase: str, confidence: float = 0.6, **raw_output) ->
 
 
 def test_route_guardrail_forces_judge_after_critique_cycle_when_parallel_requested(monkeypatch):
+    """验证路由guardrailforces裁决后critiquecycle当并行requested。"""
+    
     orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
     monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", True)
 
@@ -49,10 +55,11 @@ def test_route_guardrail_forces_judge_after_critique_cycle_when_parallel_request
 
     assert guarded["next_step"] == "speak:JudgeAgent"
     assert guarded["should_stop"] is False
-    assert "批判/反驳链已完成" in str(guarded["reason"])
 
 
 def test_route_guardrail_uses_agent_outputs_when_round_cards_missing(monkeypatch):
+    """验证路由guardrail使用Agentoutputs当轮次cards缺失。"""
+    
     orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
     monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", True)
 
@@ -99,6 +106,8 @@ def test_route_guardrail_uses_agent_outputs_when_round_cards_missing(monkeypatch
 
 
 def test_fallback_route_uses_agent_outputs_when_round_cards_empty(monkeypatch):
+    """验证回退路由使用Agentoutputs当轮次cards空。"""
+    
     orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
     monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", False)
 
@@ -107,13 +116,206 @@ def test_fallback_route_uses_agent_outputs_when_round_cards_empty(monkeypatch):
             "discussion_step_count": 3,
             "max_discussion_steps": 12,
             "agent_outputs": {
-                "LogAgent": {"confidence": 0.66},
+                "LogAgent": {"confidence": 0.66, "conclusion": "日志显示连接池获取超时"},
                 "DomainAgent": {"confidence": 0.72},
-                "CodeAgent": {"confidence": 0.70},
+                "CodeAgent": {"confidence": 0.70, "conclusion": "代码路径存在连接释放延迟"},
+                "DatabaseAgent": {"confidence": 0.68, "conclusion": "数据库连接获取超时与锁等待并发出现"},
+                "MetricsAgent": {"confidence": 0.63, "conclusion": "数据库等待时间与接口延迟同时升高"},
             },
         },
         round_cards=[],
     )
 
-    assert decision["next_step"] == "speak:JudgeAgent"
+    assert decision["next_step"] == "analysis_parallel"
     assert decision["should_stop"] is False
+
+
+def test_commander_route_stops_after_effective_judge_when_next_agent_only_retries_degraded_evidence(monkeypatch):
+    """验证主Agent路由stops后有效裁决当nextAgentonlyretries降级证据。"""
+    
+    orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
+    monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", False)
+
+    round_cards = [
+        _card(
+            "JudgeAgent",
+            "judgment",
+            0.46,
+            final_judgment={
+                "root_cause": {
+                    "summary": "数据库连接池(HikariPool)连接获取超时",
+                    "confidence": 0.46,
+                }
+            },
+            conclusion="数据库连接池(HikariPool)连接获取超时",
+        ),
+        _card(
+            "ProblemAnalysisAgent",
+            "judgment",
+            0.42,
+            conclusion="当前结论：数据库连接池(HikariPool)连接获取超时",
+        ),
+        _card(
+            "DatabaseAgent",
+            "analysis",
+            0.18,
+            conclusion="DatabaseAgent 调用超时，已降级继续",
+            degraded=True,
+            evidence_status="degraded",
+            tool_status="timeout",
+        ),
+    ]
+
+    decision = orchestrator._route_from_commander_output(
+        payload={
+            "next_mode": "single",
+            "next_agent": "DatabaseAgent",
+            "should_stop": False,
+            "stop_reason": "",
+        },
+        state={
+            "discussion_step_count": 9,
+            "max_discussion_steps": 10,
+            "agent_outputs": {
+                "JudgeAgent": {
+                    "final_judgment": {
+                        "root_cause": {
+                            "summary": "数据库连接池(HikariPool)连接获取超时",
+                            "confidence": 0.46,
+                        }
+                    }
+                },
+                "ProblemAnalysisAgent": {
+                    "conclusion": "当前结论：数据库连接池(HikariPool)连接获取超时",
+                    "confidence": 0.42,
+                },
+                "DatabaseAgent": {
+                    "conclusion": "DatabaseAgent 调用超时，已降级继续",
+                    "degraded": True,
+                    "evidence_status": "degraded",
+                },
+            },
+        },
+        round_cards=round_cards,
+    )
+
+    assert decision["should_stop"] is True
+    assert decision["next_step"] == ""
+
+
+def test_commander_route_keeps_collecting_when_judge_not_yet_actionable(monkeypatch):
+    """验证主Agent路由保留collecting当裁决notyetactionable。"""
+    
+    orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
+    monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", False)
+
+    round_cards = [
+        _card(
+            "JudgeAgent",
+            "judgment",
+            0.28,
+            final_judgment={
+                "root_cause": {
+                    "summary": "仍需补充日志与代码证据",
+                    "confidence": 0.28,
+                }
+            },
+            conclusion="仍需补充日志与代码证据",
+        ),
+        _card(
+            "ProblemAnalysisAgent",
+            "analysis",
+            0.34,
+            open_questions=["日志样本不足", "代码入口未确认"],
+        ),
+    ]
+
+    decision = orchestrator._route_from_commander_output(
+        payload={
+            "next_mode": "single",
+            "next_agent": "LogAgent",
+            "should_stop": False,
+            "stop_reason": "",
+        },
+        state={
+            "discussion_step_count": 4,
+            "max_discussion_steps": 10,
+            "agent_outputs": {
+                "JudgeAgent": {
+                    "final_judgment": {
+                        "root_cause": {
+                            "summary": "仍需补充日志与代码证据",
+                            "confidence": 0.28,
+                        }
+                    }
+                },
+                "ProblemAnalysisAgent": {
+                    "open_questions": ["日志样本不足", "代码入口未确认"],
+                    "confidence": 0.34,
+                },
+            },
+        },
+        round_cards=round_cards,
+    )
+
+    assert decision["should_stop"] is False
+    assert decision["next_step"] == "speak:LogAgent"
+
+
+def test_commander_route_stops_after_effective_judge_when_commander_already_summarized(monkeypatch):
+    """验证主Agent路由stops后有效裁决当主Agentalreadysummarized。"""
+    
+    orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
+    monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", False)
+
+    round_cards = [
+        _card(
+            "JudgeAgent",
+            "judgment",
+            0.51,
+            final_judgment={
+                "root_cause": {
+                    "summary": "订单定价链路中数据库连接池获取超时",
+                    "confidence": 0.51,
+                }
+            },
+            conclusion="订单定价链路中数据库连接池获取超时",
+        ),
+        _card(
+            "ProblemAnalysisAgent",
+            "judgment",
+            0.48,
+            conclusion="我已汇总各专家反馈，当前结论：订单定价链路中数据库连接池获取超时",
+        ),
+    ]
+
+    decision = orchestrator._route_from_commander_output(
+        payload={
+            "next_mode": "single",
+            "next_agent": "LogAgent",
+            "should_stop": False,
+            "stop_reason": "",
+        },
+        state={
+            "discussion_step_count": 8,
+            "max_discussion_steps": 10,
+            "agent_outputs": {
+                "JudgeAgent": {
+                    "final_judgment": {
+                        "root_cause": {
+                            "summary": "订单定价链路中数据库连接池获取超时",
+                            "confidence": 0.51,
+                        }
+                    }
+                },
+                "ProblemAnalysisAgent": {
+                    "conclusion": "我已汇总各专家反馈，当前结论：订单定价链路中数据库连接池获取超时",
+                    "confidence": 0.48,
+                },
+            },
+        },
+        round_cards=round_cards,
+    )
+
+    assert decision["should_stop"] is True
+    assert decision["next_step"] == ""

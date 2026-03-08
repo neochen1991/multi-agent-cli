@@ -23,6 +23,7 @@ const { Paragraph, Text } = Typography;
 type MainConclusion = {
   text: string;
   timeText: string;
+  sourceLabel?: string;
 } | null;
 
 type SummaryCard = {
@@ -47,6 +48,20 @@ type Props = {
   incidentId: string;
   sessionId: string;
   debateConfidence?: number;
+  sessionQualitySummary?: {
+    limitedAnalysis: boolean;
+    limitedAgentNames: string[];
+    limitedCount: number;
+    evidenceGap: boolean;
+    riskFactors: string[];
+    evidenceCoverage: {
+      ok: number;
+      degraded: number;
+      missing: number;
+    };
+  };
+  onFocusLimitedAnalysis?: () => void;
+  onFocusEvidenceGap?: () => void;
   onRegenerateReport: () => Promise<void>;
 };
 
@@ -64,6 +79,9 @@ const DebateResultPanel: React.FC<Props> = ({
   incidentId,
   sessionId,
   debateConfidence,
+  sessionQualitySummary,
+  onFocusLimitedAnalysis,
+  onFocusEvidenceGap,
   onRegenerateReport,
 }) => {
   const [expandedReportSections, setExpandedReportSections] = useState<Record<string, boolean>>({});
@@ -77,6 +95,9 @@ const DebateResultPanel: React.FC<Props> = ({
   const fixRecommendation = debateResult?.fix_recommendation || {};
   const fixSteps = Array.isArray(fixRecommendation.steps) ? fixRecommendation.steps : [];
   const riskLevel = String(debateResult?.risk_assessment?.risk_level || '').toUpperCase();
+  const riskFactors = Array.isArray(sessionQualitySummary?.riskFactors) ? sessionQualitySummary?.riskFactors : [];
+  const evidenceCoverage = sessionQualitySummary?.evidenceCoverage || { ok: 0, degraded: 0, missing: 0 };
+  const coverageTotal = evidenceCoverage.ok + evidenceCoverage.degraded + evidenceCoverage.missing;
   const riskColor =
     riskLevel === 'HIGH' ? 'red' : riskLevel === 'MEDIUM' ? 'orange' : riskLevel === 'LOW' ? 'green' : 'default';
   const strengthColor = (value?: string) => {
@@ -259,14 +280,82 @@ const DebateResultPanel: React.FC<Props> = ({
               <div className="rca-summary-card">
                 <div className="rca-summary-head">
                   <Space wrap>
-                    <Tag color="processing">ProblemAnalysisAgent</Tag>
+                    <Tag color="processing">{mainAgentConclusion?.sourceLabel || '主结论'}</Tag>
                     <Tag color="blue">状态: {sessionStatus || '-'}</Tag>
                     {confidence !== null ? <Tag color="geekblue">置信度: {confidence}%</Tag> : null}
                     {riskLevel ? <Tag color={riskColor}>风险: {riskLevel}</Tag> : null}
+                    {sessionQualitySummary?.limitedAnalysis ? (
+                      <Tag color="gold" onClick={onFocusLimitedAnalysis} className={onFocusLimitedAnalysis ? 'clickable-tag' : ''}>
+                        {`受限分析 ${sessionQualitySummary.limitedCount} 次`}
+                      </Tag>
+                    ) : null}
+                    {sessionQualitySummary?.evidenceGap ? (
+                      <Tag color="volcano" onClick={onFocusEvidenceGap} className={onFocusEvidenceGap ? 'clickable-tag' : ''}>
+                        关键证据不足
+                      </Tag>
+                    ) : null}
                   </Space>
                 </div>
                 <Paragraph className="result-conclusion-paragraph">{mainAgentConclusion?.text || '-'}</Paragraph>
                 <Text type="secondary">结论时间：{mainAgentConclusion?.timeText || '-'}</Text>
+                {coverageTotal > 0 ? (
+                  <div className="rca-coverage-strip">
+                    <div className="rca-coverage-head">
+                      <span>关键证据覆盖率</span>
+                      <Text type="secondary">{`成功 ${evidenceCoverage.ok} / 受限 ${evidenceCoverage.degraded} / 缺失 ${evidenceCoverage.missing}`}</Text>
+                    </div>
+                    <div className="rca-coverage-bar">
+                      <div
+                        className="rca-coverage-segment ok"
+                        style={{ width: `${(evidenceCoverage.ok / coverageTotal) * 100}%` }}
+                      />
+                      <div
+                        className="rca-coverage-segment degraded"
+                        style={{ width: `${(evidenceCoverage.degraded / coverageTotal) * 100}%` }}
+                      />
+                      <div
+                        className="rca-coverage-segment missing"
+                        style={{ width: `${(evidenceCoverage.missing / coverageTotal) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                ) : null}
+                {(sessionQualitySummary?.limitedAnalysis || sessionQualitySummary?.evidenceGap) ? (
+                  <div className="rca-quality-callout">
+                    <Space wrap size={[6, 6]}>
+                      {sessionQualitySummary?.limitedAnalysis ? (
+                        <Tag color="gold" onClick={onFocusLimitedAnalysis} className={onFocusLimitedAnalysis ? 'clickable-tag' : ''}>
+                          {`受限分析 ${sessionQualitySummary.limitedCount} 次`}
+                        </Tag>
+                      ) : null}
+                      {sessionQualitySummary?.limitedAgentNames?.map((agent) => (
+                        <Tag key={agent}>{agent}</Tag>
+                      ))}
+                      {sessionQualitySummary?.evidenceGap ? (
+                        <Tag color="volcano" onClick={onFocusEvidenceGap} className={onFocusEvidenceGap ? 'clickable-tag' : ''}>
+                          关键证据不足
+                        </Tag>
+                      ) : null}
+                    </Space>
+                    <Paragraph className="rca-quality-callout-text">
+                      {sessionQualitySummary?.limitedAnalysis
+                        ? '部分专家 Agent 未完成真实工具取证，当前结论包含基于已有证据的受限分析。'
+                        : '当前结论不包含受限分析。'}
+                      {sessionQualitySummary?.evidenceGap
+                        ? ' Judge 已将本次会话标记为关键证据不足，当前结论应按低置信度处理。'
+                        : ''}
+                    </Paragraph>
+                    {riskFactors.length > 0 ? (
+                      <div className="rca-quality-risk-list">
+                        {riskFactors.slice(0, 4).map((item) => (
+                          <div key={item} className="rca-quality-risk-item">
+                            {item}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ) : sessionStatus === 'failed' ? (
               <Alert type="error" showIcon message={`辩论失败：${sessionError || '请查看辩论过程中的错误详情'}`} />

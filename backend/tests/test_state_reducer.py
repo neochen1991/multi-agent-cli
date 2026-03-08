@@ -1,6 +1,4 @@
-"""
-Unit tests for State Reducers.
-"""
+"""test状态reducer相关测试。"""
 
 import pytest
 from app.runtime.langgraph.state import (
@@ -23,20 +21,20 @@ from app.runtime.messages import AgentEvidence
 
 
 class TestMergeAgentOutputs:
-    """Tests for merge_agent_outputs reducer."""
+    """归档MergeAgentOutputs相关测试场景。"""
 
     def test_merge_empty_left(self):
-        """Should return right when left is None."""
+        """验证merge空left。"""
         result = merge_agent_outputs(None, {"LogAgent": {"confidence": 0.8}})
         assert result == {"LogAgent": {"confidence": 0.8}}
 
     def test_merge_empty_right(self):
-        """Should return left when right is None."""
+        """验证merge空right。"""
         result = merge_agent_outputs({"LogAgent": {"confidence": 0.8}}, None)
         assert result == {"LogAgent": {"confidence": 0.8}}
 
     def test_merge_combines_dicts(self):
-        """Should merge two dicts."""
+        """验证mergecombinesdicts。"""
         left = {"LogAgent": {"confidence": 0.8}}
         right = {"CodeAgent": {"confidence": 0.7}}
 
@@ -48,7 +46,7 @@ class TestMergeAgentOutputs:
         }
 
     def test_merge_overwrites_same_key(self):
-        """Should overwrite left value with right value for same key."""
+        """验证mergeoverwrites相同key。"""
         left = {"LogAgent": {"confidence": 0.8}}
         right = {"LogAgent": {"confidence": 0.9}}
 
@@ -58,20 +56,20 @@ class TestMergeAgentOutputs:
 
 
 class TestExtendEvidenceChain:
-    """Tests for extend_evidence_chain reducer."""
+    """归档ExtendEvidenceChain相关测试场景。"""
 
     def test_extend_empty_left(self):
-        """Should return right when left is None."""
+        """验证extend空left。"""
         result = extend_evidence_chain(None, [{"type": "log"}])
         assert result == [{"type": "log"}]
 
     def test_extend_empty_right(self):
-        """Should return left when right is None."""
+        """验证extend空right。"""
         result = extend_evidence_chain([{"type": "log"}], None)
         assert result == [{"type": "log"}]
 
     def test_extend_appends_lists(self):
-        """Should append right to left."""
+        """验证extendappendslists。"""
         left = [{"type": "log"}]
         right = [{"type": "code"}]
 
@@ -80,7 +78,7 @@ class TestExtendEvidenceChain:
         assert result == [{"type": "log"}, {"type": "code"}]
 
     def test_extend_preserves_order(self):
-        """Should preserve order of items."""
+        """验证extendpreservesorder。"""
         left = [{"id": 1}, {"id": 2}]
         right = [{"id": 3}, {"id": 4}]
 
@@ -90,9 +88,11 @@ class TestExtendEvidenceChain:
 
 
 class TestExtendHistoryCards:
-    """Tests for extend_history_cards reducer."""
+    """归档ExtendHistoryCards相关测试场景。"""
 
     def create_card(self, agent_name: str) -> AgentEvidence:
+        """为测试场景提供创建卡片辅助逻辑。"""
+        
         return AgentEvidence(
             agent_name=agent_name,
             phase="analysis",
@@ -102,13 +102,13 @@ class TestExtendHistoryCards:
         )
 
     def test_extend_empty_left(self):
-        """Should return right when left is None."""
+        """验证extend空left。"""
         card = self.create_card("LogAgent")
         result = extend_history_cards(None, [card])
         assert result == [card]
 
     def test_extend_appends_cards(self):
-        """Should append new cards to existing."""
+        """验证extendappendscards。"""
         left = [self.create_card("LogAgent")]
         right = [self.create_card("CodeAgent")]
 
@@ -120,10 +120,10 @@ class TestExtendHistoryCards:
 
 
 class TestMergeClaims:
-    """Tests for merge_claims reducer."""
+    """归档MergeClaims相关测试场景。"""
 
     def test_merge_claims_appends(self):
-        """Should append claims."""
+        """验证mergeclaimsappends。"""
         left = [{"agent": "LogAgent", "claim": "Error in log"}]
         right = [{"agent": "CodeAgent", "claim": "Bug in code"}]
 
@@ -133,10 +133,10 @@ class TestMergeClaims:
 
 
 class TestMergeContext:
-    """Tests for merge_context reducer."""
+    """归档MergeContext相关测试场景。"""
 
     def test_merge_context_shallow(self):
-        """Should merge top-level keys."""
+        """验证merge上下文shallow。"""
         left = {"log_content": "error log", "trace_id": "123"}
         right = {"code_file": "main.py"}
 
@@ -147,7 +147,7 @@ class TestMergeContext:
         assert result["code_file"] == "main.py"
 
     def test_merge_context_deep(self):
-        """Should deep merge nested dicts."""
+        """验证merge上下文deep。"""
         left = {"parsed_data": {"errors": ["Error1"], "count": 1}}
         right = {"parsed_data": {"warnings": ["Warn1"], "count": 2}}
 
@@ -158,7 +158,7 @@ class TestMergeContext:
         assert result["parsed_data"]["count"] == 2  # Right overwrites
 
     def test_merge_context_empty(self):
-        """Should handle None values."""
+        """验证merge上下文空。"""
         result = merge_context(None, {"key": "value"})
         assert result == {"key": "value"}
 
@@ -167,53 +167,53 @@ class TestMergeContext:
 
 
 class TestTakeLatest:
-    """Tests for take_latest reducer."""
+    """归档TakeLatest相关测试场景。"""
 
     def test_takes_right_when_present(self):
-        """Should return right when right is not None."""
+        """验证takesright当present。"""
         result = take_latest("old_value", "new_value")
         assert result == "new_value"
 
     def test_takes_left_when_right_is_none(self):
-        """Should return left when right is None."""
+        """验证takesleft当rightisnone。"""
         result = take_latest("old_value", None)
         assert result == "old_value"
 
     def test_handles_none_left(self):
-        """Should handle None left."""
+        """验证处理noneleft。"""
         result = take_latest(None, "new_value")
         assert result == "new_value"
 
 
 class TestIncrementCounter:
-    """Tests for increment_counter reducer."""
+    """归档IncrementCounter相关测试场景。"""
 
     def test_increments_positive(self):
-        """Should add values."""
+        """验证incrementspositive。"""
         result = increment_counter(5, 3)
         assert result == 8
 
     def test_handles_none_left(self):
-        """Should treat None left as 0."""
+        """验证处理noneleft。"""
         result = increment_counter(None, 5)
         assert result == 5
 
     def test_handles_none_right(self):
-        """Should treat None right as 0."""
+        """验证处理noneright。"""
         result = increment_counter(5, None)
         assert result == 5
 
     def test_handles_both_none(self):
-        """Should return 0 when both are None."""
+        """验证处理bothnone。"""
         result = increment_counter(None, None)
         assert result == 0
 
 
 class TestCreateInitialState:
-    """Tests for create_initial_state."""
+    """归档CreateInitialState相关测试场景。"""
 
     def test_creates_state_with_context(self):
-        """Should create state with provided context."""
+        """验证creates状态带上下文。"""
         context = {"log_content": "error log", "trace_id": "123"}
         state = create_initial_state(context)
 
@@ -224,14 +224,14 @@ class TestCreateInitialState:
         assert state["discussion_step_count"] == 0
 
     def test_creates_state_with_custom_max_steps(self):
-        """Should create state with custom max discussion steps."""
+        """验证creates状态带custommaxsteps。"""
         context = {}
         state = create_initial_state(context, max_discussion_steps=30)
 
         assert state["max_discussion_steps"] == 30
 
     def test_creates_empty_collections(self):
-        """Should initialize empty collections."""
+        """验证creates空collections。"""
         context = {}
         state = create_initial_state(context)
 
@@ -246,9 +246,11 @@ class TestCreateInitialState:
 
 
 class TestStructuredState:
-    """Tests for structured state snapshot helpers."""
+    """归档StructuredState相关测试场景。"""
 
     def test_structured_state_snapshot_from_flat_state(self):
+        """验证结构化状态快照从flat状态。"""
+        
         flat = {
             "current_round": 2,
             "executed_rounds": 1,
@@ -277,6 +279,8 @@ class TestStructuredState:
         assert snapshot["output_state"]["final_payload"]["confidence"] == 0.8
 
     def test_sync_structured_state_keeps_flat_and_adds_structured(self):
+        """验证同步结构化状态保留flatandadds结构化。"""
+        
         update = {
             "current_round": 1,
             "next_step": "",
@@ -296,6 +300,8 @@ class TestStructuredState:
         assert "output_state" in merged
 
     def test_structured_state_snapshot_prefers_nested_values(self):
+        """验证结构化状态快照prefersnestedvalues。"""
+        
         payload = {
             "current_round": 1,
             "next_step": "speak:LogAgent",
@@ -316,6 +322,8 @@ class TestStructuredState:
         assert snapshot["routing_state"]["next_step"] == "finalize"
 
     def test_flatten_structured_state_view_merges_flat_and_nested(self):
+        """验证flatten结构化状态viewmergesflatandnested。"""
+        
         payload = {
             "current_round": 1,
             "discussion_step_count": 2,
@@ -329,6 +337,8 @@ class TestStructuredState:
         assert flat["discussion_step_count"] == 7
 
     def test_flatten_structured_overrides_only_returns_explicit_keys(self):
+        """验证flatten结构化overridesonly返回显式keys。"""
+        
         overrides = flatten_structured_overrides(
             {
                 "routing_state": {"next_step": "judge_agent_node"},
@@ -342,10 +352,10 @@ class TestStructuredState:
 
 
 class TestGetStateSummary:
-    """Tests for get_state_summary."""
+    """归档GetStateSummary相关测试场景。"""
 
     def test_returns_summary(self):
-        """Should return summary dict."""
+        """验证返回摘要。"""
         state = {
             "current_round": 2,
             "discussion_step_count": 5,

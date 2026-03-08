@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 
 class AgentOutputSchema(BaseModel):
+    """封装AgentOutputSchema相关数据结构或服务能力。"""
     chat_message: str = ""
     analysis: str = ""
     conclusion: str = ""
@@ -18,12 +19,14 @@ class AgentOutputSchema(BaseModel):
 
 
 class RootCauseSchema(BaseModel):
+    """封装RootCauseSchema相关数据结构或服务能力。"""
     summary: str = ""
     category: str = ""
     confidence: float = 0.0
 
 
 class EvidenceItemSchema(BaseModel):
+    """封装EvidenceItemSchema相关数据结构或服务能力。"""
     type: Literal["log", "code", "domain", "metrics"] | str = "log"
     description: str = ""
     source: str = ""
@@ -32,22 +35,26 @@ class EvidenceItemSchema(BaseModel):
 
 
 class FixRecommendationSchema(BaseModel):
+    """封装FixRecommendationSchema相关数据结构或服务能力。"""
     summary: str = ""
     steps: List[str] = Field(default_factory=list)
     code_changes_required: bool = False
 
 
 class ImpactAnalysisSchema(BaseModel):
+    """封装ImpactAnalysisSchema相关数据结构或服务能力。"""
     affected_services: List[str] = Field(default_factory=list)
     business_impact: str = ""
 
 
 class RiskAssessmentSchema(BaseModel):
+    """封装RiskAssessmentSchema相关数据结构或服务能力。"""
     risk_level: Literal["critical", "high", "medium", "low"] | str = "medium"
     risk_factors: List[str] = Field(default_factory=list)
 
 
 class FinalJudgmentSchema(BaseModel):
+    """封装FinalJudgmentSchema相关数据结构或服务能力。"""
     root_cause: RootCauseSchema = Field(default_factory=RootCauseSchema)
     evidence_chain: List[EvidenceItemSchema] = Field(default_factory=list)
     fix_recommendation: FixRecommendationSchema = Field(default_factory=FixRecommendationSchema)
@@ -56,16 +63,19 @@ class FinalJudgmentSchema(BaseModel):
 
 
 class DecisionRationaleSchema(BaseModel):
+    """封装DecisionRationaleSchema相关数据结构或服务能力。"""
     key_factors: List[str] = Field(default_factory=list)
     reasoning: str = ""
 
 
 class ResponsibleTeamSchema(BaseModel):
+    """封装ResponsibleTeamSchema相关数据结构或服务能力。"""
     team: str = ""
     owner: str = ""
 
 
 class JudgeOutputSchema(BaseModel):
+    """封装JudgeOutputSchema相关数据结构或服务能力。"""
     chat_message: str = ""
     final_judgment: FinalJudgmentSchema = Field(default_factory=FinalJudgmentSchema)
     decision_rationale: DecisionRationaleSchema = Field(default_factory=DecisionRationaleSchema)
@@ -75,6 +85,7 @@ class JudgeOutputSchema(BaseModel):
 
 
 class CommanderOutputSchema(BaseModel):
+    """封装CommanderOutputSchema相关数据结构或服务能力。"""
     chat_message: str = ""
     analysis: str = ""
     conclusion: str = ""
@@ -88,6 +99,7 @@ class CommanderOutputSchema(BaseModel):
 
 
 def get_schema_for_agent(agent_name: str) -> Type[BaseModel]:
+    """负责获取SchemaforAgent，并返回后续流程可直接消费的数据结果。"""
     if agent_name == "JudgeAgent":
         return JudgeOutputSchema
     if agent_name == "ProblemAnalysisAgent":

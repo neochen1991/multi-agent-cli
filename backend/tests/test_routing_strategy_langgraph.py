@@ -1,4 +1,4 @@
-"""Tests for langgraph routing strategy module."""
+"""test路由strategylanggraph相关测试。"""
 
 import pytest
 
@@ -7,6 +7,8 @@ from app.runtime.messages import AgentEvidence
 
 
 def _card(agent_name: str, confidence: float = 0.6) -> AgentEvidence:
+    """为测试场景提供卡片辅助逻辑。"""
+    
     return AgentEvidence(
         agent_name=agent_name,
         phase="analysis",
@@ -19,35 +21,51 @@ def _card(agent_name: str, confidence: float = 0.6) -> AgentEvidence:
 
 
 class _FakeOrchestrator:
+    """为测试场景提供FakeOrchestrator辅助对象。"""
+    
     consensus_threshold = 0.75
     PARALLEL_ANALYSIS_AGENTS = ("LogAgent", "DomainAgent", "CodeAgent", "MetricsAgent", "ChangeAgent", "RunbookAgent")
 
     def _route_guardrail(self, *, state, round_cards, route_decision):
+        """为测试场景提供路由guardrail辅助逻辑。"""
+        
         _ = state, round_cards
         return route_decision
 
     def _fallback_supervisor_route(self, state, round_cards):
+        """为测试场景提供回退监督者路由辅助逻辑。"""
+        
         _ = state, round_cards
         return {"next_step": "speak:JudgeAgent", "should_stop": False, "stop_reason": "", "reason": "fallback"}
 
     async def _run_problem_analysis_supervisor_router(self, **kwargs):
+        """为测试场景提供runproblem分析监督者router辅助逻辑。"""
+        
         _ = kwargs
         return {"next_mode": "single", "next_agent": "LogAgent", "should_stop": False, "stop_reason": "", "commands": {}}
 
     def _route_from_commander_output(self, *, payload, state, round_cards):
+        """为测试场景提供路由从主Agentoutput辅助逻辑。"""
+        
         _ = payload, state, round_cards
         return {"next_step": "speak:LogAgent", "should_stop": False, "stop_reason": "", "reason": "dynamic"}
 
     def _recent_judge_card(self, round_cards):
+        """为测试场景提供最近裁决卡片辅助逻辑。"""
+        
         for card in reversed(round_cards):
             if card.agent_name == "JudgeAgent":
                 return card
         return None
 
     def _compact_round_context(self, context):
+        """为测试场景提供compact轮次上下文辅助逻辑。"""
+        
         return context
 
     def _round_agent_counts(self, round_cards):
+        """为测试场景提供轮次Agentcounts辅助逻辑。"""
+        
         counts = {}
         for card in round_cards:
             name = str(getattr(card, "agent_name", "") or "").strip()
@@ -59,6 +77,8 @@ class _FakeOrchestrator:
 
 @pytest.mark.asyncio
 async def test_hybrid_router_seeded_path():
+    """验证hybridrouter预置路径。"""
+    
     router = HybridRouter()
     orch = _FakeOrchestrator()
     result = await router.decide(
@@ -80,6 +100,8 @@ async def test_hybrid_router_seeded_path():
 
 @pytest.mark.asyncio
 async def test_hybrid_router_consensus_shortcut():
+    """验证hybridrouter共识捷径。"""
+    
     router = HybridRouter()
     orch = _FakeOrchestrator()
     result = await router.decide(
@@ -101,6 +123,8 @@ async def test_hybrid_router_consensus_shortcut():
 
 @pytest.mark.asyncio
 async def test_hybrid_router_converges_to_judge_after_critique_cycle():
+    """验证hybridrouterconvergesto裁决后critiquecycle。"""
+    
     router = HybridRouter()
     orch = _FakeOrchestrator()
     round_cards = [

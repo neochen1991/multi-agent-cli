@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 
 def _extract_mapping_context(context: Dict[str, Any]) -> Dict[str, str]:
+    """对输入执行提取mapping上下文，将原始数据整理为稳定的内部结构。"""
     assets = context.get("assets") if isinstance(context, dict) else {}
     assets = assets if isinstance(assets, dict) else {}
     mapping = assets.get("interface_mapping") if isinstance(assets.get("interface_mapping"), dict) else {}

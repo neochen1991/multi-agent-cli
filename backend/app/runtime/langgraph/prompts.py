@@ -1,4 +1,9 @@
-"""Prompt builders and JSON schema templates for LangGraph runtime."""
+"""
+LangGraph 运行时 Prompt 模板与结构化输出 Schema 定义。
+
+这个文件关注“Prompt 本身长什么样”，不处理运行时上下文选择逻辑。
+上层 `PromptBuilder` 负责准备输入，这里负责把输入组织成最终文本模板。
+"""
 
 from __future__ import annotations
 
@@ -11,15 +16,52 @@ ToJsonFn = Callable[[Any], str]
 PROMPT_TEMPLATE_VERSION = "lg-rca-prompt-v2.2.0"
 
 _STRICT_OUTPUT_RULES = (
-    "输出协议（强约束）：\n"
-    "1) 只输出一个 JSON 对象，不要 Markdown，不要 ```json 代码块，不要前后解释。\n"
-    "2) chat_message 使用自然语言短句，不要包含 JSON 片段。\n"
-    "3) 证据不足时必须降低 confidence（<=0.55）并给下一步补证动作。\n"
-    "4) 若有冲突证据，请写入 counter_evidence（可为空数组）。\n"
+    "输出协议：\n"
+    "1) 只输出一个 JSON 对象；\n"
+    "2) chat_message 用自然语言短句；\n"
+    "3) 证据不足时降低 confidence（<=0.55）并补 next_checks；\n"
+    "4) 有冲突证据时写 counter_evidence。\n"
 )
 
 
+def _tool_limited_instruction(context: Dict[str, Any], *, to_json: ToJsonFn) -> str:
+    """
+    为工具受限场景追加专门的提示片段。
+
+    目标是强制模型区分“已真实取证”和“仅基于已有证据做受限分析”，
+    避免工具不可用时仍写出看似已验证的结论。
+    """
+    tool_ctx = context.get("tool_context")
+    if not isinstance(tool_ctx, dict):
+        return ""
+    command_gate = tool_ctx.get("command_gate")
+    if not isinstance(command_gate, dict):
+        command_gate = {}
+    if not bool(command_gate.get("has_command")) or not bool(command_gate.get("allow_tool")):
+        return ""
+    status = str(tool_ctx.get("status") or "").strip().lower()
+    used = bool(tool_ctx.get("used"))
+    if used and status == "ok":
+        return ""
+    if status not in {"disabled", "unavailable", "error", "failed", "timeout"}:
+        return ""
+    limited_ctx = {
+        "tool_name": str(tool_ctx.get("name") or ""),
+        "tool_status": status,
+        "summary": str(tool_ctx.get("summary") or "")[:240],
+        "missing_evidence_hint": "继续基于已有证据推理，但必须明确哪些证据尚未通过工具采集到。",
+    }
+    return (
+        "工具受限说明：\n"
+        "当前命令允许你使用工具，但工具不可用。你仍然必须基于现有证据完成分析，"
+        "同时在 analysis/conclusion/next_checks 中明确写出缺失证据和后续补采动作。\n"
+        "不要假装已经完成实时取证，不要把受限推理包装成已验证结论。\n"
+        f"```json\n{to_json(limited_ctx)}\n```\n\n"
+    )
+
+
 def coordinator_command_schema() -> Dict[str, Any]:
+    """定义主 Agent / supervisor 共用的协调输出 Schema。"""
     return {
         "chat_message": "",
         "analysis": "",
@@ -31,6 +73,9 @@ def coordinator_command_schema() -> Dict[str, Any]:
         ),
         "should_stop": False,
         "stop_reason": "",
+        "should_pause_for_review": False,
+        "review_reason": "",
+        "review_payload": {"risk_level": "", "decision_basis": [], "operator_hint": ""},
         "commands": [
             {
                 "target_agent": (
@@ -51,6 +96,7 @@ def coordinator_command_schema() -> Dict[str, Any]:
 
 
 def judge_output_schema() -> Dict[str, Any]:
+    """定义 JudgeAgent 的最终裁决输出 Schema。"""
     return {
         "chat_message": "",
         "final_judgment": {
@@ -91,6 +137,7 @@ def judge_output_schema() -> Dict[str, Any]:
 
 
 def verification_output_schema() -> Dict[str, Any]:
+    """定义 VerificationAgent 的验证计划输出 Schema。"""
     return {
         "chat_message": "",
         "analysis": "",
@@ -123,6 +170,12 @@ def build_problem_analysis_commander_prompt(
     dialogue_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
 ) -> str:
+    """
+    生成主 Agent 的命令分发 Prompt。
+
+    这个模板同时要求自然语言 chat_message 和结构化 commands，
+    目的是兼顾前端可读性与系统可编排性。
+    """
     if peer_items is None:
         if dialogue_items:
             peer_items = [
@@ -148,7 +201,7 @@ def build_problem_analysis_commander_prompt(
     schema = coordinator_command_schema()
     dialogue_block = ""
     if dialogue_items:
-        dialogue_block = f"\n最近对话消息:\n```json\n{to_json(dialogue_items[-8:])}\n```\n"
+        dialogue_block = f"\n最近对话消息:\n```json\n{to_json(dialogue_items[-4:])}\n```\n"
     work_log_block = ""
     if work_log_context:
         work_log_block = f"\n工作日志上下文:\n```json\n{to_json(work_log_context)}\n```\n"
@@ -168,7 +221,7 @@ def build_problem_analysis_commander_prompt(
         f"{dialogue_block}"
         f"{skill_block}"
         f"{work_log_block}"
-        f"最近发言摘要:\n```json\n{to_json(peer_items)}\n```\n\n"
+        f"最近发言摘要:\n```json\n{to_json(peer_items[-5:])}\n```\n\n"
         f"{_STRICT_OUTPUT_RULES}\n"
         f"仅输出 JSON，格式:\n```json\n{to_json(schema)}\n```"
     )
@@ -189,6 +242,13 @@ def build_problem_analysis_supervisor_prompt(
     dialogue_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
 ) -> str:
+    """
+    生成 supervisor 路由 Prompt。
+
+    它和 commander prompt 的区别在于：
+    - commander 负责首轮任务拆解
+    - supervisor 负责讨论过程中的下一步调度和收口判断
+    """
     if recent_messages is None:
         if dialogue_items:
             recent_messages = [
@@ -214,7 +274,7 @@ def build_problem_analysis_supervisor_prompt(
     schema = coordinator_command_schema()
     dialogue_block = ""
     if dialogue_items:
-        dialogue_block = f"\n最近对话消息:\n```json\n{to_json(dialogue_items[-10:])}\n```\n"
+        dialogue_block = f"\n最近对话消息:\n```json\n{to_json(dialogue_items[-5:])}\n```\n"
     work_log_block = ""
     if work_log_context:
         work_log_block = f"\n工作日志上下文:\n```json\n{to_json(work_log_context)}\n```\n"
@@ -231,6 +291,7 @@ def build_problem_analysis_supervisor_prompt(
         "4) commands 只需给本步计划执行的Agent（1-3个）下命令。\n\n"
         "5) 若 context.interface_mapping.database_tables 非空，DatabaseAgent 命令必须带 database_tables。\n\n"
         "6) 如需强制某专家按特定技能模板分析，可填写 skill_hints（例如 ['log-forensics']）。\n\n"
+        "7) 若 context.deployment_profile.name=production_governed 且你认为结论可用但仍需人工确认，可设置 should_pause_for_review=true，并填写 review_reason 与 review_payload；此时不要设置 should_stop=true。\n\n"
         f"讨论步数预算: {discussion_step_count}/{max_discussion_steps}\n"
         f"故障上下文:\n```json\n{to_json(context)}\n```\n\n"
         f"{dialogue_block}"
@@ -259,7 +320,14 @@ def build_agent_prompt(
     inbox_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
 ) -> str:
+    """
+    生成普通专家 Agent 的单轮执行 Prompt。
+
+    模板目标是把命令、工具上下文、历史摘要、收件箱消息和输出协议
+    放在一个稳定结构里，减少不同 Agent 之间的 Prompt 漂移。
+    """
     if history_items is None:
+        # 没有上层预处理摘要时，这里退回到对话流或历史卡片做本地兜底。
         history_items = []
         for item in (dialogue_items or [])[-8:]:
             if not isinstance(item, dict):
@@ -303,16 +371,17 @@ def build_agent_prompt(
         )
     dialogue_block = ""
     if dialogue_items:
-        dialogue_block = f"最近对话消息：\n```json\n{to_json(dialogue_items[-8:])}\n```\n\n"
+        dialogue_block = f"最近对话消息：\n```json\n{to_json(dialogue_items[-4:])}\n```\n\n"
     inbox_block = ""
     if inbox_items:
-        inbox_block = f"你收到的消息（命令/反馈/证据）：\n```json\n{to_json(inbox_items[-8:])}\n```\n\n"
+        inbox_block = f"你收到的消息（命令/反馈/证据）：\n```json\n{to_json(inbox_items[-4:])}\n```\n\n"
     work_log_block = ""
     if work_log_context:
         work_log_block = f"工作日志上下文：\n```json\n{to_json(work_log_context)}\n```\n\n"
     skill_block = ""
     if skill_context:
         skill_block = f"RCA 技能模板与场景参数：\n```json\n{to_json(skill_context)}\n```\n\n"
+    tool_limited_block = _tool_limited_instruction(context, to_json=to_json)
     return (
         f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段={spec.phase}。\n"
         "只需要基于核心观点与结论推理，不要复述全部历史，结论请简短。\n"
@@ -323,9 +392,10 @@ def build_agent_prompt(
         f"{dialogue_block}"
         f"{inbox_block}"
         f"{skill_block}"
+        f"{tool_limited_block}"
         f"{work_log_block}"
         f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
-        f"最近交互摘要：\n```json\n{to_json(history_items)}\n```\n\n"
+        f"最近交互摘要：\n```json\n{to_json(history_items[-3:])}\n```\n\n"
         f"请仅输出 JSON，格式示例：\n```json\n{to_json(output_schema)}\n```"
     )
 
@@ -345,6 +415,12 @@ def build_collaboration_prompt(
     inbox_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
 ) -> str:
+    """
+    生成协作阶段 Prompt。
+
+    这类 Prompt 更强调 peer_cards 和 peer_items，让 Agent 在已有结论基础上
+    做补充、反驳或校验，而不是重新跑一遍完整排障。
+    """
     if peer_items is None:
         peer_items = [
             {
@@ -364,10 +440,10 @@ def build_collaboration_prompt(
         )
     dialogue_block = ""
     if dialogue_items:
-        dialogue_block = f"最近对话消息：\n```json\n{to_json(dialogue_items[-8:])}\n```\n\n"
+        dialogue_block = f"最近对话消息：\n```json\n{to_json(dialogue_items[-4:])}\n```\n\n"
     inbox_block = ""
     if inbox_items:
-        inbox_block = f"你收到的消息（命令/反馈/证据）：\n```json\n{to_json(inbox_items[-8:])}\n```\n\n"
+        inbox_block = f"你收到的消息（命令/反馈/证据）：\n```json\n{to_json(inbox_items[-4:])}\n```\n\n"
     work_log_block = ""
     if work_log_context:
         work_log_block = f"工作日志上下文：\n```json\n{to_json(work_log_context)}\n```\n\n"
@@ -389,7 +465,7 @@ def build_collaboration_prompt(
         f"{skill_block}"
         f"{work_log_block}"
         f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
-        f"同伴结论：\n```json\n{to_json(peer_items)}\n```\n\n"
+        f"同伴结论：\n```json\n{to_json(peer_items[-4:])}\n```\n\n"
         f"输出格式：\n```json\n{to_json(_normal_output_schema())}\n```"
     )
 
@@ -408,12 +484,13 @@ def build_peer_driven_prompt(
     inbox_items: Optional[List[Dict[str, Any]]] = None,
     to_json: ToJsonFn,
 ) -> str:
+    """生成需要直接回应同伴观点的 peer-driven Prompt。"""
     dialogue_block = ""
     if dialogue_items:
-        dialogue_block = f"最近对话消息：\n```json\n{to_json(dialogue_items[-10:])}\n```\n\n"
+        dialogue_block = f"最近对话消息：\n```json\n{to_json(dialogue_items[-5:])}\n```\n\n"
     inbox_block = ""
     if inbox_items:
-        inbox_block = f"你收到的消息（命令/反馈/证据）：\n```json\n{to_json(inbox_items[-10:])}\n```\n\n"
+        inbox_block = f"你收到的消息（命令/反馈/证据）：\n```json\n{to_json(inbox_items[-5:])}\n```\n\n"
     work_log_block = ""
     if work_log_context:
         work_log_block = f"工作日志上下文：\n```json\n{to_json(work_log_context)}\n```\n\n"
@@ -439,7 +516,7 @@ def build_peer_driven_prompt(
             f"{skill_block}"
             f"{work_log_block}"
             f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
-            f"同伴结论：\n```json\n{to_json(peer_items)}\n```\n\n"
+            f"同伴结论：\n```json\n{to_json(peer_items[-5:])}\n```\n\n"
             f"输出格式：\n```json\n{to_json(judge_output_schema())}\n```"
         )
 
@@ -461,7 +538,7 @@ def build_peer_driven_prompt(
             f"{skill_block}"
             f"{work_log_block}"
             f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
-            f"同伴结论：\n```json\n{to_json(peer_items)}\n```\n\n"
+            f"同伴结论：\n```json\n{to_json(peer_items[-5:])}\n```\n\n"
             f"输出格式：\n```json\n{to_json(verification_output_schema())}\n```"
         )
 
@@ -486,12 +563,13 @@ def build_peer_driven_prompt(
         f"{skill_block}"
         f"{work_log_block}"
         f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
-        f"同伴结论：\n```json\n{to_json(peer_items)}\n```\n\n"
+        f"同伴结论：\n```json\n{to_json(peer_items[-5:])}\n```\n\n"
         f"输出格式：\n```json\n{to_json(_normal_output_schema())}\n```"
     )
 
 
 def _normal_output_schema() -> Dict[str, Any]:
+    """返回普通专家 Agent 使用的结构化输出 Schema。"""
     return {
         "chat_message": "",
         "analysis": "",

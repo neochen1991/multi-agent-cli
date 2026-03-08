@@ -1,4 +1,4 @@
-"""Unit tests for langgraph message ops helpers."""
+"""test消息ops相关测试。"""
 
 from langchain_core.messages import AIMessage
 
@@ -11,6 +11,8 @@ from app.runtime.messages import AgentEvidence
 
 
 def _card(agent: str, conclusion: str) -> AgentEvidence:
+    """为测试场景提供卡片辅助逻辑。"""
+    
     return AgentEvidence(
         agent_name=agent,
         phase="analysis",
@@ -23,12 +25,16 @@ def _card(agent: str, conclusion: str) -> AgentEvidence:
 
 
 def test_dedupe_new_messages_uses_signature():
+    """验证dedupe新增消息使用signature。"""
+    
     existing = [AIMessage(content="same", name="LogAgent")]
     incoming = [AIMessage(content="same", name="LogAgent")]
     assert dedupe_new_messages(existing, incoming) == []
 
 
 def test_messages_to_cards_extracts_agent_metadata():
+    """验证消息tocardsextractsAgentmetadata。"""
+    
     cards = messages_to_cards(
         [
             AIMessage(
@@ -49,6 +55,8 @@ def test_messages_to_cards_extracts_agent_metadata():
 
 
 def test_merge_round_and_message_cards_dedupes_by_agent_and_conclusion():
+    """验证merge轮次and消息cardsdedupesbyAgentand结论。"""
+    
     merged = merge_round_and_message_cards(
         [_card("LogAgent", "线程池阻塞")],
         [_card("LogAgent", "线程池阻塞"), _card("CodeAgent", "连接池泄漏")],

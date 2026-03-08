@@ -1,5 +1,6 @@
-"""
-Tooling settings APIs.
+"""工具配置与审计 API。
+
+覆盖 Agent 工具配置读取、工具注册中心维护、连接器操作、工具审计查询和试跑入口。
 """
 
 from __future__ import annotations
@@ -37,6 +38,8 @@ TOOL_AGENT_MAP: Dict[str, str] = {
 
 
 class ToolTrialRunRequest(BaseModel):
+    """工具试跑请求，用于在不进入完整辩论链路的情况下验证工具上下文和入参。"""
+
     tool_name: str = Field(..., description="工具名")
     use_tool: Optional[bool] = Field(default=True, description="是否允许调用工具")
     task: str = Field(default="", description="主Agent下发任务")
@@ -47,6 +50,8 @@ class ToolTrialRunRequest(BaseModel):
 
 
 class ToolRegistryUpsertRequest(BaseModel):
+    """工具注册中心新增/更新请求。"""
+
     tool_name: str = Field(..., description="工具名")
     category: str = Field(default="custom", description="工具分类")
     owner_agent: str = Field(default="CustomAgent", description="归属 Agent")
@@ -56,14 +61,19 @@ class ToolRegistryUpsertRequest(BaseModel):
 
 
 class ToolRunRequest(BaseModel):
+    """工具服务直接运行时的透传入参。"""
+
     input: Dict[str, Any] = Field(default_factory=dict, description="工具运行参数")
 
 
 class ConnectorCallToolRequest(BaseModel):
+    """通过连接器转发工具调用时的参数载荷。"""
+
     input: Dict[str, Any] = Field(default_factory=dict, description="连接器透传给工具的参数")
 
 
 def _agent_for_tool(tool_name: str) -> str:
+    """根据工具名映射默认归属 Agent，用于试跑时构造正确的上下文。"""
     agent_name = TOOL_AGENT_MAP.get(tool_name)
     if not agent_name:
         raise HTTPException(status_code=400, detail=f"不支持试跑该工具: {tool_name}")
@@ -76,6 +86,7 @@ def _agent_for_tool(tool_name: str) -> str:
     summary="获取 Agent 工具配置",
 )
 async def get_tooling_config():
+    """读取当前生效的 Agent 工具配置。"""
     return await tooling_service.get_config()
 
 
@@ -85,6 +96,7 @@ async def get_tooling_config():
     summary="更新 Agent 工具配置",
 )
 async def update_tooling_config(payload: AgentToolingConfig):
+    """更新全局 Agent 工具配置。"""
     return await tooling_service.update_config(payload)
 
 
@@ -93,6 +105,7 @@ async def update_tooling_config(payload: AgentToolingConfig):
     summary="获取工具注册中心",
 )
 async def get_tool_registry():
+    """列出工具注册中心中的全部工具项。"""
     return await tool_registry_service.list_items()
 
 
@@ -101,6 +114,7 @@ async def get_tool_registry():
     summary="创建工具注册项",
 )
 async def create_tool_registry_item(payload: ToolRegistryUpsertRequest):
+    """创建新的工具注册项。"""
     try:
         return await tool_registry_service.create_item(payload.model_dump(mode="json"))
     except ValueError as exc:
@@ -112,6 +126,7 @@ async def create_tool_registry_item(payload: ToolRegistryUpsertRequest):
     summary="获取工具注册详情",
 )
 async def get_tool_registry_item(tool_name: str):
+    """读取单个工具注册项的详细信息。"""
     try:
         return await tool_registry_service.get_item(tool_name)
     except KeyError:
@@ -123,6 +138,7 @@ async def get_tool_registry_item(tool_name: str):
     summary="更新工具注册项",
 )
 async def update_tool_registry_item(tool_name: str, payload: ToolRegistryUpsertRequest):
+    """更新指定工具的注册信息。"""
     try:
         body = payload.model_dump(mode="json")
         body["tool_name"] = tool_name
@@ -136,6 +152,7 @@ async def update_tool_registry_item(tool_name: str, payload: ToolRegistryUpsertR
     summary="删除工具注册项",
 )
 async def delete_tool_registry_item(tool_name: str):
+    """删除指定工具注册项。"""
     return await tool_registry_service.delete_item(tool_name)
 
 
@@ -144,6 +161,7 @@ async def delete_tool_registry_item(tool_name: str):
     summary="启动工具",
 )
 async def start_tool_registry_item(tool_name: str):
+    """将工具标记为上线/启用状态。"""
     try:
         return await tool_registry_service.start(tool_name)
     except KeyError:
@@ -155,6 +173,7 @@ async def start_tool_registry_item(tool_name: str):
     summary="下线工具",
 )
 async def offline_tool_registry_item(tool_name: str):
+    """将工具标记为下线/停用状态。"""
     try:
         return await tool_registry_service.offline(tool_name)
     except KeyError:
@@ -166,6 +185,7 @@ async def offline_tool_registry_item(tool_name: str):
     summary="工具健康检查",
 )
 async def tool_registry_item_health(tool_name: str):
+    """对单个工具执行健康检查。"""
     try:
         return await tool_registry_service.health(tool_name)
     except KeyError:
@@ -177,6 +197,7 @@ async def tool_registry_item_health(tool_name: str):
     summary="执行工具（服务入口）",
 )
 async def run_tool_registry_item(tool_name: str, payload: ToolRunRequest):
+    """绕过 Agent 流程，直接调用工具服务。"""
     try:
         return await tool_registry_service.run(tool_name, payload.input)
     except KeyError:
@@ -188,6 +209,7 @@ async def run_tool_registry_item(tool_name: str, payload: ToolRunRequest):
     summary="获取连接器协议清单",
 )
 async def get_tool_connectors():
+    """列出当前支持的连接器协议和状态。"""
     return await tool_registry_service.connectors()
 
 
@@ -196,6 +218,7 @@ async def get_tool_connectors():
     summary="连接连接器",
 )
 async def connect_tool_connector(connector_name: str):
+    """建立指定连接器的连接。"""
     try:
         return await tool_registry_service.connect(connector_name)
     except KeyError:
@@ -207,6 +230,7 @@ async def connect_tool_connector(connector_name: str):
     summary="断开连接器",
 )
 async def disconnect_tool_connector(connector_name: str):
+    """断开指定连接器。"""
     try:
         return await tool_registry_service.disconnect(connector_name)
     except KeyError:
@@ -218,6 +242,7 @@ async def disconnect_tool_connector(connector_name: str):
     summary="查看连接器可用工具集",
 )
 async def list_connector_tools(connector_name: str):
+    """查看某个连接器暴露的工具列表。"""
     try:
         return await tool_registry_service.list_tools(connector_name)
     except KeyError:
@@ -233,6 +258,7 @@ async def call_connector_tool(
     tool_name: str,
     payload: ConnectorCallToolRequest,
 ):
+    """通过连接器协议远程调用一个工具。"""
     try:
         return await tool_registry_service.call_tool(connector_name, tool_name, payload.input)
     except KeyError:
@@ -246,6 +272,10 @@ async def call_connector_tool(
     summary="获取工具调用审计记录",
 )
 async def get_tool_audit(session_id: str, limit: int = 200):
+    """读取指定会话的工具调用审计轨迹。
+
+    会优先读取当前 session_id；若轨迹写在 llm_session/runtime_session 下，会自动做一次映射回查。
+    """
     resolved_session_id = str(session_id or "").strip()
     rows = await lineage_recorder.read(resolved_session_id)
     if not rows:
@@ -278,6 +308,7 @@ async def get_tool_audit(session_id: str, limit: int = 200):
     summary="工具参数试跑",
 )
 async def trial_run_tool(payload: ToolTrialRunRequest):
+    """基于模拟命令和故障上下文构造工具上下文，验证试跑结果。"""
     tool_name = str(payload.tool_name or "").strip()
     agent_name = _agent_for_tool(tool_name)
     compact_context = dict(payload.compact_context or {})

@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-Generate a war-room style architecture training deck for the current project.
-"""
+"""generate项目介绍WarRoomPPT脚本。"""
 
 from __future__ import annotations
 
@@ -28,6 +26,8 @@ OUT_README = OUT_DIR / "README.md"
 
 
 class Theme:
+    """封装Theme相关常量或数据结构。"""
+    
     bg = RGBColor(8, 14, 24)
     panel = RGBColor(17, 27, 43)
     panel_2 = RGBColor(22, 35, 56)
@@ -48,10 +48,14 @@ class Theme:
 
 
 def ensure_dirs() -> None:
+    """确保dirs相关前置条件已经满足。"""
+    
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def new_prs() -> Presentation:
+    """执行新增prs相关逻辑。"""
+    
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
@@ -59,6 +63,8 @@ def new_prs() -> Presentation:
 
 
 def add_bg(slide, prs: Presentation, *, alt: bool = False) -> None:
+    """向当前页补充背景相关元素，并统一样式与布局。"""
+    
     bg = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
     bg.fill.solid()
     bg.fill.fore_color.rgb = Theme.panel if alt else Theme.bg
@@ -66,6 +72,8 @@ def add_bg(slide, prs: Presentation, *, alt: bool = False) -> None:
 
 
 def add_topbar(slide, title: str, subtitle: str, page: int) -> None:
+    """向当前页补充topbar相关元素，并统一样式与布局。"""
+    
     band = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(0.78)
     )
@@ -78,6 +86,8 @@ def add_topbar(slide, title: str, subtitle: str, page: int) -> None:
 
 
 def add_footer(slide, source: str) -> None:
+    """向当前页补充页脚相关元素，并统一样式与布局。"""
+    
     add_text(slide, 0.45, 7.04, 12.1, 0.18, f"Source: {source}", size=8, color=Theme.text_dim)
 
 
@@ -94,6 +104,8 @@ def add_text(
     color: RGBColor = Theme.text,
     align: str = "left",
 ) -> None:
+    """向当前页补充文本相关元素，并统一样式与布局。"""
+    
     box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
     tf = box.text_frame
     tf.word_wrap = True
@@ -119,6 +131,8 @@ def add_bullets(
     size: int = 13,
     color: RGBColor = Theme.text,
 ) -> None:
+    """向当前页补充bullets相关元素，并统一样式与布局。"""
+    
     box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
     tf = box.text_frame
     tf.word_wrap = True
@@ -139,6 +153,8 @@ def add_card(
     fill: RGBColor = Theme.panel,
     border: RGBColor = Theme.border,
 ) -> None:
+    """向当前页补充卡片相关元素，并统一样式与布局。"""
+    
     card = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h)
     )
@@ -148,6 +164,8 @@ def add_card(
 
 
 def add_pill(slide, x: float, y: float, w: float, text: str, *, fill: RGBColor, color: RGBColor) -> None:
+    """向当前页补充标签相关元素，并统一样式与布局。"""
+    
     pill = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(0.42)
     )
@@ -158,12 +176,16 @@ def add_pill(slide, x: float, y: float, w: float, text: str, *, fill: RGBColor, 
 
 
 def add_metric(slide, x: float, y: float, w: float, title: str, value: str, *, accent: RGBColor) -> None:
+    """向当前页补充指标相关元素，并统一样式与布局。"""
+    
     add_card(slide, x, y, w, 1.02, fill=Theme.panel_2)
     add_text(slide, x + 0.16, y + 0.16, w - 0.32, 0.18, title, size=10, color=Theme.text_dim)
     add_text(slide, x + 0.16, y + 0.42, w - 0.32, 0.28, value, size=20, bold=True, color=accent)
 
 
 def add_connector(slide, x1: float, y1: float, x2: float, y2: float, color: RGBColor = Theme.text_dim) -> None:
+    """向当前页补充连接器相关元素，并统一样式与布局。"""
+    
     line = slide.shapes.add_connector(
         MSO_CONNECTOR.STRAIGHT, Inches(x1), Inches(y1), Inches(x2), Inches(y2)
     )
@@ -184,6 +206,8 @@ def add_box_label(
     title_color: RGBColor = Theme.ink,
     body_color: RGBColor = Theme.ink,
 ) -> None:
+    """向当前页补充boxlabel相关元素，并统一样式与布局。"""
+    
     add_card(slide, x, y, w, h, fill=fill, border=Theme.border)
     add_text(slide, x + 0.16, y + 0.16, w - 0.32, 0.18, title, size=13, bold=True, color=title_color, align="center")
     add_text(slide, x + 0.16, y + 0.46, w - 0.32, h - 0.56, body, size=10, color=body_color, align="center")
@@ -200,6 +224,8 @@ def add_chart(
     categories: list[str],
     series: list[tuple[str, list[float]]],
 ) -> None:
+    """向当前页补充图表相关元素，并统一样式与布局。"""
+    
     data = CategoryChartData()
     data.categories = categories
     for name, values in series:
@@ -223,6 +249,8 @@ def add_chart(
 
 
 def slide_cover(prs: Presentation) -> None:
+    """构建封面对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_text(slide, 0.58, 0.55, 5.2, 0.28, "WAR-ROOM ARCHITECTURE BRIEF", size=11, bold=True, color=Theme.amber)
@@ -270,6 +298,8 @@ def slide_cover(prs: Presentation) -> None:
 
 
 def slide_agenda(prs: Presentation, page: int) -> None:
+    """构建议程对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "培训目录", "Architecture Roadmap", page)
@@ -304,6 +334,8 @@ def slide_agenda(prs: Presentation, page: int) -> None:
 
 
 def slide_value(prs: Presentation, page: int) -> None:
+    """构建价值对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "1) 系统目标与业务边界", "Value framing", page)
@@ -358,6 +390,8 @@ def slide_value(prs: Presentation, page: int) -> None:
 
 
 def slide_system_arch(prs: Presentation, page: int) -> None:
+    """构建系统arch对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "2) 总体分层架构", "End-to-end system architecture", page)
@@ -373,6 +407,8 @@ def slide_system_arch(prs: Presentation, page: int) -> None:
 
 
 def slide_frontend(prs: Presentation, page: int) -> None:
+    """构建前端对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "3) 前端工作台架构", "Frontend workspace", page)
@@ -429,6 +465,8 @@ def slide_frontend(prs: Presentation, page: int) -> None:
 
 
 def slide_backend(prs: Presentation, page: int) -> None:
+    """构建后端对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "4) 后端接入与服务流", "Backend service flow", page)
@@ -476,6 +514,8 @@ def slide_backend(prs: Presentation, page: int) -> None:
 
 
 def slide_runtime(prs: Presentation, page: int) -> None:
+    """构建运行时对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "5) LangGraph 运行时", "Runtime core", page)
@@ -497,6 +537,8 @@ def slide_runtime(prs: Presentation, page: int) -> None:
 
 
 def slide_agents(prs: Presentation, page: int) -> None:
+    """构建Agent对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "6) 多 Agent 协作机制", "Main-agent driven collaboration", page)
@@ -526,6 +568,8 @@ def slide_agents(prs: Presentation, page: int) -> None:
 
 
 def slide_tooling(prs: Presentation, page: int) -> None:
+    """构建tooling对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "7) Tool / Skill / Connector", "Capability and governance layer", page)
@@ -545,6 +589,8 @@ def slide_tooling(prs: Presentation, page: int) -> None:
 
 
 def slide_asset_chain(prs: Presentation, page: int) -> None:
+    """构建资产chain对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "8) 责任田资产与数据库链路", "Asset mapping to database reasoning", page)
@@ -596,6 +642,8 @@ def slide_asset_chain(prs: Presentation, page: int) -> None:
 
 
 def slide_flow(prs: Presentation, page: int) -> None:
+    """构建flow对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "9) 端到端分析主流程", "Incident to report", page)
@@ -632,6 +680,8 @@ def slide_flow(prs: Presentation, page: int) -> None:
 
 
 def slide_case(prs: Presentation, page: int) -> None:
+    """构建case对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "10) 真实案例映射", "order-502-db-lock", page)
@@ -687,6 +737,8 @@ def slide_case(prs: Presentation, page: int) -> None:
 
 
 def slide_events(prs: Presentation, page: int) -> None:
+    """构建事件对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "11) 事件流、结果与报告", "Realtime visibility", page)
@@ -722,6 +774,8 @@ def slide_events(prs: Presentation, page: int) -> None:
 
 
 def slide_report_view(prs: Presentation, page: int) -> None:
+    """构建报告view对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "12) 报告与结果视图", "Structured RCA output", page)
@@ -781,6 +835,8 @@ def slide_report_view(prs: Presentation, page: int) -> None:
 
 
 def slide_code_map(prs: Presentation, page: int) -> None:
+    """构建codemap对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "16) 代码阅读地图", "How to enter the codebase", page)
@@ -829,6 +885,8 @@ def slide_code_map(prs: Presentation, page: int) -> None:
 
 
 def slide_reliability(prs: Presentation, page: int) -> None:
+    """构建reliability对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "14) 可靠性、治理与 Benchmark", "Guardrails and quality", page)
@@ -883,6 +941,8 @@ def slide_reliability(prs: Presentation, page: int) -> None:
 
 
 def slide_extension(prs: Presentation, page: int) -> None:
+    """构建extension对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "15) 扩展路径与阅读建议", "How to extend", page)
@@ -921,6 +981,8 @@ def slide_extension(prs: Presentation, page: int) -> None:
 
 
 def slide_summary(prs: Presentation, page: int) -> None:
+    """构建摘要对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "18) 总结", "Training close", page)
@@ -973,6 +1035,8 @@ def slide_summary(prs: Presentation, page: int) -> None:
 
 
 def build_slides_md() -> str:
+    """构建幻灯片md相关产物或页面内容。"""
+    
     sections = [
         ("封面", "生产问题根因分析系统架构培训", ["团队内部培训", "war-room briefing 风格", "基于 code_wiki_v2 组织内容"]),
         ("系统目标与业务边界", "本项目是根因分析系统，不是聊天机器人", ["目标：资产映射、证据收集、Agent 协作、可回放、可审计", "边界：主 Agent 调度，专家 Agent 分析，工具调用受门禁控制"]),
@@ -1003,6 +1067,8 @@ def build_slides_md() -> str:
 
 
 def build_notes() -> str:
+    """构建备注相关产物或页面内容。"""
+    
     notes = [
         "# Speaker Notes",
         "",
@@ -1035,6 +1101,8 @@ def build_notes() -> str:
 
 
 def build_refs() -> str:
+    """构建参考资料相关产物或页面内容。"""
+    
     refs = [
         "# References",
         "",
@@ -1054,6 +1122,8 @@ def build_refs() -> str:
 
 
 def build_readme() -> str:
+    """构建说明文档相关产物或页面内容。"""
+    
     return "\n".join(
         [
             "# Project Intro War-room PPT",
@@ -1071,6 +1141,8 @@ def build_readme() -> str:
 
 
 def build_deck() -> Presentation:
+    """构建deck相关产物或页面内容。"""
+    
     prs = new_prs()
     slide_cover(prs)
     slide_agenda(prs, 2)
@@ -1094,6 +1166,8 @@ def build_deck() -> Presentation:
 
 
 def main() -> None:
+    """执行脚本主流程，串联参数解析、内容生成与结果输出。"""
+    
     ensure_dirs()
     prs = build_deck()
     prs.save(OUT_PPTX)

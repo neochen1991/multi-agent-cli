@@ -1,5 +1,21 @@
 """
-三态资产服务
+三态资产服务模块
+
+本模块提供三态资产的统一管理功能，包括：
+1. 运行态资产（RuntimeAsset）：日志、指标、追踪数据
+2. 开发态资产（DevAsset）：代码、配置、文档
+3. 设计态资产（DesignAsset）：领域模型、架构文档、案例库
+4. 责任田资产：接口到领域、聚合根的映射关系
+
+资产关联设计：
+- 运行态资产（故障现象）-> 开发态资产（代码实现）-> 设计态资产（领域设计）
+- 通过 link_assets 建立关联链路，支持根因追踪
+
+责任田资产：
+- 用户可导入/维护的责任田映射表
+- 支持从 Excel/CSV 批量导入
+- 用于接口上下文定位（DomainAgent 使用）
+
 Tri-State Asset Service
 """
 
@@ -38,20 +54,42 @@ logger = structlog.get_logger()
 
 
 class AssetService:
-    """三态资产服务"""
+    """
+    三态资产服务
+
+    管理三类资产的完整生命周期：
+    - RuntimeAsset: 运行态资产（日志、指标、追踪）
+    - DevAsset: 开发态资产（代码、配置、文档）
+    - DesignAsset: 设计态资产（领域模型、架构文档）
+
+    核心功能：
+    1. 资产 CRUD 操作
+    2. 资产关联追踪
+    3. 责任田资产管理
+    4. 接口上下文定位
+    """
     
     def __init__(self, repository: Optional[AssetRepository] = None):
+        """
+        初始化资产服务
+
+        Args:
+            repository: 资产存储库，未提供则使用内存存储
+        """
         self._repository = repository or InMemoryAssetRepository()
         self._sample_bootstrapped = False
         self._bootstrap_repo_id = id(self._repository)
+        # 责任田资产存储路径
         store_root = Path(settings.LOCAL_STORE_DIR) / "assets"
         store_root.mkdir(parents=True, exist_ok=True)
         self._responsibility_asset_file = store_root / "responsibility_assets.json"
 
     async def _ensure_sample_knowledge_loaded(self) -> None:
         """
+        确保示例知识库已加载
+
         将本地 Markdown 示例注入到内存仓储。
-        仅在首次或仓储实例更换后执行一次。
+        仅在首次调用或仓储实例更换后执行一次。
         """
         if id(self._repository) != self._bootstrap_repo_id:
             self._sample_bootstrapped = False
@@ -60,6 +98,7 @@ class AssetService:
         if self._sample_bootstrapped:
             return
 
+        # 加载领域模型和案例
         payload = asset_knowledge_service.build_bootstrap_models()
         domain_models = payload.get("domain_models", [])
         cases = payload.get("cases", [])
@@ -73,8 +112,10 @@ class AssetService:
                 await self._repository.save_case(case)
 
         self._sample_bootstrapped = True
-    
-    # ============== 运行态资产 ==============
+
+    # ==============================================================================
+    # 运行态资产（RuntimeAsset）
+    # ==============================================================================
     
     async def create_runtime_asset(
         self,
@@ -86,9 +127,29 @@ class AssetService:
         trace_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> RuntimeAsset:
-        """创建运行态资产"""
+        """
+        创建运行态资产
+
+        运行态资产代表生产环境中的实时数据：
+        - LOG: 应用日志
+        - METRIC: 监控指标
+        - TRACE: 分布式追踪
+        - EVENT: 业务事件
+
+        Args:
+            type: 资产类型
+            source: 数据来源
+            raw_content: 原始内容
+            parsed_data: 解析后的结构化数据
+            service_name: 服务名称
+            trace_id: 追踪 ID
+            metadata: 元数据
+
+        Returns:
+            RuntimeAsset: 创建的运行态资产
+        """
         asset_id = f"rt_{uuid.uuid4().hex[:8]}"
-        
+
         asset = RuntimeAsset(
             id=asset_id,
             type=type,
@@ -99,38 +160,40 @@ class AssetService:
             trace_id=trace_id,
             metadata=metadata or {}
         )
-        
+
         await self._repository.save_runtime_asset(asset)
-        
+
         logger.info(
             "runtime_asset_created",
             asset_id=asset_id,
             type=type,
             source=source
         )
-        
+
         return asset
-    
+
     async def get_runtime_asset(self, asset_id: str) -> Optional[RuntimeAsset]:
         """获取运行态资产"""
         return await self._repository.get_runtime_asset(asset_id)
-    
+
     async def list_runtime_assets(
         self,
         type: Optional[RuntimeAssetType] = None,
         service_name: Optional[str] = None
     ) -> List[RuntimeAsset]:
-        """列出运行态资产"""
+        """列出运行态资产，支持按类型和服务名过滤"""
         assets = await self._repository.list_runtime_assets()
-        
+
         if type:
             assets = [a for a in assets if a.type == type]
         if service_name:
             assets = [a for a in assets if a.service_name == service_name]
-        
+
         return assets
-    
-    # ============== 开发态资产 ==============
+
+    # ==============================================================================
+    # 开发态资产（DevAsset）
+    # ==============================================================================
     
     async def create_dev_asset(
         self,
@@ -143,9 +206,30 @@ class AssetService:
         branch: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> DevAsset:
-        """创建开发态资产"""
+        """
+        创建开发态资产
+
+        开发态资产代表代码仓库中的静态资源：
+        - CODE: 源代码文件
+        - CONFIG: 配置文件
+        - DOC: 文档文件
+        - TEST: 测试文件
+
+        Args:
+            type: 资产类型
+            name: 资产名称
+            path: 文件路径
+            language: 编程语言
+            content: 文件内容
+            repo_url: 仓库 URL
+            branch: 分支名
+            metadata: 元数据
+
+        Returns:
+            DevAsset: 创建的开发态资产
+        """
         asset_id = f"dev_{uuid.uuid4().hex[:8]}"
-        
+
         asset = DevAsset(
             id=asset_id,
             type=type,
@@ -157,73 +241,77 @@ class AssetService:
             branch=branch,
             metadata=metadata or {}
         )
-        
+
         await self._repository.save_dev_asset(asset)
-        
+
         logger.info(
             "dev_asset_created",
             asset_id=asset_id,
             type=type,
             name=name
         )
-        
+
         return asset
-    
+
     async def get_dev_asset(self, asset_id: str) -> Optional[DevAsset]:
         """获取开发态资产"""
         return await self._repository.get_dev_asset(asset_id)
-    
+
     async def list_dev_assets(
         self,
         type: Optional[DevAssetType] = None,
         language: Optional[str] = None
     ) -> List[DevAsset]:
-        """列出开发态资产"""
+        """列出开发态资产，支持按类型和语言过滤"""
         assets = await self._repository.list_dev_assets()
-        
+
         if type:
             assets = [a for a in assets if a.type == type]
         if language:
             assets = [a for a in assets if a.language == language]
-        
+
         return assets
-    
+
     async def search_code(self, query: str) -> List[DevAsset]:
         """
-        搜索代码
-        
+        搜索代码资产
+
+        在代码资产的名称、内容和解析数据中搜索关键词。
+
         Args:
             query: 搜索关键词（类名、方法名等）
-            
+
         Returns:
-            匹配的代码资产列表
+            List[DevAsset]: 匹配的代码资产列表
         """
         results = []
         query_lower = query.lower()
-        
+
         for asset in await self._repository.list_dev_assets():
             if asset.type != DevAssetType.CODE:
                 continue
-            
+
             # 搜索名称
             if query_lower in asset.name.lower():
                 results.append(asset)
                 continue
-            
+
             # 搜索内容
             if asset.content and query_lower in asset.content.lower():
                 results.append(asset)
                 continue
-            
+
             # 搜索解析数据
             if asset.parsed_data:
                 parsed_str = str(asset.parsed_data).lower()
                 if query_lower in parsed_str:
                     results.append(asset)
-        
+
         return results
-    
-    # ============== 设计态资产 ==============
+
+    # ==============================================================================
+    # 设计态资产（DesignAsset）
+    # ==============================================================================
     
     async def create_design_asset(
         self,
@@ -235,9 +323,29 @@ class AssetService:
         owner: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> DesignAsset:
-        """创建设计态资产"""
+        """
+        创建设计态资产
+
+        设计态资产代表架构设计文档：
+        - ARCHITECTURE: 架构文档
+        - API_SPEC: API 规范
+        - DOMAIN_MODEL: 领域模型
+        - CASE_LIBRARY: 案例库
+
+        Args:
+            type: 资产类型
+            name: 资产名称
+            content: 文档内容
+            parsed_data: 解析后的结构化数据
+            domain: 所属领域
+            owner: 负责人
+            metadata: 元数据
+
+        Returns:
+            DesignAsset: 创建的设计态资产
+        """
         asset_id = f"des_{uuid.uuid4().hex[:8]}"
-        
+
         asset = DesignAsset(
             id=asset_id,
             type=type,
@@ -248,38 +356,40 @@ class AssetService:
             owner=owner,
             metadata=metadata or {}
         )
-        
+
         await self._repository.save_design_asset(asset)
-        
+
         logger.info(
             "design_asset_created",
             asset_id=asset_id,
             type=type,
             name=name
         )
-        
+
         return asset
-    
+
     async def get_design_asset(self, asset_id: str) -> Optional[DesignAsset]:
         """获取设计态资产"""
         return await self._repository.get_design_asset(asset_id)
-    
+
     async def list_design_assets(
         self,
         type: Optional[DesignAssetType] = None,
         domain: Optional[str] = None
     ) -> List[DesignAsset]:
-        """列出设计态资产"""
+        """列出设计态资产，支持按类型和领域过滤"""
         assets = await self._repository.list_design_assets()
-        
+
         if type:
             assets = [a for a in assets if a.type == type]
         if domain:
             assets = [a for a in assets if a.domain == domain]
-        
+
         return assets
-    
-    # ============== 领域模型 ==============
+
+    # ==============================================================================
+    # 领域模型（DomainModel）
+    # ==============================================================================
     
     async def create_domain_model(
         self,
@@ -289,7 +399,25 @@ class AssetService:
         entities: Optional[List[str]] = None,
         owner_team: Optional[str] = None
     ) -> DomainModel:
-        """创建领域模型"""
+        """
+        创建领域模型
+
+        领域模型定义了 DDD 中的领域概念：
+        - name: 领域名称（如"订单域"）
+        - aggregates: 聚合根列表
+        - entities: 实体列表
+        - owner_team: 责任团队
+
+        Args:
+            name: 领域名称
+            description: 描述
+            aggregates: 聚合根列表
+            entities: 实体列表
+            owner_team: 责任团队
+
+        Returns:
+            DomainModel: 创建的领域模型
+        """
         model = DomainModel(
             name=name,
             description=description,
@@ -297,44 +425,48 @@ class AssetService:
             entities=entities or [],
             owner_team=owner_team
         )
-        
+
         await self._repository.save_domain_model(model)
-        
+
         logger.info(
             "domain_model_created",
             name=name,
             aggregates=len(aggregates or [])
         )
-        
+
         return model
-    
+
     async def get_domain_model(self, name: str) -> Optional[DomainModel]:
         """获取领域模型"""
         await self._ensure_sample_knowledge_loaded()
         return await self._repository.get_domain_model(name)
-    
+
     async def list_domain_models(self) -> List[DomainModel]:
         """列出所有领域模型"""
         await self._ensure_sample_knowledge_loaded()
         return await self._repository.list_domain_models()
-    
+
     async def find_domain_by_aggregate(self, aggregate_name: str) -> Optional[DomainModel]:
         """
         根据聚合名称查找领域
-        
+
+        用于 DomainAgent 定位接口所属的领域。
+
         Args:
             aggregate_name: 聚合名称
-            
+
         Returns:
-            领域模型或 None
+            Optional[DomainModel]: 领域模型或 None
         """
         await self._ensure_sample_knowledge_loaded()
         for model in await self._repository.list_domain_models():
             if aggregate_name in model.aggregates:
                 return model
         return None
-    
-    # ============== 案例库 ==============
+
+    # ==============================================================================
+    # 案例库（CaseLibrary）
+    # ==============================================================================
     
     async def create_case(
         self,
@@ -347,9 +479,29 @@ class AssetService:
         related_services: Optional[List[str]] = None,
         tags: Optional[List[str]] = None
     ) -> CaseLibrary:
-        """创建案例"""
+        """
+        创建案例
+
+        案例库存储历史故障处理经验，用于：
+        - 相似案例检索
+        - 处置建议生成
+        - 知识沉淀
+
+        Args:
+            title: 案例标题
+            description: 案例描述
+            incident_type: 故障类型
+            root_cause: 根因分析
+            solution: 解决方案
+            symptoms: 症状列表
+            related_services: 相关服务
+            tags: 标签
+
+        Returns:
+            CaseLibrary: 创建的案例
+        """
         case_id = f"case_{uuid.uuid4().hex[:8]}"
-        
+
         case = CaseLibrary(
             id=case_id,
             title=title,
@@ -364,39 +516,39 @@ class AssetService:
             related_code=[],
             tags=tags or []
         )
-        
+
         await self._repository.save_case(case)
-        
+
         logger.info(
             "case_created",
             case_id=case_id,
             title=title,
             incident_type=incident_type
         )
-        
+
         return case
-    
+
     async def get_case(self, case_id: str) -> Optional[CaseLibrary]:
         """获取案例"""
         await self._ensure_sample_knowledge_loaded()
         return await self._repository.get_case(case_id)
-    
+
     async def list_cases(
         self,
         incident_type: Optional[str] = None,
         tag: Optional[str] = None
     ) -> List[CaseLibrary]:
-        """列出案例"""
+        """列出案例，支持按类型和标签过滤"""
         await self._ensure_sample_knowledge_loaded()
         cases = await self._repository.list_cases()
-        
+
         if incident_type:
             cases = [c for c in cases if c.incident_type == incident_type]
         if tag:
             cases = [c for c in cases if tag in c.tags]
-        
+
         return cases
-    
+
     async def search_similar_cases(
         self,
         symptoms: List[str],
@@ -405,25 +557,31 @@ class AssetService:
     ) -> List[CaseLibrary]:
         """
         搜索相似案例
-        
+
+        根据症状和异常类型匹配历史案例。
+        匹配规则：
+        - 异常类型匹配：+10 分
+        - 症状在描述中：+1 分
+        - 症状在症状列表中：+2 分
+
         Args:
             symptoms: 症状列表
             exception_type: 异常类型
             limit: 返回数量限制
-            
+
         Returns:
-            相似案例列表
+            List[CaseLibrary]: 相似案例列表（按分数排序）
         """
         await self._ensure_sample_knowledge_loaded()
         results = []
-        
+
         for case in await self._repository.list_cases():
             score = 0
-            
+
             # 匹配异常类型
             if exception_type and exception_type in case.root_cause:
                 score += 10
-            
+
             # 匹配症状
             for symptom in symptoms:
                 if symptom.lower() in case.description.lower():
@@ -431,13 +589,13 @@ class AssetService:
                 for case_symptom in case.symptoms:
                     if symptom.lower() in case_symptom.lower():
                         score += 2
-            
+
             if score > 0:
                 results.append((case, score))
-        
+
         # 按分数排序
         results.sort(key=lambda x: x[1], reverse=True)
-        
+
         return [r[0] for r in results[:limit]]
 
     async def locate_interface_context(
@@ -467,6 +625,7 @@ class AssetService:
         aggregate: Optional[str] = None,
         api_keyword: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        """查询用户维护的责任田资产，并支持全文、领域、聚合根、接口关键词过滤。"""
         rows = self._load_responsibility_assets()
         q = str(query or "").strip().lower()
         domain_q = str(domain or "").strip().lower()
@@ -474,6 +633,7 @@ class AssetService:
         api_q = str(api_keyword or "").strip().lower()
 
         def _hit(row: Dict[str, Any]) -> bool:
+            """判断单条责任田记录是否命中过滤条件。"""
             if q:
                 corpus = json.dumps(row, ensure_ascii=False).lower()
                 if q not in corpus:
@@ -493,6 +653,7 @@ class AssetService:
         return filtered
 
     async def upsert_responsibility_asset(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """新增或更新一条责任田资产记录。"""
         rows = self._load_responsibility_assets()
         now = datetime.utcnow().isoformat()
         row = self._normalize_responsibility_row(payload, source_file="manual", row_index=None)
@@ -517,6 +678,7 @@ class AssetService:
         return row
 
     async def delete_responsibility_asset(self, asset_id: str) -> bool:
+        """删除指定责任田资产记录。"""
         key = str(asset_id or "").strip()
         if not key:
             return False
@@ -534,6 +696,7 @@ class AssetService:
         file_bytes: bytes,
         replace_existing: bool = True,
     ) -> Dict[str, Any]:
+        """从 Excel/CSV 批量导入责任田资产，并支持替换或合并。"""
         rows_from_file = self._parse_responsibility_file(file_name=file_name, file_bytes=file_bytes)
         normalized: List[Dict[str, Any]] = []
         for idx, raw in enumerate(rows_from_file, start=1):
@@ -582,6 +745,7 @@ class AssetService:
         }
 
     def responsibility_asset_schema(self) -> Dict[str, Any]:
+        """返回责任田资产模板字段、别名映射和导入提示。"""
         return {
             "required_fields": [
                 "feature",
@@ -602,6 +766,7 @@ class AssetService:
         }
 
     async def responsibility_asset_stats(self) -> Dict[str, Any]:
+        """返回责任田资产统计信息和实际存储路径。"""
         rows = self._load_responsibility_assets()
         return {
             "count": len(rows),
@@ -615,6 +780,7 @@ class AssetService:
         log_content: str,
         symptom: Optional[str],
     ) -> Optional[Dict[str, Any]]:
+        """优先用用户维护的责任田资产匹配接口上下文，命中后直接返回结构化线索。"""
         rows = self._load_responsibility_assets()
         if not rows:
             return None
@@ -677,6 +843,9 @@ class AssetService:
             "matched_endpoint": best_endpoint,
             "code_artifacts": code_artifacts,
             "db_tables": db_tables,
+            "database_tables": list(db_tables),
+            "dependency_services": list(best_row.get("dependency_services") or []),
+            "monitor_items": list(best_row.get("monitor_items") or []),
             "design_ref": {
                 "doc": "责任田资产",
                 "section": str(best_row.get("feature") or ""),
@@ -693,6 +862,7 @@ class AssetService:
         }
 
     def _parse_responsibility_file(self, *, file_name: str, file_bytes: bytes) -> List[Dict[str, Any]]:
+        """解析责任田导入文件，兼容 Excel 与 CSV 文本。"""
         suffix = Path(file_name).suffix.lower()
         if suffix in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
             wb = load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
@@ -726,6 +896,7 @@ class AssetService:
         return [dict(row or {}) for row in reader]
 
     def _responsibility_header_aliases(self) -> Dict[str, List[str]]:
+        """定义责任田模板字段与常见表头别名映射。"""
         return {
             "feature": ["特性", "feature", "业务特性"],
             "domain": ["领域", "domain"],
@@ -747,6 +918,7 @@ class AssetService:
         source_file: str,
         row_index: Optional[int],
     ) -> Dict[str, Any]:
+        """把导入行或手工输入规范化为统一责任田记录结构。"""
         alias = self._responsibility_header_aliases()
         row: Dict[str, Any] = {}
         for key, candidates in alias.items():
@@ -784,6 +956,7 @@ class AssetService:
         return normalized
 
     def _responsibility_row_key(self, row: Dict[str, Any]) -> str:
+        """生成责任田记录的自然键，用于导入去重合并。"""
         return "|".join(
             [
                 str(row.get("feature") or "").strip().lower(),
@@ -794,6 +967,7 @@ class AssetService:
         )
 
     def _load_responsibility_assets(self) -> List[Dict[str, Any]]:
+        """从本地 JSON 文件读取责任田资产列表。"""
         if not self._responsibility_asset_file.exists():
             return []
         try:
@@ -805,11 +979,13 @@ class AssetService:
             return []
 
     def _save_responsibility_assets(self, rows: List[Dict[str, Any]]) -> None:
+        """把责任田资产列表原子写回本地文件。"""
         tmp = self._responsibility_asset_file.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self._responsibility_asset_file)
 
     def _split_list_field(self, value: Any) -> List[str]:
+        """把逗号、分号、换行等分隔的列表字段规范化为去重字符串列表。"""
         if value is None:
             return []
         if isinstance(value, list):
@@ -829,11 +1005,13 @@ class AssetService:
         return output
 
     def _norm_text(self, value: Any) -> str:
+        """对任意值做安全字符串化并去首尾空白。"""
         if value is None:
             return ""
         return str(value).strip()
 
     def _extract_interface_hints(self, text: str) -> List[Dict[str, str]]:
+        """从日志或症状文本中提取 HTTP 方法和接口路径提示。"""
         hints: List[Dict[str, str]] = []
         seen = set()
         pattern = re.compile(
@@ -856,6 +1034,7 @@ class AssetService:
         return hints[:12]
 
     def _parse_method_path(self, endpoint: str) -> tuple[str, str]:
+        """把 `METHOD /path` 形式的接口字符串拆成方法和路径。"""
         text = str(endpoint or "").strip()
         match = re.match(r"^(GET|POST|PUT|PATCH|DELETE)\s+(.+)$", text, flags=re.IGNORECASE)
         if not match:
@@ -863,6 +1042,7 @@ class AssetService:
         return match.group(1).upper(), match.group(2).strip()
 
     def _normalize_path(self, raw_path: str) -> str:
+        """规范化 URL 路径，移除域名、查询串和尾随分隔符。"""
         path = str(raw_path or "").strip().rstrip('.,;:)')
         if "//" in path and path.startswith("http"):
             match = re.match(r"https?://[^/]+(/.*)", path)
@@ -879,6 +1059,7 @@ class AssetService:
         return path
 
     def _path_template_to_regex(self, template: str) -> str:
+        """把 `/api/{id}` 形式的模板路径转换为可匹配真实 URL 的正则。"""
         escaped = re.escape(template)
         escaped = re.sub(r"\\\{[^}]+\\\}", r"[^/]+", escaped)
         return f"^{escaped}$"
@@ -891,7 +1072,7 @@ class AssetService:
         dev_assets: Optional[List[DevAsset]] = None,
         design_assets: Optional[List[DesignAsset]] = None
     ) -> TriStateAsset:
-        """创建三态资产"""
+        """创建三态聚合资产。"""
         asset_id = f"tri_{uuid.uuid4().hex[:8]}"
         
         asset = TriStateAsset(
@@ -906,7 +1087,7 @@ class AssetService:
         return asset
     
     async def get_tri_state_asset(self, asset_id: str) -> Optional[TriStateAsset]:
-        """获取三态资产"""
+        """读取单个三态聚合资产。"""
         return await self._repository.get_tri_state_asset(asset_id)
     
     async def link_assets(
@@ -932,7 +1113,7 @@ class AssetService:
         if not runtime or not dev:
             return False
         
-        # 创建关联
+        # 创建一个新的聚合资产，把运行态和开发态资产先绑定到同一对象上。
         tri_asset = await self.create_tri_state_asset(
             runtime_assets=[runtime],
             dev_assets=[dev]
@@ -943,7 +1124,7 @@ class AssetService:
             if design:
                 tri_asset.design_assets.append(design)
         
-        # 更新关系映射
+        # relationships 里保留轻量 ID 关系，便于前端关系图直接消费。
         tri_asset.relationships[runtime_asset_id] = [dev_asset_id]
         if design_asset_id:
             tri_asset.relationships[runtime_asset_id].append(design_asset_id)

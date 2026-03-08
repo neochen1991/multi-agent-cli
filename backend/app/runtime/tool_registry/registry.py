@@ -12,8 +12,18 @@ from app.runtime.tool_registry.models import ToolPolicy, ToolRegistryItem
 
 
 class ToolRegistryService:
+    """封装ToolRegistryService相关数据结构或服务能力。"""
     def __init__(self) -> None:
-        base_paths = [str(Path(settings.LOCAL_STORE_DIR).resolve())]
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
+        # 工具注册中心既要覆盖本地持久化目录，也要覆盖当前工作区。
+        # 当前 mock 场景的数据文件放在仓库内的 `mock_data/`，如果这里只保留
+        # LOCAL_STORE_DIR，会导致设置页里的路径说明和真实演示数据不一致。
+        base_paths = sorted(
+            {
+                str(Path(settings.LOCAL_STORE_DIR).resolve()),
+                str(Path.cwd().resolve()),
+            }
+        )
         self._items: Dict[str, ToolRegistryItem] = {
             item.tool_name: item
             for item in [
@@ -190,10 +200,12 @@ class ToolRegistryService:
 
     @staticmethod
     def _now_iso() -> str:
+        """执行nowiso相关逻辑，并为当前模块提供可复用的处理能力。"""
         return datetime.utcnow().isoformat() + "Z"
 
     @staticmethod
     def _error_level(error_text: str) -> str:
+        """执行errorlevel相关逻辑，并为当前模块提供可复用的处理能力。"""
         text = str(error_text or "").lower()
         if "timeout" in text:
             return "timeout"
@@ -204,6 +216,7 @@ class ToolRegistryService:
         return "runtime"
 
     async def _probe_connector(self, connector_name: str) -> Dict[str, Any]:
+        """执行probe连接器相关逻辑，并为当前模块提供可复用的处理能力。"""
         connector = self._connector_tools.get(connector_name)
         if not connector:
             raise KeyError(connector_name)
@@ -247,6 +260,7 @@ class ToolRegistryService:
             return row
 
     async def list_items(self) -> List[Dict[str, Any]]:
+        """负责列出items，并返回后续流程可直接消费的数据结果。"""
         async with self._lock:
             rows: List[Dict[str, Any]] = []
             for name, item in self._items.items():
@@ -257,6 +271,7 @@ class ToolRegistryService:
         return rows
 
     async def get_item(self, tool_name: str) -> Dict[str, Any]:
+        """负责获取条目，并返回后续流程可直接消费的数据结果。"""
         name = str(tool_name or "").strip()
         async with self._lock:
             item = self._items.get(name)
@@ -267,6 +282,7 @@ class ToolRegistryService:
             return row
 
     async def create_item(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """构建创建条目，供后续节点或调用方直接使用。"""
         item = ToolRegistryItem.model_validate(payload)
         async with self._lock:
             if item.tool_name in self._items:
@@ -280,6 +296,7 @@ class ToolRegistryService:
         return await self.get_item(item.tool_name)
 
     async def update_item(self, tool_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """执行更新条目，并同步更新运行时状态、持久化结果或审计轨迹。"""
         name = str(tool_name or "").strip()
         async with self._lock:
             current = self._items.get(name)
@@ -293,6 +310,7 @@ class ToolRegistryService:
         return await self.get_item(name)
 
     async def delete_item(self, tool_name: str) -> Dict[str, Any]:
+        """执行删除条目相关逻辑，并为当前模块提供可复用的处理能力。"""
         name = str(tool_name or "").strip()
         async with self._lock:
             existed = name in self._items
@@ -302,6 +320,7 @@ class ToolRegistryService:
         return {"tool_name": name, "deleted": bool(existed)}
 
     async def start(self, tool_name: str) -> Dict[str, Any]:
+        """执行start相关逻辑，并为当前模块提供可复用的处理能力。"""
         name = str(tool_name or "").strip()
         async with self._lock:
             item = self._items.get(name)
@@ -313,6 +332,7 @@ class ToolRegistryService:
         return await self.get_item(name)
 
     async def offline(self, tool_name: str) -> Dict[str, Any]:
+        """执行offline相关逻辑，并为当前模块提供可复用的处理能力。"""
         name = str(tool_name or "").strip()
         async with self._lock:
             item = self._items.get(name)
@@ -324,6 +344,7 @@ class ToolRegistryService:
         return await self.get_item(name)
 
     async def health(self, tool_name: str) -> Dict[str, Any]:
+        """执行健康检查相关逻辑，并为当前模块提供可复用的处理能力。"""
         row = await self.get_item(tool_name)
         runtime = row.get("runtime") if isinstance(row.get("runtime"), dict) else {}
         enabled = bool(row.get("enabled"))
@@ -338,6 +359,7 @@ class ToolRegistryService:
         }
 
     async def run(self, tool_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """负责运行，并处理调用过程中的超时、错误与返回结果。"""
         row = await self.get_item(tool_name)
         runtime = row.get("runtime") if isinstance(row.get("runtime"), dict) else {}
         if not bool(row.get("enabled")) or str(runtime.get("status") or "") == "offline":
@@ -357,6 +379,7 @@ class ToolRegistryService:
         }
 
     async def connect(self, connector_name: str) -> Dict[str, Any]:
+        """执行connect相关逻辑，并为当前模块提供可复用的处理能力。"""
         if connector_name not in self._connector_tools:
             raise KeyError(connector_name)
         async with self._lock:
@@ -370,6 +393,7 @@ class ToolRegistryService:
         return await self._probe_connector(connector_name)
 
     async def disconnect(self, connector_name: str) -> Dict[str, Any]:
+        """执行disconnect相关逻辑，并为当前模块提供可复用的处理能力。"""
         if connector_name not in self._connector_tools:
             raise KeyError(connector_name)
         async with self._lock:
@@ -381,6 +405,7 @@ class ToolRegistryService:
         return await self._probe_connector(connector_name)
 
     async def list_tools(self, connector_name: str) -> Dict[str, Any]:
+        """负责列出tools，并返回后续流程可直接消费的数据结果。"""
         if connector_name not in self._connector_tools:
             raise KeyError(connector_name)
         connector = self._connector_tools[connector_name]
@@ -403,6 +428,7 @@ class ToolRegistryService:
         tool_name: str,
         payload: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """负责调用工具，并处理调用过程中的超时、错误与返回结果。"""
         if connector_name not in self._connector_tools:
             raise KeyError(connector_name)
         connector = self._connector_tools[connector_name]
@@ -461,6 +487,7 @@ class ToolRegistryService:
             }
 
     async def connectors(self) -> List[Dict[str, Any]]:
+        """执行connectors相关逻辑，并为当前模块提供可复用的处理能力。"""
         rows: List[Dict[str, Any]] = []
         for name in self._connector_tools.keys():
             rows.append(await self._probe_connector(name))

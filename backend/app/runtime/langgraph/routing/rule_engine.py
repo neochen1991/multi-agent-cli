@@ -1,7 +1,29 @@
-"""Routing rule engine for LangGraph debate runtime.
+"""
+路由规则引擎模块
 
-The rule engine evaluates routing rules in priority order and returns
-the first matching decision.
+本模块提供 LangGraph 辩论运行时的路由规则评估功能。
+
+核心功能：
+1. 规则优先级管理
+2. 按优先级顺序评估规则
+3. 返回第一个匹配的决策
+
+默认规则集（按优先级）：
+1. ConsensusRule (10): 检查是否达成共识
+2. JudgeReadyRule (15): 检查 Judge 是否准备好
+3. BudgetRule (20): 预算约束检查
+4. RepetitionRule (30): 重复检测
+5. CritiqueCycleRule (40): 批评循环管理
+6. PostRebuttalSettleRule (45): 反驳后结算
+7. CommanderSettleRule (50): Commander 置信度决策
+8. NoCritiqueRevisitRule (55): 无批评重访
+
+工作流程：
+1. 状态变化 -> 构建路由上下文
+2. 规则引擎评估 -> 返回路由决策
+3. 执行路由决策 -> 决定下一步
+
+Routing rule engine for LangGraph debate runtime.
 """
 
 from __future__ import annotations
@@ -16,17 +38,34 @@ logger = structlog.get_logger()
 
 
 class RoutingRuleEngine:
-    """Evaluates routing rules in priority order.
+    """
+    路由规则引擎
 
-    The engine maintains a sorted list of rules and evaluates them
-    in order of priority (lower number = higher priority).
+    按优先级顺序评估路由规则，返回第一个匹配的决策。
+    优先级数字越小，优先级越高。
+
+    属性：
+    - _rules: 规则列表（按优先级排序）
+
+    使用示例：
+    ```python
+    engine = RoutingRuleEngine()
+    decision = engine.evaluate(context)
+    if decision.should_stop:
+        # 结束辩论
+        pass
+    else:
+        # 继续下一步
+        pass
+    ```
     """
 
     def __init__(self, rules: Optional[List[RoutingRule]] = None):
         """
+        初始化规则引擎
+
         Args:
-            rules: Optional list of rules to initialize with.
-                   If None, uses default rules.
+            rules: 可选的规则列表，未提供则使用默认规则
         """
         self._rules: List[RoutingRule] = []
         if rules is not None:
@@ -37,9 +76,13 @@ class RoutingRuleEngine:
                 self.add_rule(rule)
 
     def _default_rules(self) -> List[RoutingRule]:
-        """Create default rule set.
+        """
+        创建默认规则集
 
-        Import here to avoid circular imports.
+        延迟导入以避免循环依赖。
+
+        Returns:
+            List[RoutingRule]: 默认规则列表
         """
         from app.runtime.langgraph.routing.rules_impl import (
             BudgetRule,
@@ -53,27 +96,30 @@ class RoutingRuleEngine:
         )
 
         return [
-            # Highest priority: Check for consensus first
+            # 最高优先级：首先检查共识
             ConsensusRule(priority=10),
-            # Check if judge is ready to make a decision
+            # 检查 Judge 是否准备好做决策
             JudgeReadyRule(priority=15),
-            # Budget constraints
+            # 预算约束
             BudgetRule(priority=20),
-            # Repetition detection
+            # 重复检测
             RepetitionRule(priority=30),
-            # Critique cycle management
+            # 批评循环管理
             CritiqueCycleRule(priority=40),
             PostRebuttalSettleRule(priority=45),
-            # Commander confidence-based decisions
+            # Commander 置信度决策
             CommanderSettleRule(priority=50),
             NoCritiqueRevisitRule(priority=55),
         ]
 
     def add_rule(self, rule: RoutingRule) -> None:
-        """Add a rule to the engine, maintaining priority order.
+        """
+        添加规则
+
+        规则按优先级排序插入。
 
         Args:
-            rule: The rule to add.
+            rule: 要添加的规则
         """
         self._rules.append(rule)
         self._rules.sort(key=lambda r: r.priority)
@@ -85,13 +131,16 @@ class RoutingRuleEngine:
         )
 
     def remove_rule(self, name: str) -> bool:
-        """Remove a rule by name.
+        """
+        移除规则
+
+        按名称移除规则。
 
         Args:
-            name: The name of the rule to remove.
+            name: 规则名称
 
         Returns:
-            True if the rule was found and removed, False otherwise.
+            bool: 是否找到并移除
         """
         for i, rule in enumerate(self._rules):
             if rule.name == name:
@@ -105,13 +154,16 @@ class RoutingRuleEngine:
         return False
 
     def get_rule(self, name: str) -> Optional[RoutingRule]:
-        """Get a rule by name.
+        """
+        获取规则
+
+        按名称查找规则。
 
         Args:
-            name: The name of the rule to find.
+            name: 规则名称
 
         Returns:
-            The rule if found, None otherwise.
+            Optional[RoutingRule]: 规则对象，不存在则返回 None
         """
         for rule in self._rules:
             if rule.name == name:
@@ -119,13 +171,14 @@ class RoutingRuleEngine:
         return None
 
     def enable_rule(self, name: str) -> bool:
-        """Enable a rule by name.
+        """
+        启用规则
 
         Args:
-            name: The name of the rule to enable.
+            name: 规则名称
 
         Returns:
-            True if the rule was found and enabled, False otherwise.
+            bool: 是否成功启用
         """
         rule = self.get_rule(name)
         if rule and hasattr(rule, "_enabled"):
@@ -134,13 +187,14 @@ class RoutingRuleEngine:
         return False
 
     def disable_rule(self, name: str) -> bool:
-        """Disable a rule by name.
+        """
+        禁用规则
 
         Args:
-            name: The name of the rule to disable.
+            name: 规则名称
 
         Returns:
-            True if the rule was found and disabled, False otherwise.
+            bool: 是否成功禁用
         """
         rule = self.get_rule(name)
         if rule and hasattr(rule, "_enabled"):
@@ -149,18 +203,20 @@ class RoutingRuleEngine:
         return False
 
     def evaluate(self, ctx: RoutingContext) -> RoutingDecision:
-        """Evaluate all rules in priority order.
+        """
+        评估所有规则
 
-        Returns the decision from the first matching rule.
-        If no rule matches, returns a default decision to continue.
+        按优先级顺序评估规则，返回第一个匹配的决策。
+        如果没有规则匹配，返回默认决策（继续执行）。
 
         Args:
-            ctx: The routing context.
+            ctx: 路由上下文
 
         Returns:
-            A RoutingDecision indicating the next action.
+            RoutingDecision: 路由决策
         """
         for rule in self._rules:
+            # 跳过禁用的规则
             if not rule.enabled:
                 continue
 
@@ -183,9 +239,9 @@ class RoutingRuleEngine:
                     error=str(e),
                     exc_info=True,
                 )
-                # Continue to next rule on error
+                # 出错时继续评估下一条规则
 
-        # Default: continue with the proposed next step
+        # 默认决策：继续执行提议的下一步
         return RoutingDecision(
             next_step=ctx.next_step,
             should_stop=False,
@@ -203,21 +259,23 @@ class RoutingRuleEngine:
         debate_enable_critique: bool,
         round_cards: List[Any],
     ) -> Dict[str, Any]:
-        """Build context from state and evaluate rules.
+        """
+        从状态构建上下文并评估规则
 
-        This is a convenience method for integrating with existing code.
+        这是与现有代码集成的便捷方法。
+        从状态中提取必要信息，构建路由上下文，评估规则。
 
         Args:
-            state: The current debate state.
-            route_decision: The proposed routing decision.
-            consensus_threshold: Confidence threshold for consensus.
-            max_discussion_steps_default: Default max discussion steps.
-            parallel_analysis_agents: List of parallel analysis agents.
-            debate_enable_critique: Whether critique is enabled.
-            round_cards: Cards from the current round.
+            state: 当前辩论状态
+            route_decision: 提议的路由决策
+            consensus_threshold: 共识阈值
+            max_discussion_steps_default: 默认最大讨论步数
+            parallel_analysis_agents: 并行分析 Agent 列表
+            debate_enable_critique: 是否启用批评
+            round_cards: 当前回合的卡片
 
         Returns:
-            A dictionary with the routing decision.
+            Dict[str, Any]: 路由决策字典
         """
         from app.runtime.langgraph.routing import (
             agent_from_step,
@@ -227,13 +285,13 @@ class RoutingRuleEngine:
             round_agent_counts,
         )
 
-        # Extract context from state
+        # 从状态中提取上下文
         discussion_step = int(state.get("discussion_step_count") or 0)
         max_steps = int(state.get("max_discussion_steps") or max_discussion_steps_default)
         next_step = str(route_decision.get("next_step") or "").strip()
         target_agent = agent_from_step(next_step)
 
-        # Get judge information
+        # 获取 Judge 信息
         judge_card = recent_judge_card(round_cards)
         judge_output = state.get("agent_outputs", {}).get("JudgeAgent", {})
         judge_confidence = float(
@@ -241,7 +299,7 @@ class RoutingRuleEngine:
             or (getattr(judge_card, "confidence", 0.0) if judge_card else 0.0)
         )
 
-        # Get commander information
+        # 获取 Commander 信息
         commander_card = recent_agent_card(round_cards, "ProblemAnalysisAgent")
         commander_output = state.get("agent_outputs", {}).get("ProblemAnalysisAgent", {})
         if not commander_output and commander_card:
@@ -251,7 +309,7 @@ class RoutingRuleEngine:
             or (getattr(commander_card, "confidence", 0.0) if commander_card else 0.0)
         )
 
-        # Count unresolved items
+        # 统计未解决项
         unresolved_items: List[str] = []
         for key in ("open_questions", "missing_info", "needs_validation"):
             value = commander_output.get(key)
@@ -261,7 +319,7 @@ class RoutingRuleEngine:
                 unresolved_items.append(value.strip())
         unresolved_count = len(list(dict.fromkeys(unresolved_items)))
 
-        # Build context
+        # 构建路由上下文
         ctx = RoutingContext(
             state=state,
             discussion_step=discussion_step,
@@ -279,17 +337,22 @@ class RoutingRuleEngine:
             parallel_analysis_agents=parallel_analysis_agents,
         )
 
-        # Evaluate rules
+        # 评估规则
         decision = self.evaluate(ctx)
 
-        # Merge with original decision
+        # 合并原始决策
         result = dict(route_decision)
         result.update(decision.to_dict())
         return result
 
     @property
     def rules(self) -> List[RoutingRule]:
-        """Get the list of rules (read-only)."""
+        """
+        获取规则列表（只读）
+
+        Returns:
+            List[RoutingRule]: 规则列表
+        """
         return list(self._rules)
 
 

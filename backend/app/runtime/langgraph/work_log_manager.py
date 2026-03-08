@@ -18,14 +18,17 @@ class WorkLogManager:
     """Build compact work-log context from runtime event stream."""
 
     def __init__(self) -> None:
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
         root = Path(settings.LOCAL_STORE_DIR)
         self._events_dir = root / "runtime" / "events"
         self._events_dir.mkdir(parents=True, exist_ok=True)
 
     def _events_path(self, session_id: str) -> Path:
+        """执行eventspath相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._events_dir / f"{session_id}.jsonl"
 
     def _read_events(self, session_id: str) -> List[Dict[str, Any]]:
+        """负责读取events，并返回后续流程可直接消费的数据结果。"""
         if not session_id:
             return []
         path = self._events_path(session_id)
@@ -46,6 +49,7 @@ class WorkLogManager:
 
     @staticmethod
     def _norm_dt(value: Any) -> str:
+        """执行normdt相关逻辑，并为当前模块提供可复用的处理能力。"""
         text = str(value or "").strip()
         if not text:
             return ""
@@ -56,6 +60,7 @@ class WorkLogManager:
             return text
 
     def build_context(self, session_id: str, *, limit: int = 16) -> Dict[str, Any]:
+        """构建构建上下文，供后续节点或调用方直接使用。"""
         rows = self._read_events(session_id)
         if not rows:
             return {"items": [], "summary": {"commands": 0, "tools": 0, "results": 0, "failures": 0}}

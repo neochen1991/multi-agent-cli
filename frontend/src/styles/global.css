@@ -612,17 +612,108 @@ body {
   color: var(--text-muted) !important;
 }
 
+.incident-section-nav-shell {
+  position: relative;
+  margin-bottom: 18px;
+}
+
 .incident-section-nav {
-  margin-bottom: 12px;
+  position: fixed;
+  top: 76px;
+  z-index: 90;
+  padding: 12px 14px 10px;
+  border: 1px solid #dde6f5;
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: 0 12px 24px rgba(15, 35, 95, 0.08);
 }
 
 .incident-workspace-tabs .ant-tabs-nav {
-  margin-bottom: 8px !important;
+  margin-bottom: 6px !important;
 }
 
 .incident-workspace-tabs .ant-tabs-tab {
-  padding-top: 8px !important;
-  padding-bottom: 8px !important;
+  padding: 12px 16px !important;
+  font-size: 16px;
+  font-weight: 700;
+  border-radius: 12px 12px 0 0;
+}
+
+.incident-workspace-tabs .ant-tabs-tab .ant-tabs-tab-btn {
+  font-size: 16px;
+  font-weight: 700;
+  color: #20446f;
+}
+
+.incident-workspace-tabs .ant-tabs-tab.ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: #0f2745;
+}
+
+.incident-section-nav .ant-typography {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+}
+
+.incident-session-quality-pills {
+  display: flex;
+  margin-top: 8px;
+}
+
+.clickable-tag {
+  cursor: pointer;
+}
+
+.history-quality-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.history-evidence-coverage {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-evidence-coverage-bar {
+  display: flex;
+  width: 100%;
+  max-width: 180px;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8edf5;
+}
+
+.history-evidence-coverage-segment.ok {
+  background: #16a34a;
+}
+
+.history-evidence-coverage-segment.degraded {
+  background: #f59e0b;
+}
+
+.history-evidence-coverage-segment.missing {
+  background: #ef4444;
+}
+
+@media (max-width: 900px) {
+  .incident-section-nav-shell {
+    margin-bottom: 16px;
+  }
+
+  .incident-section-nav {
+    top: 76px;
+    padding: 10px 10px 8px;
+    border-radius: 12px;
+  }
+
+  .incident-workspace-tabs .ant-tabs-tab,
+  .incident-workspace-tabs .ant-tabs-tab .ant-tabs-tab-btn {
+    font-size: 14px;
+    padding: 10px 12px !important;
+  }
 }
 
 .incident-guidance-card {
@@ -684,6 +775,75 @@ body {
 
 .rca-summary-head {
   margin-bottom: 8px;
+}
+
+.rca-quality-callout {
+  margin-top: 12px;
+  border: 1px solid #ead7a3;
+  border-radius: 10px;
+  background: #fffaf0;
+  padding: 10px 12px;
+}
+
+.rca-coverage-strip {
+  margin-top: 12px;
+  border: 1px solid #dce6f4;
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 10px 12px;
+}
+
+.rca-coverage-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rca-coverage-bar {
+  display: flex;
+  width: 100%;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8edf5;
+}
+
+.rca-coverage-segment.ok {
+  background: #16a34a;
+}
+
+.rca-coverage-segment.degraded {
+  background: #f59e0b;
+}
+
+.rca-coverage-segment.missing {
+  background: #ef4444;
+}
+
+.rca-quality-callout-text {
+  margin: 8px 0 0 !important;
+  color: #594214;
+  line-height: 1.6;
+}
+
+.rca-quality-risk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.rca-quality-risk-item {
+  border-left: 3px solid #d97706;
+  padding-left: 8px;
+  color: #6b4f1d;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .rca-overview-kpis {
@@ -1139,6 +1299,33 @@ body {
   border: 1px solid #e6edf7 !important;
 }
 
+.investigation-leads-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.investigation-leads-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.investigation-leads-tag {
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.investigation-leads-tag.is-selected {
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.12);
+}
+
+.investigation-leads-tag.is-highlighted:not(.is-selected) {
+  border-color: #91caff;
+  background: #e6f4ff;
+  color: #0958d9;
+}
+
 .process-timeline-wrap {
   max-height: 560px;
   overflow: auto;
@@ -1530,10 +1717,14 @@ body {
 
 .agent-network-scroll {
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: auto;
   border: 1px solid #dde6f5;
   border-radius: 10px;
   background: linear-gradient(180deg, #ffffff 0%, #f6f9ff 100%);
+}
+
+.agent-network-scroll.is-scrollable {
+  max-height: 680px;
 }
 
 .agent-network-svg {
@@ -1656,6 +1847,94 @@ body {
   padding: 10px 12px !important;
 }
 
+.network-step-detail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.network-step-detail-item {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #e3ebf7;
+  background: #fbfdff;
+}
+
+.agent-network-step-card-submeta {
+  font-size: 10px;
+  fill: #475569;
+}
+
+.agent-network-step-card-clues {
+  font-size: 9px;
+  fill: #0f172a;
+}
+
+.network-step-detail-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.network-step-leads {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.network-journey-board {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.network-journey-column {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #e3ebf7;
+  background: #f8fbff;
+}
+
+.network-journey-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.network-journey-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.network-journey-pre {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.network-step-lead-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.network-step-lead-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
 @media (max-width: 992px) {
   .app-sider {
     position: static !important;
@@ -1669,6 +1948,10 @@ body {
 
   .app-content {
     padding: 14px;
+  }
+
+  .network-journey-board {
+    grid-template-columns: 1fr;
   }
 
   .history-page-fixed {

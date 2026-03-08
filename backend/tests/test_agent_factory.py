@@ -1,6 +1,4 @@
-"""
-Unit tests for Agent Factory.
-"""
+"""testAgent工厂相关测试。"""
 
 import pytest
 from unittest.mock import MagicMock, patch
@@ -19,10 +17,10 @@ from app.runtime.agents import (
 
 
 class TestAgentConfig:
-    """Tests for AgentConfig dataclass."""
+    """归档AgentConfig相关测试场景。"""
 
     def test_create_config(self):
-        """Should create config with all fields."""
+        """验证创建配置。"""
         config = AgentConfig(
             name="LogAgent",
             role="日志分析专家",
@@ -41,7 +39,7 @@ class TestAgentConfig:
         assert config.enabled is True
 
     def test_to_dict(self):
-        """Should convert to dict."""
+        """验证todict。"""
         config = AgentConfig(
             name="LogAgent",
             role="日志分析专家",
@@ -57,7 +55,7 @@ class TestAgentConfig:
         assert result["tools"] == ["parse_log"]
 
     def test_from_dict(self):
-        """Should create from dict."""
+        """验证从dict。"""
         data = {
             "name": "CodeAgent",
             "role": "代码分析专家",
@@ -75,43 +73,43 @@ class TestAgentConfig:
 
 
 class TestAgentConfigs:
-    """Tests for AGENT_CONFIGS dictionary."""
+    """归档AgentConfigs相关测试场景。"""
 
     def test_log_agent_config_exists(self):
-        """Should have LogAgent config."""
+        """验证logAgent配置exists。"""
         assert "LogAgent" in AGENT_CONFIGS
         config = AGENT_CONFIGS["LogAgent"]
         assert config["phase"] == "analysis"
         assert "parse_log" in config["tools"]
 
     def test_code_agent_config_exists(self):
-        """Should have CodeAgent config."""
+        """验证codeAgent配置exists。"""
         assert "CodeAgent" in AGENT_CONFIGS
         config = AGENT_CONFIGS["CodeAgent"]
         assert config["phase"] == "analysis"
         assert "git_tool" in config["tools"]
 
     def test_judge_agent_config_exists(self):
-        """Should have JudgeAgent config."""
+        """验证裁决Agent配置exists。"""
         assert "JudgeAgent" in AGENT_CONFIGS
         config = AGENT_CONFIGS["JudgeAgent"]
         assert config["phase"] == "judgment"
         assert config["tools"] == []  # Judge has no tools
 
     def test_critic_agent_config_exists(self):
-        """Should have CriticAgent config."""
+        """验证质疑Agent配置exists。"""
         assert "CriticAgent" in AGENT_CONFIGS
         config = AGENT_CONFIGS["CriticAgent"]
         assert config["phase"] == "critique"
 
     def test_rebuttal_agent_config_exists(self):
-        """Should have RebuttalAgent config."""
+        """验证反驳Agent配置exists。"""
         assert "RebuttalAgent" in AGENT_CONFIGS
         config = AGENT_CONFIGS["RebuttalAgent"]
         assert config["phase"] == "rebuttal"
 
     def test_domain_agent_config_exists(self):
-        """Should have DomainAgent config."""
+        """验证domainAgent配置exists。"""
         assert "DomainAgent" in AGENT_CONFIGS
         config = AGENT_CONFIGS["DomainAgent"]
         assert config["phase"] == "analysis"
@@ -119,10 +117,10 @@ class TestAgentConfigs:
 
 
 class TestGetAgentConfig:
-    """Tests for get_agent_config function."""
+    """归档GetAgentConfig相关测试场景。"""
 
     def test_returns_config_for_existing_agent(self):
-        """Should return config for existing agent."""
+        """验证返回配置forexistingAgent。"""
         config = get_agent_config("LogAgent")
 
         assert config is not None
@@ -130,17 +128,17 @@ class TestGetAgentConfig:
         assert config.phase == "analysis"
 
     def test_returns_none_for_nonexistent_agent(self):
-        """Should return None for nonexistent agent."""
+        """验证返回nonefornonexistentAgent。"""
         config = get_agent_config("NonExistentAgent")
 
         assert config is None
 
 
 class TestGetAllAgentConfigs:
-    """Tests for get_all_agent_configs function."""
+    """归档GetAllAgentConfigs相关测试场景。"""
 
     def test_returns_all_configs(self):
-        """Should return all agent configs."""
+        """验证返回allconfigs。"""
         configs = get_all_agent_configs()
 
         assert len(configs) == len(AGENT_CONFIGS)
@@ -150,10 +148,10 @@ class TestGetAllAgentConfigs:
 
 
 class TestGetAgentsByPhase:
-    """Tests for get_agents_by_phase function."""
+    """归档GetAgentsByPhase相关测试场景。"""
 
     def test_returns_analysis_agents(self):
-        """Should return agents in analysis phase."""
+        """验证返回分析Agent。"""
         agents = get_agents_by_phase("analysis")
 
         agent_names = [a.name for a in agents]
@@ -162,45 +160,45 @@ class TestGetAgentsByPhase:
         assert "DomainAgent" in agent_names
 
     def test_returns_critique_agents(self):
-        """Should return agents in critique phase."""
+        """验证返回critiqueAgent。"""
         agents = get_agents_by_phase("critique")
 
         agent_names = [a.name for a in agents]
         assert "CriticAgent" in agent_names
 
     def test_returns_judgment_agents(self):
-        """Should return agents in judgment phase."""
+        """验证返回judgmentAgent。"""
         agents = get_agents_by_phase("judgment")
 
         agent_names = [a.name for a in agents]
         assert "JudgeAgent" in agent_names
 
     def test_returns_empty_for_unknown_phase(self):
-        """Should return empty list for unknown phase."""
+        """验证返回空forunknownphase。"""
         agents = get_agents_by_phase("unknown_phase")
 
         assert agents == []
 
 
 class TestAgentFactory:
-    """Tests for AgentFactory class."""
+    """归档AgentFactory相关测试场景。"""
 
     def test_factory_initialization(self):
-        """Should initialize factory."""
+        """验证工厂initialization。"""
         factory = AgentFactory()
 
         assert factory._llm is None
         assert factory._default_tools == []
 
     def test_factory_with_llm(self):
-        """Should initialize with LLM."""
+        """验证工厂带LLM。"""
         mock_llm = MagicMock()
         factory = AgentFactory(llm=mock_llm)
 
         assert factory._llm == mock_llm
 
     def test_set_llm_clears_cache(self):
-        """Should clear cache when LLM is set."""
+        """验证setLLMclearscache。"""
         factory = AgentFactory()
         factory._agent_cache["test"] = MagicMock()
 
@@ -211,14 +209,14 @@ class TestAgentFactory:
         assert len(factory._agent_cache) == 0
 
     def test_create_agent_requires_llm(self):
-        """Should raise error if no LLM is provided."""
+        """验证创建AgentrequiresLLM。"""
         factory = AgentFactory()
 
         with pytest.raises(ValueError, match="No LLM provided"):
             factory.create_agent("LogAgent")
 
     def test_create_agent_unknown_name(self):
-        """Should raise error for unknown agent name."""
+        """验证创建Agentunknownname。"""
         factory = AgentFactory()
 
         mock_llm = MagicMock()
@@ -226,7 +224,7 @@ class TestAgentFactory:
             factory.create_agent("UnknownAgent", llm=mock_llm)
 
     def test_resolve_tools_from_strings(self):
-        """Should resolve tool names to tool instances."""
+        """验证resolve工具从strings。"""
         factory = AgentFactory()
 
         # Test that _resolve_tools converts string tool names
@@ -234,7 +232,7 @@ class TestAgentFactory:
         assert hasattr(factory, '_resolve_tools')
 
     def test_clear_cache(self):
-        """Should clear agent cache."""
+        """验证clearcache。"""
         factory = AgentFactory()
         factory._agent_cache["test1"] = MagicMock()
         factory._agent_cache["test2"] = MagicMock()
@@ -245,17 +243,17 @@ class TestAgentFactory:
 
 
 class TestFactorySingleton:
-    """Tests for factory singleton functions."""
+    """归档FactorySingleton相关测试场景。"""
 
     def test_get_default_factory(self):
-        """Should return default factory instance."""
+        """验证get默认工厂。"""
         factory = get_default_factory()
 
         assert factory is not None
         assert isinstance(factory, AgentFactory)
 
     def test_set_default_factory(self):
-        """Should set default factory instance."""
+        """验证set默认工厂。"""
         new_factory = AgentFactory()
         set_default_factory(new_factory)
 
@@ -264,10 +262,10 @@ class TestFactorySingleton:
 
 
 class TestAgentToolBinding:
-    """Tests for agent tool bindings in config."""
+    """归档AgentToolBinding相关测试场景。"""
 
     def test_log_agent_has_file_tools(self):
-        """LogAgent should have file reading tools."""
+        """验证logAgenthasfile工具。"""
         config = get_agent_config("LogAgent")
 
         assert "parse_log" in config.tools
@@ -275,7 +273,7 @@ class TestAgentToolBinding:
         assert "search_in_files" in config.tools
 
     def test_code_agent_has_git_tools(self):
-        """CodeAgent should have git tools."""
+        """验证codeAgenthasGit工具。"""
         config = get_agent_config("CodeAgent")
 
         assert "git_tool" in config.tools
@@ -284,31 +282,31 @@ class TestAgentToolBinding:
         assert "list_files" in config.tools
 
     def test_judge_agent_has_no_tools(self):
-        """JudgeAgent should have no tools."""
+        """验证裁决Agenthas无工具。"""
         config = get_agent_config("JudgeAgent")
 
         assert config.tools == []
 
 
 class TestAgentTokenLimits:
-    """Tests for agent token and timeout limits."""
+    """归档AgentTokenLimits相关测试场景。"""
 
     def test_judge_has_higher_token_limit(self):
-        """JudgeAgent should have higher token limit."""
+        """验证裁决has更高tokenlimit。"""
         judge_config = get_agent_config("JudgeAgent")
         log_config = get_agent_config("LogAgent")
 
         assert judge_config.max_tokens > log_config.max_tokens
 
     def test_judge_has_longer_timeout(self):
-        """JudgeAgent should have longer timeout."""
+        """验证裁决haslonger超时。"""
         judge_config = get_agent_config("JudgeAgent")
         log_config = get_agent_config("LogAgent")
 
         assert judge_config.timeout > log_config.timeout
 
     def test_all_agents_have_valid_limits(self):
-        """All agents should have valid token and timeout limits."""
+        """验证allAgenthavevalidlimits。"""
         for name, config_dict in AGENT_CONFIGS.items():
             config = AgentConfig.from_dict(config_dict)
 

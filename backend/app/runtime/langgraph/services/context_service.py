@@ -1,6 +1,28 @@
-"""Context service for LangGraph debate runtime.
+"""
+上下文服务模块
 
-This module provides context building and management functionality.
+本模块提供 LangGraph 辩论运行时的上下文构建和管理功能。
+
+核心功能：
+1. 上下文压缩
+2. 同伴项收集
+3. 对话项提取
+4. 会话状态派生
+5. Agent 提示词上下文构建
+
+上下文结构：
+- incident_summary: 故障摘要
+- error_type: 错误类型
+- key_entities: 关键实体
+- time_range: 时间范围
+- affected_services: 受影响服务
+
+使用场景：
+- 为 Agent 构建执行上下文
+- 压缩长文本以适应 Token 限制
+- 收集其他 Agent 的输出作为上下文
+
+Context service for LangGraph debate runtime.
 """
 
 from __future__ import annotations
@@ -15,34 +37,48 @@ logger = structlog.get_logger()
 
 
 class ContextService:
-    """Context building and management.
+    """
+    上下文构建和管理服务
 
-    This service handles:
-    - Context summarization
-    - Peer item collection
-    - Dialogue item extraction
+    提供上下文的构建、压缩和管理功能。
+
+    属性：
+    - _context_cache: 上下文缓存
+
+    功能：
+    - 压缩上下文：提取关键字段
+    - 收集同伴项：获取其他 Agent 的输出
+    - 提取对话项：从消息中提取对话历史
+    - 派生会话状态：从历史中推导当前状态
     """
 
     def __init__(self) -> None:
-        """Initialize the context service."""
+        """
+        初始化上下文服务
+
+        创建空的上下文缓存。
+        """
         self._context_cache: Dict[str, Dict[str, Any]] = {}
 
     def compact_round_context(
         self,
         context_summary: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Create a compact context for the round.
+        """
+        压缩回合上下文
+
+        提取关键信息，减少 Token 消耗。
 
         Args:
-            context_summary: The context summary.
+            context_summary: 原始上下文摘要
 
         Returns:
-            A compacted context dictionary.
+            Dict[str, Any]: 压缩后的上下文
         """
         if not context_summary:
             return {}
 
-        # Extract key fields for compact context
+        # 提取关键字段
         compact = {
             "incident_summary": context_summary.get("incident_summary", ""),
             "error_type": context_summary.get("error_type", ""),
@@ -51,7 +87,7 @@ class ContextService:
             "affected_services": list(context_summary.get("affected_services", []))[:3],
         }
 
-        # Remove empty values
+        # 移除空值
         return {k: v for k, v in compact.items() if v}
 
     def collect_peer_items_from_cards(
@@ -60,19 +96,23 @@ class ContextService:
         agent_names: List[str],
         limit: int = 3,
     ) -> List[Dict[str, Any]]:
-        """Collect peer items from agent cards.
+        """
+        从历史卡片收集同伴项
+
+        获取指定 Agent 的最新输出作为上下文。
 
         Args:
-            history_cards: List of agent evidence cards.
-            agent_names: Names of agents to collect from.
-            limit: Maximum items per agent.
+            history_cards: 历史卡片列表
+            agent_names: 要收集的 Agent 名称列表
+            limit: 每个 Agent 的最大项数
 
         Returns:
-            List of peer items.
+            List[Dict[str, Any]]: 同伴项列表
         """
         peer_items = []
         seen_agents = set()
 
+        # 从最新的卡片开始遍历
         for card in reversed(history_cards):
             if card.agent_name in agent_names and card.agent_name not in seen_agents:
                 peer_items.append({
@@ -94,15 +134,18 @@ class ContextService:
         limit: int = 6,
         char_budget: int = 720,
     ) -> List[Dict[str, Any]]:
-        """Extract dialogue items from messages.
+        """
+        从消息中提取对话项
+
+        提取最近的对话历史，控制字符数。
 
         Args:
-            messages: List of messages.
-            limit: Maximum number of items.
-            char_budget: Character budget for content.
+            messages: 消息列表
+            limit: 最大项数
+            char_budget: 字符预算
 
         Returns:
-            List of dialogue items.
+            List[Dict[str, Any]]: 对话项列表
         """
         items = []
         total_chars = 0
@@ -111,6 +154,7 @@ class ContextService:
             if len(items) >= limit:
                 break
 
+            # 提取内容
             content = ""
             if hasattr(msg, "content"):
                 content = str(msg.content or "")
@@ -120,13 +164,14 @@ class ContextService:
             if not content.strip():
                 continue
 
+            # 提取发送者
             sender = "unknown"
             if hasattr(msg, "name") and msg.name:
                 sender = str(msg.name)
             elif isinstance(msg, dict):
                 sender = str(msg.get("name", "unknown"))
 
-            # Truncate to budget
+            # 截断到预算
             if total_chars + len(content) > char_budget:
                 remaining = char_budget - total_chars
                 if remaining > 50:
@@ -148,17 +193,20 @@ class ContextService:
         messages: List[Any],
         existing_agent_outputs: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Derive conversation state from history.
+        """
+        从历史派生会话状态
+
+        提取开放问题、声明和统计信息。
 
         Args:
-            history_cards: List of agent evidence cards.
-            messages: List of messages.
-            existing_agent_outputs: Existing agent outputs.
+            history_cards: 历史卡片列表
+            messages: 消息列表
+            existing_agent_outputs: 现有 Agent 输出
 
         Returns:
-            Derived conversation state.
+            Dict[str, Any]: 派生的会话状态
         """
-        # Collect open questions
+        # 收集开放问题
         open_questions = []
         for output in existing_agent_outputs.values():
             if isinstance(output, dict):
@@ -172,7 +220,7 @@ class ContextService:
                     elif isinstance(value, str) and value.strip():
                         open_questions.append(value.strip())
 
-        # Dedupe while preserving order
+        # 去重并保持顺序
         seen = set()
         unique_questions = []
         for q in open_questions:
@@ -180,7 +228,7 @@ class ContextService:
                 seen.add(q)
                 unique_questions.append(q)
 
-        # Collect claims
+        # 收集声明
         claims = []
         for card in history_cards:
             if card.conclusion:
@@ -207,19 +255,22 @@ class ContextService:
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         inbox_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Build context for agent prompt.
+        """
+        构建 Agent 提示词上下文
+
+        为 Agent 构建完整的执行上下文。
 
         Args:
-            spec: Agent specification.
-            loop_round: Current loop round.
-            context: Compact context.
-            history_cards: History cards.
-            assigned_command: Optional command for this agent.
-            dialogue_items: Optional dialogue items.
-            inbox_messages: Optional inbox messages.
+            spec: Agent 规格
+            loop_round: 当前循环轮次
+            context: 压缩上下文
+            history_cards: 历史卡片
+            assigned_command: 分配给 Agent 的命令
+            dialogue_items: 对话项
+            inbox_messages: 收件箱消息
 
         Returns:
-            Context dictionary for prompt building.
+            Dict[str, Any]: 提示词上下文字典
         """
         return {
             "agent_name": spec.name,
@@ -240,7 +291,9 @@ class ContextService:
         }
 
     def clear_cache(self) -> None:
-        """Clear the context cache."""
+        """
+        清空上下文缓存
+        """
         self._context_cache.clear()
 
 

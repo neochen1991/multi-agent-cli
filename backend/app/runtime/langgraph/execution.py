@@ -1,7 +1,9 @@
-"""Runtime execution helpers for LangGraph agent calls.
+"""
+LangGraph 运行时里的 Agent 调用执行层。
 
-This module extracts the heavy LLM call orchestration path out of the main
-runtime class so the orchestrator focuses on graph routing/state transitions.
+这个模块专门承接“真正去调模型”的重逻辑，目的是把 orchestrator 主类里的职责拆开：
+1. orchestrator 负责状态机、路由、审计和会话生命周期。
+2. execution 模块负责 prompt 调用、重试、超时、结构化解析和流式事件。
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ logger = structlog.get_logger()
 
 @dataclass
 class AgentInvokeResult:
+    """封装单次模型调用的原始文本结果和调用模式。"""
     content: str
     invoke_mode: str
 
@@ -49,6 +52,12 @@ async def emit_stream_deltas(
     loop_round: int,
     round_number: int,
 ) -> None:
+    """
+    把完整 LLM 输出切分成多个流式片段事件发给前端。
+
+    这里不是实时 token streaming，而是把一次完整输出按固定大小切块，
+    用来在前端模拟逐步展开的对话感，同时控制事件数量上限。
+    """
     content = (raw_content or "").strip()
     if not content:
         return
@@ -81,6 +90,14 @@ async def emit_stream_deltas(
 
 
 def run_agent_once(orchestrator: Any, spec: AgentSpec, prompt: str, max_tokens: int) -> AgentInvokeResult:
+    """
+    以最直接模式调用一次大模型，不做结构化 schema 约束。
+
+    这个入口主要用于：
+    - 普通自然语言输出
+    - 结构化模式失败后的 fallback
+    """
+    # direct 模式只负责“最朴素的一次调用”，不做结构化 schema 约束。
     if not settings.LLM_API_KEY:
         raise RuntimeError("LLM_API_KEY 未配置，无法调用模型")
     llm = ChatOpenAI(
@@ -112,20 +129,12 @@ def run_agent_with_structured_output(
     max_tokens: int,
 ) -> tuple[Dict[str, Any], str]:
     """
-    Run agent with structured output validation using Pydantic.
+    用 Pydantic schema 驱动结构化输出调用。
 
-    Uses LLM's with_structured_output for native structured output,
-    falling back to manual parsing if needed.
-
-    Args:
-        orchestrator: Runtime orchestrator instance
-        spec: Agent specification
-        prompt: Input prompt
-        max_tokens: Maximum tokens for response
-
-    Returns:
-        Tuple of (parsed_output_dict, invoke_mode)
+    优先尝试模型原生 structured output；如果失败，再回退到普通文本调用。
+    这样做的目的是尽量保证关键 Agent 输出可解析，但不因为 schema 失败直接丢掉一次调用结果。
     """
+    # structured output 是首选路径，因为它能显著降低解析漂移。
     if not settings.LLM_API_KEY:
         raise RuntimeError("LLM_API_KEY 未配置，无法调用模型")
 
@@ -140,11 +149,11 @@ def run_agent_with_structured_output(
         model_kwargs={"extra_body": {"thinking": {"type": "disabled"}}},
     )
 
-    # Get appropriate schema for agent
+    # 为不同 Agent 选择对应 schema，避免所有 Agent 共用一个过宽结构。
     schema = get_schema_for_agent(spec.name)
 
     try:
-        # Try structured output mode
+        # 优先走原生 structured output，减少后处理解析误差。
         structured_llm = llm.with_structured_output(schema)
         messages = [
             SystemMessage(content=spec.system_prompt or "你是严谨的 SRE 分析助手。"),
@@ -174,7 +183,7 @@ def run_agent_with_structured_output(
             fallback="manual_parsing",
         )
 
-        # Fallback to regular invocation
+        # schema 失败时退回普通文本模式，至少保留可读内容，后续再人工/程序解析。
         reply = llm.invoke([
             SystemMessage(content=spec.system_prompt or "你是严谨的 SRE 分析助手。"),
             HumanMessage(content=prompt),
@@ -192,6 +201,17 @@ async def call_agent(
     loop_round: int,
     history_cards_context: Optional[list[Any]] = None,
 ) -> DebateTurn:
+    """
+    执行一次完整 Agent 调用，并把模型输出归一化成 DebateTurn。
+
+    这个函数是执行层主入口，负责串起：
+    - prompt 调用
+    - 结构化输出/普通输出双模式
+    - 超时和重试策略
+    - 审计事件
+    - turn 归一化
+    """
+    # call_agent 是 execution 层主入口，负责把一次模型调用最终落成标准 DebateTurn。
     started_at = datetime.utcnow()
     model_name = settings.llm_model
     endpoint = orchestrator._chat_endpoint()
@@ -215,6 +235,7 @@ async def call_agent(
         "prompt_template_version": prompt_template_version,
     }
 
+    # 在真正请求模型前先写开始事件，前端和审计系统才能看到完整调用链。
     await orchestrator._emit_event(
         {
             "type": "llm_call_started",
@@ -270,6 +291,7 @@ async def call_agent(
     )
 
     try:
+        # execution 层的重试只覆盖“超时类短暂故障”，不覆盖认证/配额等致命错误。
         async for attempt in retrying:
             attempt_idx = int(attempt.retry_state.attempt_number or 1)
             attempt_timeout = timeout_plan[min(attempt_idx - 1, len(timeout_plan) - 1)]
@@ -292,6 +314,8 @@ async def call_agent(
                         )
                         raise asyncio.TimeoutError("session timeout budget exhausted")
 
+                    # 先争抢 LLM semaphore。这里的 queue timeout 衡量的是“排队等模型”的耗时，
+                    # 和真正的 HTTP/模型推理超时是两套不同门限。
                     queue_timeout = float(orchestrator._agent_queue_timeout(spec.name))
                     if session_budget is not None:
                         queue_timeout = min(queue_timeout, max(0.5, float(session_budget)))
@@ -348,6 +372,8 @@ async def call_agent(
                     finally:
                         if acquired:
                             semaphore.release()
+                    # 从这里开始，说明本次调用已经真正拿到模型结果，
+                    # 后续重点转向“结果截断、归一化、事件落盘和 turn 构造”。
                     raw_content = str(getattr(invoke_result, "content", "") or "")
                     raw_content = truncate_text(
                         raw_content,
@@ -393,6 +419,8 @@ async def call_agent(
                         },
                     )
                     if spec.name == "JudgeAgent":
+                        # Judge 的 fallback summary 需要单独打点，后续治理和前端
+                        # 会据此判断“这次裁决是否只是占位结论”。
                         final_judgment = payload.get("final_judgment")
                         root_cause = (
                             final_judgment.get("root_cause")
@@ -424,6 +452,7 @@ async def call_agent(
                         round_number=round_number,
                     )
 
+                    # 到这里才把模型输出整理成标准 DebateTurn，交给上层并入 history_cards。
                     completed_at = datetime.utcnow()
                     turn = DebateTurn(
                         round_number=round_number,
@@ -475,6 +504,7 @@ async def call_agent(
                     )
                     chat_message = str(payload.get("chat_message") or "").strip()
                     if chat_message:
+                        # chat_message 是给前端可读对话流看的，不等于结构化结论本身。
                         history_cards = list(history_cards_context or orchestrator._history_cards_snapshot())
                         await orchestrator._emit_event(
                             {
@@ -534,6 +564,10 @@ async def call_agent(
                     )
                     return turn
                 except Exception as exc:
+                    # 错误分流逻辑：
+                    # 1. 致命错误直接抛 FatalLLMError
+                    # 2. 超时类错误允许按 timeout_plan 做重试
+                    # 3. 其他错误由上层决定是否转 fallback turn
                     latency_ms = round((perf_counter() - started_clock) * 1000, 2)
                     error_text = str(exc).strip() or exc.__class__.__name__
                     is_timeout = isinstance(exc, asyncio.TimeoutError) or "timeout" in error_text.lower()
@@ -577,6 +611,7 @@ async def call_agent(
                         raise FatalLLMError(f"{spec.name} 调用不可恢复失败: {error_text}") from exc
                     retryable = attempt_idx < max_attempts and is_timeout
                     if retryable:
+                        # timeout 重试前允许压缩 prompt / 降低 token，尽量用更小代价拿到一次可用输出。
                         logger.warning(
                             "runtime_agent_llm_retry",
                             session_id=orchestrator.session_id,

@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 
 class IncidentStatus(str, Enum):
-    """故障状态"""
+    """故障状态枚举，描述故障从创建到关闭的生命周期。"""
     PENDING = "pending"          # 待处理
     ANALYZING = "analyzing"      # 分析中
     DEBATING = "debating"        # 辩论中
@@ -20,7 +20,7 @@ class IncidentStatus(str, Enum):
 
 
 class IncidentSeverity(str, Enum):
-    """故障严重程度"""
+    """故障严重程度枚举，用于值班分级和优先级决策。"""
     CRITICAL = "critical"        # 严重 - 影响核心业务
     HIGH = "high"               # 高 - 影响重要功能
     MEDIUM = "medium"           # 中 - 影响一般功能
@@ -28,7 +28,7 @@ class IncidentSeverity(str, Enum):
 
 
 class IncidentSource(str, Enum):
-    """故障来源"""
+    """故障来源枚举，标识事件是由日志、告警还是人工录入触发。"""
     LOG = "log"                 # 日志
     MONITOR = "monitor"         # 监控告警
     USER_REPORT = "user_report" # 用户反馈
@@ -36,7 +36,11 @@ class IncidentSource(str, Enum):
 
 
 class IncidentCreate(BaseModel):
-    """创建故障请求"""
+    """创建故障请求模型。
+
+    聚合了用户手工输入和外部接入时可能携带的原始运行态信息，
+    是 Incident 落库前的标准入口载荷。
+    """
     title: str = Field(..., description="故障标题")
     description: Optional[str] = Field(None, description="故障描述")
     source: IncidentSource = Field(default=IncidentSource.MANUAL, description="故障来源")
@@ -54,7 +58,7 @@ class IncidentCreate(BaseModel):
 
 
 class IncidentUpdate(BaseModel):
-    """更新故障请求"""
+    """更新故障请求模型，用于局部更新状态、结论或关联信息。"""
     title: Optional[str] = Field(None, description="故障标题")
     description: Optional[str] = Field(None, description="故障描述")
     status: Optional[IncidentStatus] = Field(None, description="状态")
@@ -67,7 +71,9 @@ class IncidentUpdate(BaseModel):
 
 
 class Incident(BaseModel):
-    """故障事件"""
+    """故障事件主模型。
+
+    既承载原始故障上下文，也承载辩论分析产生的根因、修复建议和关联会话。"""
     id: str = Field(..., description="故障ID")
     title: str = Field(..., description="故障标题")
     description: Optional[str] = Field(None, description="故障描述")
@@ -105,6 +111,7 @@ class Incident(BaseModel):
     resolved_at: Optional[datetime] = Field(None, description="解决时间")
     
     class Config:
+        """提供模型配置项，统一对象序列化与字段行为。"""
         json_schema_extra = {
             "example": {
                 "id": "inc_001",
@@ -122,7 +129,7 @@ class Incident(BaseModel):
 
 
 class IncidentList(BaseModel):
-    """故障列表"""
+    """分页返回的故障列表响应模型。"""
     items: List[Incident]
     total: int
     page: int

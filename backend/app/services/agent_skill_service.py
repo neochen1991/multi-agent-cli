@@ -1,7 +1,6 @@
-"""
-Agent skill routing service.
+"""Agent Skill 路由服务。
 
-Provide Codex-like local SKILL.md selection/injection for runtime agents.
+负责从本地 `SKILL.md` 文档中加载可用 Skill，并根据 Agent 名称、命令内容和上下文选择应注入的 Skill。
 """
 
 from __future__ import annotations
@@ -17,6 +16,8 @@ from app.models.tooling import AgentSkillConfig
 
 @dataclass
 class SkillDoc:
+    """单个 Skill 文档的结构化表示。"""
+
     name: str
     description: str
     path: str
@@ -26,7 +27,7 @@ class SkillDoc:
 
 
 class AgentSkillService:
-    """Load local skill documents and match to agent commands."""
+    """加载本地 Skill 文档并匹配到具体 Agent 命令。"""
 
     SKILL_SUFFIX = "SKILL.md"
 
@@ -39,6 +40,10 @@ class AgentSkillService:
         compact_context: Dict[str, Any],
         incident_context: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """为当前 Agent 选择应注入的 Skill。
+
+        选择顺序是：先看全局开关和 Agent 白名单，再尝试命令中的 `skill_hints`，最后回退到基于文本相关度的匹配。
+        """
         if not bool(cfg.enabled):
             return {
                 "enabled": False,
@@ -172,6 +177,7 @@ class AgentSkillService:
 
     @staticmethod
     def _extract_skill_hints(assigned_command: Optional[Dict[str, Any]]) -> List[str]:
+        """对输入执行提取Skillhints，将原始数据整理为稳定的内部结构。"""
         command = dict(assigned_command or {})
         raw = command.get("skill_hints")
         if not isinstance(raw, list):
@@ -186,6 +192,7 @@ class AgentSkillService:
 
     @staticmethod
     def _select_by_explicit_hints(*, agent_name: str, docs: List[SkillDoc], hints: List[str]) -> List[SkillDoc]:
+        """执行选择byexplicithints，用于驱动当前阶段的策略选择或状态流转。"""
         selected: List[SkillDoc] = []
         for hint in hints:
             for doc in docs:
@@ -200,6 +207,7 @@ class AgentSkillService:
         return selected
 
     def _resolve_skills_dir(self, raw: str) -> Path:
+        """解析 Skill 目录；相对路径按仓库根目录展开。"""
         if not raw:
             return Path.cwd() / "backend" / "skills"
         path = Path(raw)
@@ -208,6 +216,7 @@ class AgentSkillService:
         return (Path.cwd() / path).resolve()
 
     def _load_skill_docs(self, *, skills_dir: Path, max_chars: int) -> List[SkillDoc]:
+        """递归读取 Skill 文档并解析基础元信息。"""
         docs: List[SkillDoc] = []
         for file in sorted(skills_dir.rglob(f"*{self.SKILL_SUFFIX}")):
             try:
@@ -234,6 +243,7 @@ class AgentSkillService:
         return docs
 
     def _parse_skill(self, text: str) -> Tuple[Dict[str, str], str]:
+        """解析 Skill 文档 front matter 和正文。"""
         raw = str(text or "")
         if raw.startswith("---\n"):
             end_idx = raw.find("\n---", 4)
@@ -246,6 +256,7 @@ class AgentSkillService:
 
     @staticmethod
     def _parse_front_matter(head: str) -> Dict[str, str]:
+        """对输入执行解析frontmatter，将原始数据整理为稳定的内部结构。"""
         meta: Dict[str, str] = {}
         for line in str(head or "").splitlines():
             if ":" not in line:
@@ -255,6 +266,7 @@ class AgentSkillService:
         return meta
 
     def _rank_skills(self, *, agent_name: str, query_text: str, docs: List[SkillDoc]) -> List[Tuple[SkillDoc, float]]:
+        """按文本相关度给 Skill 打分，并过滤掉不适用的 Agent。"""
         query_tokens = self._tokenize(query_text)
         ranked: List[Tuple[SkillDoc, float]] = []
         for doc in docs:
@@ -281,6 +293,7 @@ class AgentSkillService:
         compact_context: Dict[str, Any],
         incident_context: Dict[str, Any],
     ) -> str:
+        """构建构建query文本，供后续节点或调用方直接使用。"""
         command = dict(assigned_command or {})
         fields = [
             str(command.get("task") or ""),
@@ -295,6 +308,7 @@ class AgentSkillService:
 
     @staticmethod
     def _tokenize(text: str) -> set[str]:
+        """执行分词相关逻辑，并为当前模块提供可复用的处理能力。"""
         return {item for item in re.split(r"[^a-z0-9_\u4e00-\u9fff]+", str(text or "").lower()) if len(item) >= 2}
 
 

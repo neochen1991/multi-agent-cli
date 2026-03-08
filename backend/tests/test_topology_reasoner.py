@@ -1,7 +1,11 @@
+"""test拓扑推理器相关测试。"""
+
 from app.runtime.judgement.topology_reasoner import score_topology_propagation
 
 
 def test_topology_reasoner_scores_and_paths():
+    """验证拓扑推理器scoresand路径。"""
+    
     context = {
         "assets": {
             "interface_mapping": {

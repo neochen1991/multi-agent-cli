@@ -11,6 +11,7 @@ from app.core.json_utils import extract_json_dict
 
 
 def extract_balanced_object(text: str, start_index: int) -> Optional[str]:
+    """对输入执行提取balancedobject，将原始数据整理为稳定的内部结构。"""
     if start_index < 0 or start_index >= len(text) or text[start_index] != "{":
         return None
     depth = 0
@@ -40,6 +41,7 @@ def extract_balanced_object(text: str, start_index: int) -> Optional[str]:
 
 
 def extract_object_by_named_key(text: str, key_name: str) -> Optional[Dict[str, Any]]:
+    """对输入执行提取objectbynamedkey，将原始数据整理为稳定的内部结构。"""
     marker = f'"{key_name}"'
     search_start = 0
     while True:
@@ -65,6 +67,7 @@ def extract_object_by_named_key(text: str, key_name: str) -> Optional[Dict[str, 
 
 
 def extract_top_level_json_with_key(text: str, required_key: str) -> Optional[Dict[str, Any]]:
+    """对输入执行提取topleveljsonwithkey，将原始数据整理为稳定的内部结构。"""
     matched_payload: Optional[Dict[str, Any]] = None
     matched_length = 0
     marker = f'"{required_key}"'
@@ -85,6 +88,7 @@ def extract_top_level_json_with_key(text: str, required_key: str) -> Optional[Di
 
 
 def extract_confidence_hint(text: str, fallback: float = 0.5) -> float:
+    """对输入执行提取confidencehint，将原始数据整理为稳定的内部结构。"""
     matches = re.findall(r'"confidence"\s*:\s*(-?\d+(?:\.\d+)?)', text)
     if not matches:
         return fallback
@@ -96,6 +100,7 @@ def extract_confidence_hint(text: str, fallback: float = 0.5) -> float:
 
 
 def extract_largest_json_dict(text: str) -> Dict[str, Any]:
+    """对输入执行提取largestjsondict，将原始数据整理为稳定的内部结构。"""
     raw = str(text or "")
     if not raw.strip():
         return {}
@@ -118,6 +123,7 @@ def extract_largest_json_dict(text: str) -> Dict[str, Any]:
 
 
 def extract_mixed_json_dict(raw_content: str) -> Dict[str, Any]:
+    """对输入执行提取mixedjsondict，将原始数据整理为稳定的内部结构。"""
     raw_text = str(raw_content or "")
     parsed = extract_json_dict(raw_text) or {}
     if isinstance(parsed, dict) and parsed:
@@ -133,6 +139,7 @@ def extract_mixed_json_dict(raw_content: str) -> Dict[str, Any]:
 
 
 def parse_judge_payload(raw_content: str) -> Dict[str, Any]:
+    """对输入执行解析裁决载荷，将原始数据整理为稳定的内部结构。"""
     raw_text = str(raw_content or "")
     if not raw_text.strip():
         return {}
@@ -171,6 +178,7 @@ def parse_judge_payload(raw_content: str) -> Dict[str, Any]:
 
 
 def normalize_normal_output(parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
+    """对输入执行归一化normaloutput，将原始数据整理为稳定的内部结构。"""
     chat_message = str(parsed.get("chat_message") or "").strip()
     analysis = str(parsed.get("analysis") or "").strip()
     conclusion = str(parsed.get("conclusion") or analysis or "").strip()
@@ -196,6 +204,7 @@ def normalize_normal_output(parsed: Dict[str, Any], raw_content: str) -> Dict[st
             chat_message = raw_content[:180]
 
     def _normalize_text_list(value: Any, limit: int = 6) -> List[str]:
+        """对输入执行归一化文本列出，将原始数据整理为稳定的内部结构。"""
         if isinstance(value, list):
             items = value
         elif isinstance(value, str) and value.strip():
@@ -218,6 +227,7 @@ def normalize_normal_output(parsed: Dict[str, Any], raw_content: str) -> Dict[st
 
 
 def normalize_verification_output(parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
+    """对输入执行归一化verificationoutput，将原始数据整理为稳定的内部结构。"""
     base = normalize_normal_output(parsed, raw_content)
     raw_plan = parsed.get("verification_plan")
     plan: List[Dict[str, Any]] = []
@@ -267,9 +277,11 @@ def normalize_verification_output(parsed: Dict[str, Any], raw_content: str) -> D
 
 
 def normalize_commander_output(parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
+    """对输入执行归一化主Agentoutput，将原始数据整理为稳定的内部结构。"""
     normalized = normalize_normal_output(parsed, raw_content)
 
     def _normalize_tables(value: Any) -> List[str]:
+        """对输入执行归一化tables，将原始数据整理为稳定的内部结构。"""
         if not isinstance(value, list):
             return []
         picks: List[str] = []
@@ -281,6 +293,7 @@ def normalize_commander_output(parsed: Dict[str, Any], raw_content: str) -> Dict
         return list(dict.fromkeys(picks))[:20]
 
     def _normalize_skill_hints(value: Any) -> List[str]:
+        """对输入执行归一化Skillhints，将原始数据整理为稳定的内部结构。"""
         if not isinstance(value, list):
             return []
         picks: List[str] = []
@@ -325,6 +338,15 @@ def normalize_commander_output(parsed: Dict[str, Any], raw_content: str) -> Dict
     normalized["next_agent"] = next_agent
     normalized["should_stop"] = should_stop_value
     normalized["stop_reason"] = str(parsed.get("stop_reason") or "").strip()[:240]
+    should_pause_for_review = parsed.get("should_pause_for_review")
+    if isinstance(should_pause_for_review, str):
+        pause_for_review_value = should_pause_for_review.strip().lower() in ("1", "true", "yes", "y", "是")
+    else:
+        pause_for_review_value = bool(should_pause_for_review)
+    review_payload = parsed.get("review_payload")
+    normalized["should_pause_for_review"] = pause_for_review_value
+    normalized["review_reason"] = str(parsed.get("review_reason") or "").strip()[:240]
+    normalized["review_payload"] = review_payload if isinstance(review_payload, dict) else {}
     return normalized
 
 
@@ -334,6 +356,7 @@ def normalize_judge_output(
     *,
     fallback_summary: str,
 ) -> Dict[str, Any]:
+    """对输入执行归一化裁决output，将原始数据整理为稳定的内部结构。"""
     chat_message = str(parsed.get("chat_message") or "").strip()
     final_judgment = parsed.get("final_judgment")
     if not isinstance(final_judgment, dict) and any(
@@ -490,6 +513,7 @@ def normalize_judge_output(
 
 
 def normalize_agent_output(agent_name: str, raw_content: str, *, judge_fallback_summary: str) -> Dict[str, Any]:
+    """对输入执行归一化Agentoutput，将原始数据整理为稳定的内部结构。"""
     if agent_name == "JudgeAgent":
         parsed = parse_judge_payload(raw_content)
         return normalize_judge_output(parsed, raw_content, fallback_summary=judge_fallback_summary)
@@ -504,6 +528,7 @@ def normalize_agent_output(agent_name: str, raw_content: str, *, judge_fallback_
 
 
 def _normalize_evidence_items(raw_evidence: Any, *, source_hint: str, max_items: int = 5) -> List[Dict[str, Any]]:
+    """对输入执行归一化evidenceitems，将原始数据整理为稳定的内部结构。"""
     if not isinstance(raw_evidence, list):
         raw_evidence = []
     items: List[Dict[str, Any]] = []
@@ -544,6 +569,7 @@ def _normalize_evidence_items(raw_evidence: Any, *, source_hint: str, max_items:
 
 
 def _evidence_id(description: str, source_ref: str, source: str, index: int) -> str:
+    """执行evidenceid相关逻辑，并为当前模块提供可复用的处理能力。"""
     raw = "|".join([str(description or "").strip(), str(source_ref or "").strip(), str(source or "").strip(), str(index)])
     digest = sha1(raw.encode("utf-8")).hexdigest()[:12]
     return f"evd_{digest}"

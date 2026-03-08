@@ -1,3 +1,5 @@
+"""testAgentSkill服务相关测试。"""
+
 from __future__ import annotations
 
 from app.models.tooling import AgentSkillConfig
@@ -5,6 +7,8 @@ from app.services.agent_skill_service import AgentSkillService
 
 
 def test_select_skills_disabled():
+    """验证选择Skill禁用。"""
+    
     service = AgentSkillService()
     payload = service.select_skills(
         agent_name="LogAgent",
@@ -18,6 +22,8 @@ def test_select_skills_disabled():
 
 
 def test_select_skills_match_by_command(tmp_path):
+    """验证选择Skill匹配by命令。"""
+    
     skill_dir = tmp_path / "skills" / "log"
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
@@ -50,6 +56,8 @@ def test_select_skills_match_by_command(tmp_path):
 
 
 def test_select_skills_respects_allowed_agents(tmp_path):
+    """验证选择Skill遵守允许Agent。"""
+    
     skill_dir = tmp_path / "skills" / "db"
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
@@ -69,6 +77,8 @@ def test_select_skills_respects_allowed_agents(tmp_path):
 
 
 def test_select_skills_no_command_no_use(tmp_path):
+    """验证选择Skill无命令无use。"""
+    
     skill_dir = tmp_path / "skills" / "log"
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
@@ -88,6 +98,8 @@ def test_select_skills_no_command_no_use(tmp_path):
 
 
 def test_select_skills_explicit_hints(tmp_path):
+    """验证选择Skill显式提示。"""
+    
     skill_dir = tmp_path / "skills" / "log-forensics"
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(

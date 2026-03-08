@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-Generate a project introduction PPT for the current SRE RCA platform.
-"""
+"""generate项目介绍PPT脚本。"""
 
 from __future__ import annotations
 
@@ -34,6 +32,8 @@ COLORS = {
 
 
 def _set_background(slide, prs: Presentation) -> None:
+    """执行setbackground相关逻辑。"""
+    
     shape = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.RECTANGLE,
         0,
@@ -47,6 +47,8 @@ def _set_background(slide, prs: Presentation) -> None:
 
 
 def _add_header(slide, title: str, subtitle: str = "") -> None:
+    """执行add页眉相关逻辑。"""
+    
     bar = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(0.95)
     )
@@ -75,6 +77,8 @@ def _add_header(slide, title: str, subtitle: str = "") -> None:
 
 
 def _add_card(slide, left: float, top: float, width: float, height: float):
+    """执行add卡片相关逻辑。"""
+    
     card = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE,
         Inches(left),
@@ -101,6 +105,8 @@ def _set_textbox(
     color: RGBColor | None = None,
     bullet: bool = False,
 ) -> None:
+    """执行settextbox相关逻辑。"""
+    
     box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     tf = box.text_frame
     tf.clear()
@@ -117,6 +123,8 @@ def _set_textbox(
 
 
 def _slide_cover(prs: Presentation) -> None:
+    """执行slide封面相关逻辑。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_background(slide, prs)
     _add_header(slide, "生产问题根因分析系统", "LangGraph Multi-Agent")
@@ -160,6 +168,8 @@ def _slide_cover(prs: Presentation) -> None:
 
 
 def _slide_overview(prs: Presentation) -> None:
+    """执行slideoverview相关逻辑。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_background(slide, prs)
     _add_header(slide, "1. 项目定位与目标", "Why this system")
@@ -208,6 +218,8 @@ def _slide_overview(prs: Presentation) -> None:
 
 
 def _slide_architecture(prs: Presentation) -> None:
+    """执行slide架构相关逻辑。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_background(slide, prs)
     _add_header(slide, "2. 系统总体架构", "Frontend / Backend / Runtime")
@@ -262,6 +274,8 @@ def _slide_architecture(prs: Presentation) -> None:
 
 
 def _slide_agents(prs: Presentation) -> None:
+    """执行slideAgent相关逻辑。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_background(slide, prs)
     _add_header(slide, "3. 多 Agent 协同机制", "Commander + Specialist")
@@ -316,6 +330,8 @@ def _slide_agents(prs: Presentation) -> None:
 
 
 def _slide_flow(prs: Presentation) -> None:
+    """执行slideflow相关逻辑。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_background(slide, prs)
     _add_header(slide, "4. 端到端分析流程", "From Incident to Report")
@@ -358,6 +374,8 @@ def _slide_flow(prs: Presentation) -> None:
 
 
 def _slide_tools(prs: Presentation) -> None:
+    """执行slide工具相关逻辑。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_background(slide, prs)
     _add_header(slide, "5. 工具调用与审计机制", "Command-gated Tooling")
@@ -409,6 +427,8 @@ def _slide_tools(prs: Presentation) -> None:
 
 
 def _slide_frontend(prs: Presentation) -> None:
+    """执行slide前端相关逻辑。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_background(slide, prs)
     _add_header(slide, "6. 前端体验与页面结构", "Product Surface")
@@ -440,6 +460,8 @@ def _slide_frontend(prs: Presentation) -> None:
 
 
 def _slide_data_model(prs: Presentation) -> None:
+    """执行slidedatamodel相关逻辑。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_background(slide, prs)
     _add_header(slide, "7. 数据与状态管理", "Local-first")
@@ -491,6 +513,8 @@ def _slide_data_model(prs: Presentation) -> None:
 
 
 def _slide_api(prs: Presentation) -> None:
+    """执行slideAPI相关逻辑。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_background(slide, prs)
     _add_header(slide, "8. 对外接口与部署", "API / WS / Startup")
@@ -543,6 +567,8 @@ def _slide_api(prs: Presentation) -> None:
 
 
 def _slide_metrics(prs: Presentation) -> None:
+    """执行slidemetrics相关逻辑。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_background(slide, prs)
     _add_header(slide, "9. 质量保障与运营指标", "Benchmark + Governance")
@@ -592,6 +618,8 @@ def _slide_metrics(prs: Presentation) -> None:
 
 
 def _slide_roadmap(prs: Presentation) -> None:
+    """执行slide路线图相关逻辑。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_background(slide, prs)
     _add_header(slide, "10. 后续演进路线", "Near-term Roadmap")
@@ -631,6 +659,8 @@ def _slide_roadmap(prs: Presentation) -> None:
 
 
 def _slide_summary(prs: Presentation) -> None:
+    """执行slide摘要相关逻辑。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_background(slide, prs)
     _add_header(slide, "11. 总结", "What is delivered now")
@@ -666,6 +696,8 @@ def _slide_summary(prs: Presentation) -> None:
 
 
 def build_presentation(output_path: Path) -> Path:
+    """构建presentation相关产物或页面内容。"""
+    
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
@@ -689,6 +721,8 @@ def build_presentation(output_path: Path) -> Path:
 
 
 def main() -> None:
+    """执行脚本主流程，串联参数解析、内容生成与结果输出。"""
+    
     result = build_presentation(OUTPUT_PATH)
     print(f"Generated: {result}")
 

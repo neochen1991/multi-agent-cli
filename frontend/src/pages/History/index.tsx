@@ -32,7 +32,25 @@ const HistoryPage: React.FC = () => {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<Incident[]>([]);
-  const [sessionMeta, setSessionMeta] = useState<Record<string, { mode: string; currentPhase: string }>>({});
+  const [sessionMeta, setSessionMeta] = useState<
+    Record<
+      string,
+      {
+        mode: string;
+        currentPhase: string;
+        reviewStatus: string;
+        reviewReason: string;
+        confidence: number | null;
+        limitedAnalysis: boolean;
+        evidenceGap: boolean;
+        evidenceCoverage: {
+          ok: number;
+          degraded: number;
+          missing: number;
+        };
+      }
+    >
+  >({});
 
   const loadIncidents = async () => {
     setLoading(true);
@@ -49,13 +67,79 @@ const HistoryPage: React.FC = () => {
             debateApi.get(sid).catch(() => null),
           ),
         );
-        const nextMeta: Record<string, { mode: string; currentPhase: string }> = {};
+        const results = await Promise.all(
+          sessionIds.map((sid) =>
+            debateApi.getResult(sid).catch(() => null),
+          ),
+        );
+        const nextMeta: Record<
+          string,
+          {
+            mode: string;
+            currentPhase: string;
+            reviewStatus: string;
+            reviewReason: string;
+            confidence: number | null;
+            limitedAnalysis: boolean;
+            evidenceGap: boolean;
+            evidenceCoverage: {
+              ok: number;
+              degraded: number;
+              missing: number;
+            };
+          }
+        > = {};
         details.forEach((detail, idx) => {
           if (!detail) return;
           const sid = sessionIds[idx];
+          const result = results[idx];
           const mode = String((detail.context || {}).execution_mode || 'standard');
           const currentPhase = String(detail.current_phase || '');
-          nextMeta[sid] = { mode, currentPhase };
+          const humanReview =
+            detail.context && typeof detail.context.human_review === 'object' && !Array.isArray(detail.context.human_review)
+              ? (detail.context.human_review as Record<string, unknown>)
+              : {};
+          const eventLog = Array.isArray((detail.context || {}).event_log) ? ((detail.context || {}).event_log as Array<Record<string, any>>) : [];
+          const keyAgents = ['LogAgent', 'CodeAgent', 'DatabaseAgent', 'MetricsAgent'];
+          const latestEvidenceStatus = new Map<string, string>();
+          const limitedAnalysis = eventLog.some((row) => {
+            const event = row && typeof row.event === 'object' && !Array.isArray(row.event)
+              ? (row.event as Record<string, unknown>)
+              : {};
+            if (String(event.type || '').toLowerCase() === 'agent_command_feedback') {
+              const agentName = String(event.agent_name || event.agent || '').trim();
+              if (agentName && keyAgents.includes(agentName)) {
+                latestEvidenceStatus.set(agentName, String(event.evidence_status || '').toLowerCase().trim() || 'collected');
+              }
+            }
+            return String(event.type || '').toLowerCase() === 'agent_command_feedback'
+              && String(event.evidence_status || '').toLowerCase() === 'inferred_without_tool';
+          });
+          const evidenceCoverage = { ok: 0, degraded: 0, missing: 0 };
+          keyAgents.forEach((agentName) => {
+            const status = latestEvidenceStatus.get(agentName);
+            if (status === 'missing') {
+              evidenceCoverage.missing += 1;
+            } else if (status === 'degraded' || status === 'inferred_without_tool') {
+              evidenceCoverage.degraded += 1;
+            } else if (status) {
+              evidenceCoverage.ok += 1;
+            }
+          });
+          const riskFactors = Array.isArray(result?.risk_assessment?.risk_factors)
+            ? result?.risk_assessment?.risk_factors
+            : [];
+          const evidenceGap = riskFactors.some((item: string) => String(item || '').includes('关键证据不足'));
+          nextMeta[sid] = {
+            mode,
+            currentPhase,
+            reviewStatus: String(humanReview.status || ''),
+            reviewReason: String(humanReview.reason || ''),
+            confidence: typeof result?.confidence === 'number' ? result.confidence : null,
+            limitedAnalysis,
+            evidenceGap,
+            evidenceCoverage,
+          };
         });
         setSessionMeta(nextMeta);
       } else {
@@ -105,8 +189,39 @@ const HistoryPage: React.FC = () => {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 120,
-      render: (status: string) => <Tag color={statusColor[status] || 'default'}>{status}</Tag>,
+      width: 160,
+      render: (status: string, record) => {
+        const sid = String(record.debate_session_id || '');
+        const reviewStatus = sid ? String(sessionMeta[sid]?.reviewStatus || '').toLowerCase() : '';
+        if (status === 'waiting' && reviewStatus === 'pending') {
+          return <Tag color="warning">waiting_review</Tag>;
+        }
+        if (status === 'waiting' && reviewStatus === 'approved') {
+          return <Tag color="processing">waiting_resume</Tag>;
+        }
+        return <Tag color={statusColor[status] || 'default'}>{status}</Tag>;
+      },
+    },
+    {
+      title: '审核',
+      key: 'review',
+      width: 180,
+      render: (_: unknown, record) => {
+        const sid = String(record.debate_session_id || '');
+        const reviewStatus = sid ? String(sessionMeta[sid]?.reviewStatus || '').toLowerCase() : '';
+        const reviewReason = sid ? String(sessionMeta[sid]?.reviewReason || '') : '';
+        if (!reviewStatus) return '-';
+        if (reviewStatus === 'pending') {
+          return <Tag color="warning" title={reviewReason || '等待人工审核'}>待人工审核</Tag>;
+        }
+        if (reviewStatus === 'approved') {
+          return <Tag color="processing" title={reviewReason || '审核已通过'}>已批准待恢复</Tag>;
+        }
+        if (reviewStatus === 'rejected') {
+          return <Tag color="error" title={reviewReason || '审核已驳回'}>人工已驳回</Tag>;
+        }
+        return <Tag>{reviewStatus}</Tag>;
+      },
     },
     {
       title: '模式',
@@ -116,6 +231,46 @@ const HistoryPage: React.FC = () => {
         const sid = String(record.debate_session_id || '');
         const mode = sid ? String(sessionMeta[sid]?.mode || 'standard') : '-';
         return <Tag>{mode}</Tag>;
+      },
+    },
+    {
+      title: '分析质量',
+      key: 'quality',
+      width: 220,
+      render: (_: unknown, record) => {
+        const sid = String(record.debate_session_id || '');
+        if (!sid || !sessionMeta[sid]) return '-';
+        const meta = sessionMeta[sid];
+        const confidence =
+          typeof meta.confidence === 'number' ? `${(meta.confidence * 100).toFixed(1)}%` : '-';
+        return (
+          <div className="history-quality-cell">
+            <Space wrap size={4}>
+              <Tag>{`置信度 ${confidence}`}</Tag>
+              {meta.limitedAnalysis ? <Tag color="gold">受限分析</Tag> : null}
+              {meta.evidenceGap ? <Tag color="volcano">关键证据不足</Tag> : null}
+            </Space>
+            {(meta.evidenceCoverage.ok + meta.evidenceCoverage.degraded + meta.evidenceCoverage.missing) > 0 ? (
+              <div className="history-evidence-coverage">
+                <div className="history-evidence-coverage-bar">
+                  <div
+                    className="history-evidence-coverage-segment ok"
+                    style={{ width: `${(meta.evidenceCoverage.ok / (meta.evidenceCoverage.ok + meta.evidenceCoverage.degraded + meta.evidenceCoverage.missing)) * 100}%` }}
+                  />
+                  <div
+                    className="history-evidence-coverage-segment degraded"
+                    style={{ width: `${(meta.evidenceCoverage.degraded / (meta.evidenceCoverage.ok + meta.evidenceCoverage.degraded + meta.evidenceCoverage.missing)) * 100}%` }}
+                  />
+                  <div
+                    className="history-evidence-coverage-segment missing"
+                    style={{ width: `${(meta.evidenceCoverage.missing / (meta.evidenceCoverage.ok + meta.evidenceCoverage.degraded + meta.evidenceCoverage.missing)) * 100}%` }}
+                  />
+                </div>
+                <Text type="secondary">{`证据覆盖 成功${meta.evidenceCoverage.ok}/受限${meta.evidenceCoverage.degraded}/缺失${meta.evidenceCoverage.missing}`}</Text>
+              </div>
+            ) : null}
+          </div>
+        );
       },
     },
     {

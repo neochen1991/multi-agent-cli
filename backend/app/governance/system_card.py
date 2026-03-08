@@ -9,6 +9,7 @@ from app.config import settings
 
 
 def build_system_card() -> Dict[str, Any]:
+    """构建构建系统卡片，供后续节点或调用方直接使用。"""
     return {
         "generated_at": datetime.utcnow().isoformat(),
         "system": {
@@ -51,6 +52,7 @@ def build_system_card() -> Dict[str, Any]:
 
 def estimate_cost(case_count: int, avg_tokens: int = 3500) -> Dict[str, Any]:
     # 占位估算：用于治理页趋势展示（不绑定特定供应商计费）
+    """计算estimatecost，为治理、裁决或展示提供量化依据。"""
     total_tokens = max(0, int(case_count or 0)) * max(0, int(avg_tokens or 0))
     return {
         "cases": max(0, int(case_count or 0)),

@@ -38,6 +38,7 @@ class AssetCollectionService:
     """资产采集服务"""
     
     def __init__(self):
+        """初始化代码仓目录、设计文档目录和日志解析工具。"""
         self.code_repos_path = os.getenv("CODE_REPOS_PATH", "/tmp/repos")
         self.design_docs_path = os.getenv("DESIGN_DOCS_PATH", "/tmp/design_docs")
         self._log_parser = LogParserTool()
@@ -97,7 +98,7 @@ class AssetCollectionService:
         log_content: str,
         event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Optional[RuntimeAsset]:
-        """采集日志资产"""
+        """采集日志资产，并尽量解析为结构化字段。"""
         try:
             # 使用 LangGraph 多 Agent 分析日志
             parsed_data = await self._parse_log_with_ai(
@@ -123,7 +124,7 @@ class AssetCollectionService:
         file_path: str,
         event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Optional[RuntimeAsset]:
-        """从文件采集日志资产"""
+        """从文件读取日志后复用日志资产采集逻辑。"""
         try:
             with open(file_path, 'r') as f:
                 log_content = f.read()
@@ -133,7 +134,7 @@ class AssetCollectionService:
             return None
     
     async def _collect_metrics_asset(self, metrics_data: Dict[str, Any]) -> Optional[RuntimeAsset]:
-        """采集指标资产"""
+        """采集指标资产。"""
         try:
             asset = RuntimeAsset(
                 id=f"rt_metric_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
@@ -148,7 +149,7 @@ class AssetCollectionService:
             return None
     
     async def _collect_trace_asset(self, trace_data: Dict[str, Any]) -> Optional[RuntimeAsset]:
-        """采集链路追踪资产"""
+        """采集链路追踪资产。"""
         try:
             asset = RuntimeAsset(
                 id=f"rt_trace_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
@@ -167,7 +168,7 @@ class AssetCollectionService:
         log_content: str,
         event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
-        """使用 LangGraph 多 Agent 解析日志"""
+        """使用 LLM 增强日志解析；失败时回退到本地正则解析。"""
         local_parsed = await self._parse_log_locally(log_content)
         try:
             # 创建会话
@@ -831,6 +832,7 @@ class AssetCollectionService:
         event_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
         event: Dict[str, Any],
     ) -> None:
+        """执行发射事件，并同步更新运行时状态、持久化结果或审计轨迹。"""
         if not event_callback:
             return
         try:

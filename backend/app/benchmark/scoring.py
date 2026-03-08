@@ -7,11 +7,13 @@ from typing import Any, Dict, Iterable, List
 
 
 def _tokenize(text: str) -> List[str]:
+    """执行分词相关逻辑，并为当前模块提供可复用的处理能力。"""
     parts = re.split(r"[^a-zA-Z0-9\u4e00-\u9fff]+", str(text or "").lower())
     return [part for part in parts if part]
 
 
 def keyword_overlap_score(expected: str, actual: str) -> float:
+    """执行keywordoverlap评分相关逻辑，并为当前模块提供可复用的处理能力。"""
     e = set(_tokenize(expected))
     a = set(_tokenize(actual))
     if not e:
@@ -29,6 +31,7 @@ def evaluate_case(
     duration_ms: float,
     status: str,
 ) -> Dict[str, Any]:
+    """执行evaluate案例相关逻辑，并为当前模块提供可复用的处理能力。"""
     overlap = keyword_overlap_score(expected_root_cause, predicted_root_cause)
     is_top1 = overlap >= 0.4
     candidate_hits = 0
@@ -47,6 +50,7 @@ def evaluate_case(
 
 
 def aggregate_cases(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    """执行aggregatecases相关逻辑，并为当前模块提供可复用的处理能力。"""
     items = list(rows)
     if not items:
         return {
@@ -112,6 +116,7 @@ def aggregate_cases(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _percentile(values: List[float], percentile: int) -> float:
+    """执行分位数相关逻辑，并为当前模块提供可复用的处理能力。"""
     if not values:
         return 0.0
     sorted_values = sorted(values)

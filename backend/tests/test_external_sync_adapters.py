@@ -1,4 +1,4 @@
-"""Tests for external sync dry-run adapters."""
+"""test外部同步adapters相关测试。"""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from app.services.governance_ops_service import GovernanceOpsService
 
 
 def test_jira_adapter_builds_issue_payload() -> None:
+    """验证jira适配器构建issue载荷。"""
+    
     adapter = JiraAdapter()
     built = adapter.build(
         action="create_issue",
@@ -27,6 +29,8 @@ def test_jira_adapter_builds_issue_payload() -> None:
 
 
 def test_pagerduty_adapter_builds_trigger_payload() -> None:
+    """验证pagerduty适配器构建trigger载荷。"""
+    
     adapter = PagerDutyAdapter()
     built = adapter.build(
         action="create_incident",
@@ -39,6 +43,8 @@ def test_pagerduty_adapter_builds_trigger_payload() -> None:
 
 @pytest.mark.asyncio
 async def test_governance_sync_external_includes_adapter_payload(tmp_path, monkeypatch) -> None:
+    """验证治理同步外部包含适配器载荷。"""
+    
     monkeypatch.setattr(settings, "LOCAL_STORE_DIR", str(tmp_path), raising=False)
     service = GovernanceOpsService()
     record = await service.sync_external(

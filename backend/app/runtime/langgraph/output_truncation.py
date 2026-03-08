@@ -15,11 +15,13 @@ class OutputReferenceStore:
     """Persist full outputs locally and return lightweight reference IDs."""
 
     def __init__(self) -> None:
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
         root = Path(settings.LOCAL_STORE_DIR)
         self._dir = root / "output_refs"
         self._dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, ref_id: str) -> Path:
+        """执行path相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._dir / f"{ref_id}.json"
 
     def save(
@@ -30,6 +32,7 @@ class OutputReferenceStore:
         category: str = "",
         metadata: Dict[str, Any] | None = None,
     ) -> str:
+        """执行保存，并同步更新运行时状态、持久化结果或审计轨迹。"""
         ref_id = f"out_{uuid4().hex[:16]}"
         payload = {
             "ref_id": ref_id,
@@ -43,6 +46,7 @@ class OutputReferenceStore:
         return ref_id
 
     def load(self, ref_id: str) -> Dict[str, Any] | None:
+        """负责加载，并返回后续流程可直接消费的数据结果。"""
         path = self._path(ref_id)
         if not path.exists():
             return None
@@ -66,6 +70,7 @@ def truncate_text(
     category: str = "",
     metadata: Dict[str, Any] | None = None,
 ) -> str:
+    """执行truncate文本，控制上下文体积并减少无效负载。"""
     text = str(value or "")
     if len(text) <= max_chars:
         return text
@@ -86,6 +91,7 @@ def truncate_payload(
     category: str = "",
     metadata: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
+    """执行truncate载荷，控制上下文体积并减少无效负载。"""
     result: Dict[str, Any] = {}
     refs: Dict[str, str] = {}
     for key, value in (payload or {}).items():
@@ -112,4 +118,5 @@ def truncate_payload(
 
 
 def get_output_reference(ref_id: str) -> Dict[str, Any] | None:
+    """负责获取outputreference，并返回后续流程可直接消费的数据结果。"""
     return output_reference_store.load(ref_id)

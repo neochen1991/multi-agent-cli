@@ -10,6 +10,7 @@ class SessionCompaction:
 
     @staticmethod
     def compact_messages(messages: List[Dict[str, Any]], *, max_items: int = 10, max_chars: int = 1600) -> List[Dict[str, Any]]:
+        """执行压缩messages，控制上下文体积并减少无效负载。"""
         subset = list(messages or [])[-max(1, int(max_items))]
         total = 0
         compacted: List[Dict[str, Any]] = []
@@ -27,6 +28,7 @@ class SessionCompaction:
 
     @staticmethod
     def compact_context(context: Dict[str, Any], *, max_len: int = 1400) -> Dict[str, Any]:
+        """执行压缩上下文，控制上下文体积并减少无效负载。"""
         result: Dict[str, Any] = {}
         for key, value in (context or {}).items():
             if isinstance(value, str):

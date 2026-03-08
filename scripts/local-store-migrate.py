@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-本地文件仓储迁移脚本
-
-用途：
-1. 为历史文件补充 schema_version
-2. 自动创建 .bak 备份
-"""
+"""本地存储迁移脚本。"""
 
 from __future__ import annotations
 
@@ -20,6 +14,8 @@ TARGET_SCHEMA_VERSION = 1
 
 
 def migrate_file(path: Path) -> None:
+    """迁移单个本地存储文件的结构，兼容新的字段布局。"""
+    
     if not path.exists():
         print(f"[skip] {path} not found")
         return
@@ -47,6 +43,8 @@ def migrate_file(path: Path) -> None:
 
 
 def main() -> None:
+    """执行脚本主流程，串联参数解析、内容生成与结果输出。"""
+    
     store_dir = Path(os.getenv("LOCAL_STORE_DIR", DEFAULT_STORE_DIR))
     print(f"[info] migrate local store dir={store_dir}")
     store_dir.mkdir(parents=True, exist_ok=True)

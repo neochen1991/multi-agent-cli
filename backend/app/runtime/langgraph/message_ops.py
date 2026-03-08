@@ -8,6 +8,7 @@ from app.runtime.messages import AgentEvidence
 
 
 def message_signature(msg: Any) -> str:
+    """执行消息signature相关逻辑，并为当前模块提供可复用的处理能力。"""
     content = getattr(msg, "content", "")
     if isinstance(content, list):
         content_text = " ".join(
@@ -27,6 +28,7 @@ def message_signature(msg: Any) -> str:
 
 
 def dedupe_new_messages(existing_messages: Sequence[Any], new_messages: Sequence[Any]) -> List[Any]:
+    """执行dedupenewmessages相关逻辑，并为当前模块提供可复用的处理能力。"""
     if not new_messages:
         return []
     seen = {message_signature(msg) for msg in list(existing_messages or [])[-80:]}
@@ -41,6 +43,7 @@ def dedupe_new_messages(existing_messages: Sequence[Any], new_messages: Sequence
 
 
 def messages_to_cards(messages: Sequence[Any], *, limit: int = 12) -> List[AgentEvidence]:
+    """执行messagestocards相关逻辑，并为当前模块提供可复用的处理能力。"""
     cards: List[AgentEvidence] = []
     for msg in list(messages or [])[-max(1, int(limit or 1)) :]:
         additional = getattr(msg, "additional_kwargs", {}) or {}
@@ -88,6 +91,7 @@ def merge_round_and_message_cards(
     *,
     limit: int = 20,
 ) -> List[AgentEvidence]:
+    """执行合并roundand消息cards相关逻辑，并为当前模块提供可复用的处理能力。"""
     base = list(round_cards or [])
     if not base:
         return list(message_cards or [])[-max(1, int(limit or 1)) :]
@@ -118,6 +122,7 @@ def prune_history_cards(
     *,
     limit: int = 20,
 ) -> tuple[List[AgentEvidence], dict[str, int]]:
+    """执行裁剪历史cards，控制上下文体积并减少无效负载。"""
     cards = list(history_cards or [])
     cap = max(1, int(limit or 1))
     if len(cards) <= cap:

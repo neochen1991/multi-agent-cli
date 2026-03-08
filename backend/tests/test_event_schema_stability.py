@@ -1,7 +1,11 @@
+"""test事件schemastability相关测试。"""
+
 from app.core.event_schema import enrich_event
 
 
 def test_event_id_is_stable_for_same_payload_without_event_id():
+    """验证事件IDis稳定for相同载荷无事件ID。"""
+    
     base = {
         "type": "agent_round",
         "timestamp": "2026-03-01T08:00:00.000000",
@@ -19,6 +23,8 @@ def test_event_id_is_stable_for_same_payload_without_event_id():
 
 
 def test_event_id_keeps_explicit_value_when_provided():
+    """验证事件ID保留显式价值当已提供。"""
+    
     payload = enrich_event(
         {
             "type": "x",

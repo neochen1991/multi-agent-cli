@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 
 def normalize_evidence_items(raw_items: Any) -> List[Dict[str, Any]]:
+    """对输入执行归一化evidenceitems，将原始数据整理为稳定的内部结构。"""
     items = raw_items if isinstance(raw_items, list) else []
     normalized: List[Dict[str, Any]] = []
     for index, item in enumerate(items, start=1):

@@ -19,6 +19,7 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
+    """按需解析延迟属性，并兼容运行时动态访问场景。"""
     if name in {"LangGraphRuntimeOrchestrator", "langgraph_runtime_orchestrator"}:
         mod = import_module("app.runtime.langgraph_runtime")
         return getattr(mod, name)

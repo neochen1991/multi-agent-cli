@@ -1,4 +1,4 @@
-"""Tests for LangGraph parallel dispatch helpers."""
+"""testlanggraph并行分发相关测试。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from app.runtime.langgraph.nodes.agent_subgraph import build_parallel_route_func
 
 
 def test_analysis_parallel_returns_send_objects() -> None:
+    """验证分析并行返回sendobjects。"""
+    
     router = build_parallel_route_function(
         orchestrator=object(),
         parallel_agents=["LogAgent", "CodeAgent", "DomainAgent"],
@@ -32,6 +34,8 @@ def test_analysis_parallel_returns_send_objects() -> None:
 
 
 def test_parallel_route_fallback_uses_default_agents() -> None:
+    """验证并行路由回退使用默认Agent。"""
+    
     router = build_parallel_route_function(
         orchestrator=object(),
         parallel_agents=["LogAgent", "CodeAgent"],

@@ -30,6 +30,7 @@ RCA_SKILL_TEMPLATE: Dict[str, Any] = {
 
 
 def build_rca_skill_context(*, context: Dict[str, Any], loop_round: int, max_rounds: int) -> Dict[str, Any]:
+    """构建构建rcaSkill上下文，供后续节点或调用方直接使用。"""
     incident = context.get("incident") if isinstance(context.get("incident"), dict) else {}
     interface_mapping = context.get("interface_mapping") if isinstance(context.get("interface_mapping"), dict) else {}
     debate_cfg = context.get("debate_config") if isinstance(context.get("debate_config"), dict) else {}

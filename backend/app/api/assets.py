@@ -1,6 +1,6 @@
-"""
-三态资产 API
-Tri-State Asset API Endpoints
+"""三态资产 API。
+
+覆盖运行态、开发态、设计态资产，以及责任田映射、案例库、资产融合和接口定位等能力。
 """
 
 from datetime import datetime
@@ -25,7 +25,7 @@ router = APIRouter()
 # ==================== API 数据模型 ====================
 
 class RuntimeAssetCreate(BaseModel):
-    """创建运行态资产请求"""
+    """创建运行态资产请求。"""
     type: str = Field(..., description="资产类型: log/metric/trace/alert/exception")
     source: str = Field(..., description="数据来源")
     raw_content: Optional[str] = Field(None, description="原始内容")
@@ -36,7 +36,7 @@ class RuntimeAssetCreate(BaseModel):
 
 
 class RuntimeAssetResponse(BaseModel):
-    """运行态资产响应"""
+    """运行态资产响应。"""
     id: str
     type: str
     source: str
@@ -47,7 +47,7 @@ class RuntimeAssetResponse(BaseModel):
 
 
 class DevAssetCreate(BaseModel):
-    """创建开发态资产请求"""
+    """创建开发态资产请求。"""
     type: str = Field(..., description="资产类型: code/config/test/ci")
     name: str = Field(..., description="资产名称")
     path: str = Field(..., description="文件路径")
@@ -59,7 +59,7 @@ class DevAssetCreate(BaseModel):
 
 
 class DevAssetResponse(BaseModel):
-    """开发态资产响应"""
+    """开发态资产响应。"""
     id: str
     type: str
     name: str
@@ -71,7 +71,7 @@ class DevAssetResponse(BaseModel):
 
 
 class DesignAssetCreate(BaseModel):
-    """创建设计态资产请求"""
+    """创建设计态资产请求。"""
     type: str = Field(..., description="资产类型: ddd_document/api_spec/db_schema/architecture/case_library")
     name: str = Field(..., description="资产名称")
     content: Optional[str] = Field(None, description="内容")
@@ -82,7 +82,7 @@ class DesignAssetCreate(BaseModel):
 
 
 class DesignAssetResponse(BaseModel):
-    """设计态资产响应"""
+    """设计态资产响应。"""
     id: str
     type: str
     name: str
@@ -93,7 +93,7 @@ class DesignAssetResponse(BaseModel):
 
 
 class DomainModelResponse(BaseModel):
-    """领域模型响应"""
+    """领域模型响应。"""
     name: str
     description: Optional[str]
     aggregates: List[str]
@@ -104,7 +104,7 @@ class DomainModelResponse(BaseModel):
 
 
 class CaseCreate(BaseModel):
-    """创建案例请求"""
+    """创建案例请求。"""
     title: str = Field(..., description="案例标题")
     description: str = Field(..., description="案例描述")
     incident_type: str = Field(..., description="故障类型")
@@ -116,7 +116,7 @@ class CaseCreate(BaseModel):
 
 
 class CaseResponse(BaseModel):
-    """案例响应"""
+    """案例响应。"""
     id: str
     title: str
     description: str
@@ -130,13 +130,13 @@ class CaseResponse(BaseModel):
 
 
 class AssetListResponse(BaseModel):
-    """资产列表响应"""
+    """通用资产列表响应。"""
     items: List[Any]
     total: int
 
 
 class AssetFusionResponse(BaseModel):
-    """资产融合结果响应"""
+    """三态资产融合结果响应。"""
     incident_id: str
     debate_session_id: str
     runtime_assets: List[Dict[str, Any]]
@@ -146,13 +146,13 @@ class AssetFusionResponse(BaseModel):
 
 
 class InterfaceLocateRequest(BaseModel):
-    """接口定位请求"""
+    """接口定位请求，用于从日志/现象映射责任田和关联资产。"""
     log_content: str = Field(..., description="接口报错日志")
     symptom: Optional[str] = Field(None, description="故障现象描述")
 
 
 class InterfaceLocateResponse(BaseModel):
-    """接口定位响应"""
+    """接口定位响应，返回责任田命中结果和衍生线索。"""
     matched: bool
     confidence: float
     reason: str
@@ -171,6 +171,8 @@ class InterfaceLocateResponse(BaseModel):
 
 
 class ResponsibilityAssetRecord(BaseModel):
+    """责任田资产记录。"""
+
     asset_id: str
     feature: str
     domain: str
@@ -190,6 +192,8 @@ class ResponsibilityAssetRecord(BaseModel):
 
 
 class ResponsibilityAssetUpsertRequest(BaseModel):
+    """手工新增或更新责任田资产记录的请求体。"""
+
     asset_id: Optional[str] = None
     feature: str
     domain: str
@@ -205,6 +209,8 @@ class ResponsibilityAssetUpsertRequest(BaseModel):
 
 
 class ResponsibilityAssetUploadResponse(BaseModel):
+    """责任田资产批量导入结果。"""
+
     file_name: str
     replace_existing: bool
     imported: int
@@ -222,7 +228,7 @@ class ResponsibilityAssetUploadResponse(BaseModel):
     description="创建新的运行态资产（日志、指标、链路等）"
 )
 async def create_runtime_asset(request: RuntimeAssetCreate):
-    """创建运行态资产"""
+    """创建运行态资产。"""
     asset = await asset_service.create_runtime_asset(
         type=RuntimeAssetType(request.type),
         source=request.source,
@@ -254,7 +260,7 @@ async def list_runtime_assets(
     type: Optional[str] = Query(None, description="按类型筛选"),
     service_name: Optional[str] = Query(None, description="按服务名称筛选"),
 ):
-    """获取运行态资产列表"""
+    """查询运行态资产列表，并支持按类型和服务过滤。"""
     type_filter = RuntimeAssetType(type) if type else None
     assets = await asset_service.list_runtime_assets(
         type=type_filter,
@@ -287,7 +293,7 @@ async def list_runtime_assets(
     description="创建新的开发态资产（代码、配置等）"
 )
 async def create_dev_asset(request: DevAssetCreate):
-    """创建开发态资产"""
+    """创建开发态资产。"""
     asset = await asset_service.create_dev_asset(
         type=DevAssetType(request.type),
         name=request.name,
@@ -321,7 +327,7 @@ async def list_dev_assets(
     type: Optional[str] = Query(None, description="按类型筛选"),
     language: Optional[str] = Query(None, description="按语言筛选"),
 ):
-    """获取开发态资产列表"""
+    """查询开发态资产列表，并支持按类型和语言过滤。"""
     type_filter = DevAssetType(type) if type else None
     assets = await asset_service.list_dev_assets(
         type=type_filter,
@@ -354,7 +360,7 @@ async def list_dev_assets(
 async def search_code(
     q: str = Query(..., description="搜索关键词"),
 ):
-    """搜索代码"""
+    """按关键字搜索开发态代码资产。"""
     assets = await asset_service.search_code(q)
     
     items = [
@@ -384,7 +390,7 @@ async def search_code(
     description="创建新的设计态资产（DDD文档、API规范等）"
 )
 async def create_design_asset(request: DesignAssetCreate):
-    """创建设计态资产"""
+    """创建设计态资产。"""
     asset = await asset_service.create_design_asset(
         type=DesignAssetType(request.type),
         name=request.name,
@@ -416,7 +422,7 @@ async def list_design_assets(
     type: Optional[str] = Query(None, description="按类型筛选"),
     domain: Optional[str] = Query(None, description="按领域筛选"),
 ):
-    """获取设计态资产列表"""
+    """查询设计态资产列表，并支持按类型和领域过滤。"""
     type_filter = DesignAssetType(type) if type else None
     assets = await asset_service.list_design_assets(
         type=type_filter,
@@ -448,7 +454,7 @@ async def list_design_assets(
     description="获取所有领域模型"
 )
 async def list_domain_models():
-    """获取领域模型列表"""
+    """列出所有领域模型定义。"""
     models = await asset_service.list_domain_models()
     
     return [
@@ -472,7 +478,7 @@ async def list_domain_models():
     description="根据名称获取领域模型详情"
 )
 async def get_domain_model(name: str):
-    """获取领域模型详情"""
+    """按名称读取单个领域模型。"""
     model = await asset_service.get_domain_model(name)
     
     if not model:
@@ -502,7 +508,7 @@ async def get_domain_model(name: str):
     description="创建新的故障案例"
 )
 async def create_case(request: CaseCreate):
-    """创建案例"""
+    """创建案例库条目。"""
     case = await asset_service.create_case(
         title=request.title,
         description=request.description,
@@ -538,7 +544,7 @@ async def list_cases(
     incident_type: Optional[str] = Query(None, description="按故障类型筛选"),
     tag: Optional[str] = Query(None, description="按标签筛选"),
 ):
-    """获取案例列表"""
+    """查询案例库列表。"""
     cases = await asset_service.list_cases(
         incident_type=incident_type,
         tag=tag
@@ -574,7 +580,7 @@ async def search_similar_cases(
     exception_type: Optional[str] = Query(None, description="异常类型"),
     limit: int = Query(5, ge=1, le=20, description="返回数量"),
 ):
-    """搜索相似案例"""
+    """按症状和异常类型搜索相似案例。"""
     symptom_list = [s.strip() for s in symptoms.split(",")]
     
     cases = await asset_service.search_similar_cases(
@@ -609,6 +615,7 @@ async def search_similar_cases(
     description="按故障事件ID获取三态资产融合结果及其关联关系"
 )
 async def get_asset_fusion(incident_id: str):
+    """读取某个 incident 在会话上下文中的三态资产融合结果。"""
     incident = await incident_service.get_incident(incident_id)
     if not incident:
         raise HTTPException(
@@ -657,6 +664,7 @@ async def get_asset_fusion(incident_id: str):
     description="根据接口报错日志/现象，映射到领域、聚合根、代码、数据库表、设计文档与运维案例"
 )
 async def locate_by_interface(request: InterfaceLocateRequest):
+    """根据日志和症状定位责任田上下文。"""
     result = await asset_service.locate_interface_context(
         log_content=request.log_content,
         symptom=request.symptom,
@@ -670,6 +678,7 @@ async def locate_by_interface(request: InterfaceLocateRequest):
     description="返回本地优先、可插拔外部源的资源入口清单",
 )
 async def list_asset_resource_sources():
+    """列出资产知识来源入口，包括本地责任田资产统计。"""
     payload = asset_knowledge_service.list_resource_sources()
     payload["responsibility_assets"] = await asset_service.responsibility_asset_stats()
     return payload
@@ -681,6 +690,7 @@ async def list_asset_resource_sources():
     description="返回责任田资产维护建议字段与别名映射",
 )
 async def get_responsibility_schema():
+    """返回责任田资产模板字段与导入建议。"""
     return asset_service.responsibility_asset_schema()
 
 
@@ -696,6 +706,7 @@ async def list_responsibility_assets(
     aggregate: Optional[str] = Query(None, description="按聚合根筛选"),
     api: Optional[str] = Query(None, description="按接口关键词筛选"),
 ):
+    """查询责任田资产记录。"""
     rows = await asset_service.list_responsibility_assets(
         query=q,
         domain=domain,
@@ -712,6 +723,7 @@ async def list_responsibility_assets(
     description="手工维护责任田资产单行记录",
 )
 async def upsert_responsibility_asset(request: ResponsibilityAssetUpsertRequest):
+    """手工新增或更新一条责任田资产记录。"""
     row = await asset_service.upsert_responsibility_asset(request.model_dump(mode="json"))
     return ResponsibilityAssetRecord(**row)
 
@@ -722,6 +734,7 @@ async def upsert_responsibility_asset(request: ResponsibilityAssetUpsertRequest)
     description="按 asset_id 删除责任田资产记录",
 )
 async def delete_responsibility_asset(asset_id: str):
+    """按 asset_id 删除责任田资产。"""
     ok = await asset_service.delete_responsibility_asset(asset_id)
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"asset {asset_id} not found")
@@ -738,6 +751,7 @@ async def upload_responsibility_assets(
     file: UploadFile = File(..., description="Excel/CSV 文件"),
     replace_existing: bool = Form(True, description="是否替换现有数据"),
 ):
+    """上传 Excel/CSV 并批量导入责任田资产。"""
     file_name = str(file.filename or "").strip()
     if not file_name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file name is required")
@@ -773,7 +787,7 @@ async def link_assets(
     dev_asset_id: str = Query(..., description="开发态资产ID"),
     design_asset_id: Optional[str] = Query(None, description="设计态资产ID"),
 ):
-    """关联三态资产"""
+    """手工建立运行态、开发态、设计态资产的关联关系。"""
     success = await asset_service.link_assets(
         runtime_asset_id=runtime_asset_id,
         dev_asset_id=dev_asset_id,
@@ -795,6 +809,7 @@ def _build_fusion_relationships(
     design_assets: List[Dict[str, Any]],
     interface_mapping: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
+    """根据运行态异常、代码类和责任田映射生成可展示的三态资产关系边。"""
     relationships: List[Dict[str, Any]] = []
 
     dev_by_class: Dict[str, Dict[str, Any]] = {}
@@ -853,7 +868,7 @@ def _build_fusion_relationships(
         endpoint_id = f"{endpoint.get('method', 'ANY')} {endpoint.get('path', '-')}"
 
     if endpoint_id:
-        # 反向追溯：数据库表 -> 接口
+        # 已定位到接口后，把数据库表、代码线索、设计文档等都回挂到这个接口节点上，供前端画关系图。
         for table in mapping.get("db_tables", []) or []:
             relationships.append(
                 {

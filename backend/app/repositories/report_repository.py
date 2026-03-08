@@ -16,10 +16,12 @@ class ReportRepository(ABC):
 
     @abstractmethod
     async def save(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        """保存一份报告版本。"""
         pass
 
     @abstractmethod
     async def get_latest(self, incident_id: str) -> Optional[Dict[str, Any]]:
+        """获取指定故障最新一版报告。"""
         pass
 
     @abstractmethod
@@ -28,18 +30,22 @@ class ReportRepository(ABC):
         incident_id: str,
         format: str,
     ) -> Optional[Dict[str, Any]]:
+        """获取指定格式的最新报告，常用于 markdown/html/pdf 回读。"""
         pass
 
     @abstractmethod
     async def list_by_incident(self, incident_id: str) -> List[Dict[str, Any]]:
+        """列出同一故障的全部历史报告版本。"""
         pass
 
     @abstractmethod
     async def save_share_token(self, token: str, incident_id: str) -> None:
+        """记录分享 token 到 incident 的映射关系。"""
         pass
 
     @abstractmethod
     async def get_incident_id_by_share_token(self, token: str) -> Optional[str]:
+        """根据分享 token 反查对应 incident。"""
         pass
 
 
@@ -47,15 +53,18 @@ class InMemoryReportRepository(ReportRepository):
     """基于内存的报告仓储"""
 
     def __init__(self):
+        """初始化内存版报告列表和分享 token 索引。"""
         self._reports: Dict[str, List[Dict[str, Any]]] = {}
         self._share_tokens: Dict[str, str] = {}
 
     async def save(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        """执行保存，并同步更新运行时状态、持久化结果或审计轨迹。"""
         incident_id = report["incident_id"]
         self._reports.setdefault(incident_id, []).append(report)
         return report
 
     async def get_latest(self, incident_id: str) -> Optional[Dict[str, Any]]:
+        """负责获取最新，并返回后续流程可直接消费的数据结果。"""
         items = self._reports.get(incident_id, [])
         return items[-1] if items else None
 
@@ -64,6 +73,7 @@ class InMemoryReportRepository(ReportRepository):
         incident_id: str,
         format: str,
     ) -> Optional[Dict[str, Any]]:
+        """负责获取最新byformat，并返回后续流程可直接消费的数据结果。"""
         items = self._reports.get(incident_id, [])
         for item in reversed(items):
             if item.get("format") == format:
@@ -71,12 +81,15 @@ class InMemoryReportRepository(ReportRepository):
         return None
 
     async def list_by_incident(self, incident_id: str) -> List[Dict[str, Any]]:
+        """负责列出by故障，并返回后续流程可直接消费的数据结果。"""
         return list(self._reports.get(incident_id, []))
 
     async def save_share_token(self, token: str, incident_id: str) -> None:
+        """执行保存sharetoken，并同步更新运行时状态、持久化结果或审计轨迹。"""
         self._share_tokens[token] = incident_id
 
     async def get_incident_id_by_share_token(self, token: str) -> Optional[str]:
+        """负责获取故障idbysharetoken，并返回后续流程可直接消费的数据结果。"""
         return self._share_tokens.get(token)
 
 
@@ -84,6 +97,7 @@ class FileReportRepository(ReportRepository):
     """基于本地 JSON 文件的报告仓储"""
 
     def __init__(self, base_dir: Optional[str] = None):
+        """初始化文件版报告仓储并恢复报告历史与分享 token。"""
         root = Path(base_dir or settings.LOCAL_STORE_DIR)
         root.mkdir(parents=True, exist_ok=True)
         self._file = root / "reports.json"
@@ -93,6 +107,7 @@ class FileReportRepository(ReportRepository):
         self._load_from_disk()
 
     async def save(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        """执行保存，并同步更新运行时状态、持久化结果或审计轨迹。"""
         async with self._lock:
             incident_id = report["incident_id"]
             self._reports.setdefault(incident_id, []).append(report)
@@ -100,6 +115,7 @@ class FileReportRepository(ReportRepository):
             return report
 
     async def get_latest(self, incident_id: str) -> Optional[Dict[str, Any]]:
+        """负责获取最新，并返回后续流程可直接消费的数据结果。"""
         async with self._lock:
             items = self._reports.get(incident_id, [])
             return items[-1] if items else None
@@ -109,6 +125,7 @@ class FileReportRepository(ReportRepository):
         incident_id: str,
         format: str,
     ) -> Optional[Dict[str, Any]]:
+        """负责获取最新byformat，并返回后续流程可直接消费的数据结果。"""
         async with self._lock:
             items = self._reports.get(incident_id, [])
             for item in reversed(items):
@@ -117,19 +134,23 @@ class FileReportRepository(ReportRepository):
             return None
 
     async def list_by_incident(self, incident_id: str) -> List[Dict[str, Any]]:
+        """负责列出by故障，并返回后续流程可直接消费的数据结果。"""
         async with self._lock:
             return list(self._reports.get(incident_id, []))
 
     async def save_share_token(self, token: str, incident_id: str) -> None:
+        """执行保存sharetoken，并同步更新运行时状态、持久化结果或审计轨迹。"""
         async with self._lock:
             self._share_tokens[token] = incident_id
             self._persist_to_disk()
 
     async def get_incident_id_by_share_token(self, token: str) -> Optional[str]:
+        """负责获取故障idbysharetoken，并返回后续流程可直接消费的数据结果。"""
         async with self._lock:
             return self._share_tokens.get(token)
 
     def _load_from_disk(self) -> None:
+        """从本地文件恢复报告和分享 token；文件损坏时退回空仓储。"""
         if not self._file.exists():
             return
         try:
@@ -143,6 +164,7 @@ class FileReportRepository(ReportRepository):
             self._share_tokens = {}
 
     def _persist_to_disk(self) -> None:
+        """将报告仓储完整快照写回本地文件。"""
         payload = {
             "schema_version": 1,
             "reports": self._reports,

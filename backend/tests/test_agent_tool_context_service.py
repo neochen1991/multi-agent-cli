@@ -1,4 +1,4 @@
-"""Tests for AgentToolContextService edge cases."""
+"""testAgent工具上下文服务相关测试。"""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from app.services.agent_tool_context_service import AgentToolContextService
 
 
 def test_collect_recent_git_changes_handles_repo_without_commits(tmp_path):
+    """验证collect最近Git变更处理repo无commits。"""
+    
     subprocess.run(
         ["git", "init"],
         cwd=str(tmp_path),
@@ -35,8 +37,41 @@ def test_collect_recent_git_changes_handles_repo_without_commits(tmp_path):
     )
 
 
+def test_extract_keywords_uses_investigation_leads():
+    """验证提取关键词使用investigation线索。"""
+    
+    service = AgentToolContextService()
+
+    keywords = service._extract_keywords(  # noqa: SLF001 - validating lead expansion logic
+        {
+            "log_excerpt": "timeout on orders",
+            "investigation_leads": {
+                "api_endpoints": ["POST /api/v1/orders"],
+                "service_names": ["order-service"],
+                "class_names": ["OrderController", "OrderService"],
+                "code_artifacts": ["order/service/OrderService.java"],
+                "database_tables": ["t_order"],
+                "monitor_items": ["order.error.rate"],
+                "dependency_services": ["inventory-service"],
+                "trace_ids": ["trace-001"],
+                "error_keywords": ["timeout"],
+            },
+        },
+        {},
+        {"task": "根据已知线索定位问题"},
+    )
+
+    assert "orders" in keywords
+    assert "order-service" in keywords
+    assert "ordercontroller" in keywords
+    assert "t_order" in keywords
+    assert "inventory-service" in keywords
+
+
 @pytest.mark.asyncio
 async def test_database_agent_context_reads_sqlite_snapshot(tmp_path, monkeypatch):
+    """验证databaseAgent上下文读取SQLite快照。"""
+    
     db_path = tmp_path / "ops_snapshot.db"
     conn = sqlite3.connect(str(db_path))
     try:
@@ -54,6 +89,7 @@ async def test_database_agent_context_reads_sqlite_snapshot(tmp_path, monkeypatc
         conn.close()
 
     async def _fake_get_config():
+        """为测试场景提供get配置模拟实现。"""
         return AgentToolingConfig(
             database=DatabaseToolConfig(enabled=True, db_path=str(db_path), max_rows=10),
         )
@@ -90,8 +126,12 @@ async def test_database_agent_context_reads_sqlite_snapshot(tmp_path, monkeypatc
 
 @pytest.mark.asyncio
 async def test_database_agent_context_reads_postgres_snapshot(monkeypatch):
+    """验证databaseAgent上下文读取Postgres快照。"""
+    
     class _FakeConn:
+        """为测试场景提供FakeConn辅助对象。"""
         async def fetch(self, sql, *args):  # noqa: ANN001, ANN002
+            """为测试场景提供fetch辅助逻辑。"""
             text = str(sql)
             if "information_schema.tables" in text:
                 return [{"table_name": "t_order"}, {"table_name": "t_order_item"}]
@@ -117,15 +157,20 @@ async def test_database_agent_context_reads_postgres_snapshot(monkeypatch):
             return []
 
         async def close(self):
+            """为测试场景提供关闭辅助逻辑。"""
             return None
 
     class _FakeAsyncpg:
+        """为测试场景提供FakeAsyncpg辅助对象。"""
+
         @staticmethod
         async def connect(**kwargs):  # noqa: ANN003
+            """为测试场景提供connect辅助逻辑。"""
             assert "dsn" in kwargs
             return _FakeConn()
 
     async def _fake_get_config():
+        """为测试场景提供get配置模拟实现。"""
         return AgentToolingConfig(
             database=DatabaseToolConfig(
                 enabled=True,

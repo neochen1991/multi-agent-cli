@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-Professional project-intro PPT generator for the current RCA system.
-"""
+"""generate项目介绍PPTpro脚本。"""
 
 from __future__ import annotations
 
@@ -22,6 +20,8 @@ OUTFILE = Path(
 
 
 class Theme:
+    """封装Theme相关常量或数据结构。"""
+    
     bg = RGBColor(247, 250, 255)
     navy = RGBColor(13, 35, 68)
     blue = RGBColor(34, 104, 201)
@@ -41,6 +41,8 @@ class Theme:
 
 
 def add_bg(slide, prs: Presentation) -> None:
+    """向当前页补充背景相关元素，并统一样式与布局。"""
+    
     rect = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height
     )
@@ -50,6 +52,8 @@ def add_bg(slide, prs: Presentation) -> None:
 
 
 def add_header(slide, title: str, subtitle: str, page: int) -> None:
+    """向当前页补充页眉相关元素，并统一样式与布局。"""
+    
     bar = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(0.86)
     )
@@ -87,6 +91,8 @@ def add_header(slide, title: str, subtitle: str, page: int) -> None:
 
 
 def add_card(slide, x: float, y: float, w: float, h: float, fill: RGBColor = Theme.white):
+    """向当前页补充卡片相关元素，并统一样式与布局。"""
+    
     shp = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h)
     )
@@ -109,6 +115,8 @@ def add_text(
     color: RGBColor = Theme.text,
     align: str = "left",
 ) -> None:
+    """向当前页补充文本相关元素，并统一样式与布局。"""
+    
     box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
     tf = box.text_frame
     tf.clear()
@@ -135,6 +143,8 @@ def add_bullets(
     size: int = 14,
     color: RGBColor = Theme.text,
 ) -> None:
+    """向当前页补充bullets相关元素，并统一样式与布局。"""
+    
     box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
     tf = box.text_frame
     tf.clear()
@@ -147,6 +157,8 @@ def add_bullets(
 
 
 def add_arrow(slide, x: float, y: float, w: float, h: float, color: RGBColor = Theme.blue) -> None:
+    """向当前页补充箭头相关元素，并统一样式与布局。"""
+    
     arr = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.RIGHT_ARROW, Inches(x), Inches(y), Inches(w), Inches(h)
     )
@@ -156,6 +168,8 @@ def add_arrow(slide, x: float, y: float, w: float, h: float, color: RGBColor = T
 
 
 def slide_cover(prs: Presentation) -> None:
+    """构建封面对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
 
@@ -224,6 +238,8 @@ def slide_cover(prs: Presentation) -> None:
 
 
 def slide_agenda(prs: Presentation) -> None:
+    """构建议程对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_header(slide, "目录", "Presentation Roadmap", 2)
@@ -249,6 +265,8 @@ def slide_agenda(prs: Presentation) -> None:
 
 
 def slide_business(prs: Presentation) -> None:
+    """构建business对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_header(slide, "1) 业务目标与定位", "Why this platform", 3)
@@ -306,6 +324,8 @@ def slide_business(prs: Presentation) -> None:
 
 
 def slide_architecture(prs: Presentation) -> None:
+    """构建架构对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_header(slide, "2) 系统总体架构图", "End-to-end Architecture", 4)
@@ -410,6 +430,8 @@ def slide_architecture(prs: Presentation) -> None:
 
 
 def slide_runtime_arch(prs: Presentation) -> None:
+    """构建运行时arch对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_header(slide, "3) LangGraph 运行时架构图", "Backend Internal Design", 5)
@@ -467,6 +489,8 @@ def slide_runtime_arch(prs: Presentation) -> None:
 
 
 def slide_agent_network(prs: Presentation) -> None:
+    """构建Agent链路图对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_header(slide, "4) 多 Agent 协作网络图", "Command-driven Collaboration", 6)
@@ -518,6 +542,8 @@ def slide_agent_network(prs: Presentation) -> None:
 
 
 def slide_tool_audit(prs: Presentation) -> None:
+    """构建工具audit对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_header(slide, "5) 工具调用与审计链路", "Tooling & Auditability", 7)
@@ -574,6 +600,8 @@ def slide_tool_audit(prs: Presentation) -> None:
 
 
 def slide_flow(prs: Presentation) -> None:
+    """构建flow对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_header(slide, "6) 核心流程图", "Incident -> Debate -> Report", 8)
@@ -622,6 +650,8 @@ def slide_flow(prs: Presentation) -> None:
 
 
 def slide_state_data(prs: Presentation) -> None:
+    """构建状态data对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_header(slide, "7) 状态机与数据模型", "State & Data Design", 9)
@@ -696,6 +726,8 @@ def slide_state_data(prs: Presentation) -> None:
 
 
 def slide_frontend(prs: Presentation) -> None:
+    """构建前端对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_header(slide, "8) 前端交互与用户体验", "UX Architecture", 10)
@@ -746,6 +778,8 @@ def slide_frontend(prs: Presentation) -> None:
 
 
 def slide_interfaces(prs: Presentation) -> None:
+    """构建interfaces对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_header(slide, "9) API 与扩展能力", "Integration & Extensibility", 11)
@@ -807,6 +841,8 @@ def slide_interfaces(prs: Presentation) -> None:
 
 
 def slide_quality(prs: Presentation) -> None:
+    """构建质量对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_header(slide, "10) 质量保障与可观测", "Reliability & Benchmark", 12)
@@ -882,6 +918,8 @@ def slide_quality(prs: Presentation) -> None:
 
 
 def slide_roadmap(prs: Presentation) -> None:
+    """构建路线图对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_header(slide, "11) 改进路线图", "P0~P3", 13)
@@ -912,6 +950,8 @@ def slide_roadmap(prs: Presentation) -> None:
 
 
 def slide_end(prs: Presentation) -> None:
+    """构建结束对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_header(slide, "12) 总结", "Thank You", 14)
@@ -955,6 +995,8 @@ def slide_end(prs: Presentation) -> None:
 
 
 def build(out: Path) -> Path:
+    """执行build相关逻辑。"""
+    
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)

@@ -41,6 +41,7 @@ class RoutingStrategy(Protocol):
         supervisor_stop_requested: bool,
         supervisor_stop_reason: str,
     ) -> StrategyResult:
+        """执行decide，用于驱动当前阶段的策略选择或状态流转。"""
         ...
 
 

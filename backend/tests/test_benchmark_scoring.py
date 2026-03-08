@@ -1,7 +1,11 @@
+"""test评测评分相关测试。"""
+
 from app.benchmark.scoring import aggregate_cases
 
 
 def test_aggregate_cases_includes_first_evidence_metrics():
+    """验证aggregatecases包含first证据metrics。"""
+    
     rows = [
         {
             "top1_hit": True,

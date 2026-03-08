@@ -1,11 +1,24 @@
 """
-辩论服务
+辩论服务模块
+
+本模块是辩论流程的核心服务层，负责：
+1. 辩论会话的生命周期管理（创建、执行、取消、查询）
+2. 状态转换控制（PENDING -> RUNNING -> COMPLETED 等）
+3. 事件流处理和实时推送
+4. 错误分类和恢复策略
+
+主要组件：
+- DebateService: 辩论服务主类
+- 状态转换机: _STATUS_TRANSITIONS 定义合法的状态转换
+- 错误分类器: _classify_error 用于错误诊断
+
 Debate Service
 
 整合资产采集、AI辩论分析和报告生成三个核心模块。
 """
 
 import asyncio
+import re
 import uuid
 from contextlib import suppress
 from datetime import datetime
@@ -36,6 +49,7 @@ from app.core.event_schema import enrich_event, new_trace_id
 from app.core.observability import metrics_store
 from app.runtime.evidence import normalize_evidence_items
 from app.runtime.judgement import causal_score, has_cross_source_evidence, score_topology_propagation
+from app.runtime.langgraph.deployment_center import deployment_center
 from app.runtime_serve import normalize_execution_mode
 from app.runtime.langgraph.strategy_center import runtime_strategy_center
 from app.repositories.debate_repository import (
@@ -47,11 +61,48 @@ from app.repositories.debate_repository import (
 logger = structlog.get_logger()
 
 
-class DebateService:
-    """辩论服务 - 整合三大核心模块"""
+class HumanReviewRequired(RuntimeError):
+    """表示当前分析必须暂停，等待人工审核后才能继续推进。"""
 
+    def __init__(self, session_id: str, reason: str, review_payload: Optional[Dict[str, Any]] = None, resume_from_step: str = ""):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
+        self.session_id = session_id
+        self.reason = str(reason or "")
+        self.review_payload = dict(review_payload or {})
+        self.resume_from_step = str(resume_from_step or "")
+        super().__init__(self.reason or "human review required")
+
+
+class DebateService:
+    """
+    辩论服务 - 核心业务逻辑
+
+    整合三大核心模块：
+    1. 资产采集：收集日志、指标、代码等分析素材
+    2. AI 辩论：多 Agent 协作分析根因
+    3. 报告生成：输出结构化的分析报告
+
+    状态机设计：
+    - PENDING: 待执行
+    - RUNNING: 运行中
+    - ANALYZING: 分析阶段
+    - DEBATING: 辩论阶段
+    - JUDGING: 裁决阶段
+    - WAITING: 等待中
+    - RETRYING: 重试中
+    - COMPLETED: 已完成
+    - FAILED: 失败
+    - CANCELLED: 已取消
+    - CRITIQUING: 质疑阶段
+    - REBUTTING: 反驳阶段
+    """
+
+    # 状态转换规则：定义每个状态可以转换到的合法目标状态
+    # 例如：PENDING 状态只能转换到 RUNNING、CANCELLED 或 FAILED
     _STATUS_TRANSITIONS: Dict[DebateStatus, set[DebateStatus]] = {
+        # 待执行 -> 运行中、已取消、失败
         DebateStatus.PENDING: {DebateStatus.RUNNING, DebateStatus.CANCELLED, DebateStatus.FAILED},
+        # 运行中 -> 分析中、辩论中、裁决中、等待、重试、取消、失败、完成
         DebateStatus.RUNNING: {
             DebateStatus.ANALYZING,
             DebateStatus.DEBATING,
@@ -62,6 +113,7 @@ class DebateService:
             DebateStatus.FAILED,
             DebateStatus.COMPLETED,
         },
+        # 分析中 -> 运行中、辩论中、等待、重试、取消、失败
         DebateStatus.ANALYZING: {
             DebateStatus.RUNNING,
             DebateStatus.DEBATING,
@@ -70,6 +122,7 @@ class DebateService:
             DebateStatus.CANCELLED,
             DebateStatus.FAILED,
         },
+        # 辩论中 -> 运行中、裁决中、等待、重试、取消、失败
         DebateStatus.DEBATING: {
             DebateStatus.RUNNING,
             DebateStatus.JUDGING,
@@ -78,6 +131,7 @@ class DebateService:
             DebateStatus.CANCELLED,
             DebateStatus.FAILED,
         },
+        # 裁决中 -> 完成、等待、重试、取消、失败
         DebateStatus.JUDGING: {
             DebateStatus.COMPLETED,
             DebateStatus.WAITING,
@@ -85,16 +139,29 @@ class DebateService:
             DebateStatus.CANCELLED,
             DebateStatus.FAILED,
         },
+        # 等待 -> 运行中、分析中、辩论中、重试、取消、失败
         DebateStatus.WAITING: {DebateStatus.RUNNING, DebateStatus.ANALYZING, DebateStatus.DEBATING, DebateStatus.RETRYING, DebateStatus.CANCELLED, DebateStatus.FAILED},
+        # 重试 -> 运行中、分析中、辩论中、裁决中、等待、取消、失败
         DebateStatus.RETRYING: {DebateStatus.RUNNING, DebateStatus.ANALYZING, DebateStatus.DEBATING, DebateStatus.JUDGING, DebateStatus.WAITING, DebateStatus.CANCELLED, DebateStatus.FAILED},
+        # 失败 -> 重试、取消
         DebateStatus.FAILED: {DebateStatus.RETRYING, DebateStatus.CANCELLED},
+        # 已取消 -> 重试
         DebateStatus.CANCELLED: {DebateStatus.RETRYING},
+        # 已完成 -> 终态，不可转换
         DebateStatus.COMPLETED: set(),
+        # 质疑中 -> 反驳中、裁决中、失败
         DebateStatus.CRITIQUING: {DebateStatus.REBUTTING, DebateStatus.JUDGING, DebateStatus.FAILED},
+        # 反驳中 -> 裁决中、失败
         DebateStatus.REBUTTING: {DebateStatus.JUDGING, DebateStatus.FAILED},
     }
-    
+
     def __init__(self, repository: Optional[DebateRepository] = None):
+        """
+        初始化辩论服务
+
+        Args:
+            repository: 辩论数据存储库，如果未提供则根据配置选择文件或内存存储
+        """
         self._repository = repository or (
             FileDebateRepository()
             if settings.LOCAL_STORE_BACKEND == "file"
@@ -103,6 +170,17 @@ class DebateService:
 
     @staticmethod
     def _next_event_sequence(session: DebateSession) -> int:
+        """
+        获取下一个事件序号
+
+        用于事件排序和幂等性保证。
+
+        Args:
+            session: 辩论会话
+
+        Returns:
+            int: 下一个事件序号
+        """
         current = int((session.context or {}).get("_event_sequence") or 0)
         next_value = current + 1
         session.context["_event_sequence"] = next_value
@@ -110,8 +188,20 @@ class DebateService:
 
     @staticmethod
     def _classify_error(error_text: str) -> Dict[str, Any]:
+        """
+        分类错误信息
+
+        根据错误文本判断错误类型、是否可恢复以及重试建议。
+
+        Args:
+            error_text: 错误信息文本
+
+        Returns:
+            Dict[str, Any]: 包含 error_code、error_message、recoverable、retry_hint 的字典
+        """
         text = str(error_text or "").strip()
         lowered = text.lower()
+        # 未获得有效大模型结论
         if "未获得有效大模型结论" in text:
             return {
                 "error_code": "NO_EFFECTIVE_LLM_CONCLUSION",
@@ -119,6 +209,7 @@ class DebateService:
                 "recoverable": True,
                 "retry_hint": "补充更完整的日志、堆栈和监控现象后重试分析",
             }
+        # 超时错误
         if "timeout" in lowered or "超时" in text:
             return {
                 "error_code": "AGENT_TIMEOUT",
@@ -126,6 +217,7 @@ class DebateService:
                 "recoverable": True,
                 "retry_hint": "可先降低辩论轮次或缩短输入日志后重试",
             }
+        # 限流错误
         if "rate_limit" in lowered or "429" in lowered:
             return {
                 "error_code": "LLM_RATE_LIMITED",
@@ -133,6 +225,7 @@ class DebateService:
                 "recoverable": True,
                 "retry_hint": "稍后重试，或降低并发配置",
             }
+        # 内部运行时错误
         return {
             "error_code": "INTERNAL_RUNTIME_ERROR",
             "error_message": text or "unknown error",
@@ -145,55 +238,78 @@ class DebateService:
         incident: Incident,
         max_rounds: Optional[int] = None,
         execution_mode: str = "standard",
+        deployment_profile: str = "",
     ) -> DebateSession:
         """
         创建辩论会话
-        
+
+        根据故障事件创建新的辩论会话，包括：
+        1. 生成会话 ID
+        2. 根据执行模式和严重程度选择运行策略
+        3. 构建会话上下文
+        4. 持久化会话
+
         Args:
             incident: 关联的故障事件
-            
+            max_rounds: 最大辩论轮次（可选，1-8）
+            execution_mode: 执行模式（standard/quick/background）
+
         Returns:
-            创建的辩论会话
+            DebateSession: 创建的辩论会话
         """
+        # 生成唯一会话 ID
         session_id = f"deb_{uuid.uuid4().hex[:8]}"
-        
+
+        # 根据执行模式和严重程度选择运行策略
         debate_config: Dict[str, Any] = {}
         normalized_mode = normalize_execution_mode(execution_mode).value
+        severity_text = str(getattr(incident.severity, "value", incident.severity) or "")
         selected_strategy = runtime_strategy_center.select(
-            severity=str(incident.severity or ""),
+            severity=severity_text,
             execution_mode=normalized_mode,
         )
+        selected_deployment = deployment_center.select(
+            severity=severity_text,
+            execution_mode=normalized_mode,
+            requested_profile=deployment_profile,
+        )
+        # 确定最大轮次（优先使用传入值，否则使用策略建议）
         strategy_suggest_rounds = int(selected_strategy.get("suggested_max_rounds") or settings.DEBATE_MAX_ROUNDS)
         if max_rounds is not None:
             debate_config["max_rounds"] = max(1, min(8, int(max_rounds)))
         else:
             debate_config["max_rounds"] = max(1, min(8, strategy_suggest_rounds))
 
+        # 构建会话上下文
         session_context: Dict[str, Any] = {
             "incident": incident.model_dump(),
             "log_content": incident.log_content,
             "exception_stack": incident.exception_stack,
             "parsed_data": incident.parsed_data,
-            "_event_sequence": 0,
+            "_event_sequence": 0,  # 事件序号计数器
             "execution_mode": normalized_mode,
             "runtime_strategy": selected_strategy,
+            "deployment_profile": selected_deployment,
         }
         if debate_config:
             session_context["debate_config"] = debate_config
+        # 快速模式强制单轮
         if normalized_mode == "quick":
             cfg = dict(session_context.get("debate_config") or {})
             cfg["max_rounds"] = 1
             session_context["debate_config"] = cfg
 
+        # 创建会话对象
         session = DebateSession(
             id=session_id,
             incident_id=incident.id,
             status=DebateStatus.PENDING,
             context=session_context,
         )
-        
+
+        # 持久化会话
         await self._repository.save_session(session)
-        
+
         logger.info(
             "debate_session_created",
             session_id=session_id,
@@ -201,18 +317,35 @@ class DebateService:
             max_rounds=debate_config.get("max_rounds"),
             execution_mode=normalized_mode,
             runtime_strategy=str(selected_strategy.get("name") or ""),
+            deployment_profile=str(selected_deployment.get("name") or ""),
         )
         
         return session
     
     async def get_session(self, session_id: str) -> Optional[DebateSession]:
-        """获取辩论会话"""
+        """
+        获取辩论会话
+
+        Args:
+            session_id: 会话 ID
+
+        Returns:
+            Optional[DebateSession]: 会话对象，如果不存在则返回 None
+        """
         return await self._repository.get_session(session_id)
 
     async def update_session(self, session: DebateSession) -> DebateSession:
-        """更新会话上下文/状态。"""
+        """
+        更新会话状态
+
+        Args:
+            session: 要更新的会话对象
+
+        Returns:
+            DebateSession: 更新后的会话
+        """
         return await self._repository.save_session(session)
-    
+
     async def execute_debate(
         self,
         session_id: str,
@@ -221,65 +354,98 @@ class DebateService:
     ) -> DebateResult:
         """
         执行完整的辩论流程
-        
-        整合三大模块：
-        1. 资产采集
-        2. AI辩论分析
-        3. 报告生成
-        
+
+        这是辩论服务的核心方法，整合三大模块：
+        1. 资产采集：收集日志、代码、配置等分析素材
+        2. AI 辩论分析：多 Agent 协作进行根因分析
+        3. 报告生成：输出结构化的分析报告
+
+        执行流程：
+        1. 检查会话状态，确保可以执行
+        2. 更新状态为 RUNNING -> ANALYZING
+        3. 初始化会话上下文
+        4. 发射初始种子证据事件
+        5. 执行资产采集
+        6. 执行 AI 辩论
+        7. 生成报告
+        8. 更新状态为 COMPLETED
+
         Args:
-            session_id: 会话ID
-            
+            session_id: 会话 ID
+            event_callback: 事件回调函数，用于实时推送事件
+            retry_failed_only: 是否仅重试失败部分
+
         Returns:
-            辩论结果
+            DebateResult: 辩论结果
+
+        Raises:
+            ValueError: 会话不存在
+            RuntimeError: 会话已取消
         """
+        # 这段方法同时编排三条链路：资产采集、LangGraph 分析、报告生成。
+        # 为了保证前端可回放和可恢复，所有关键状态变化都会被事件化并落盘。
         execute_started_at = datetime.utcnow()
         had_retry = False
         timeout_failure = False
         invalid_conclusion_failure = False
+
+        # 先做会话状态门禁，避免对已完成、已取消或待人工审核会话重复执行。
         session = await self._repository.get_session(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
+        # 已完成的会话直接返回结果
         if session.status == DebateStatus.COMPLETED:
             existed = await self._repository.get_result(session_id)
             if existed:
                 return existed
+        # 已取消的会话抛出异常
         if session.status == DebateStatus.CANCELLED:
             raise RuntimeError(f"Session {session_id} is cancelled")
-        
+
+        human_review = self._get_human_review_state(session)
+        pending_review_checkpoint = session.context.get("pending_review_checkpoint")
+        if session.status == DebateStatus.WAITING and str(human_review.get("status") or "") == "pending":
+            raise HumanReviewRequired(
+                session_id=session_id,
+                reason=str(human_review.get("reason") or "等待人工审核"),
+                review_payload=dict(human_review.get("payload") or {}),
+                resume_from_step=str(human_review.get("resume_from_step") or ""),
+            )
+
+        # trace_id 是整个分析链路的审计主键，后续事件、lineage、报告都依赖它串起来。
         trace_id = str(session.context.get("trace_id") or "").strip() or new_trace_id("deb")
         session.context["trace_id"] = trace_id
         session.context["is_cancel_requested"] = False
         session.context["retry_failed_only"] = bool(retry_failed_only)
-        await self._transition_status(
-            session,
-            DebateStatus.RUNNING,
-            event_callback=event_callback,
-            phase="running",
-            trace_id=trace_id,
-        )
-        await self._transition_status(
-            session,
-            DebateStatus.ANALYZING,
-            event_callback=event_callback,
-            phase=DebatePhase.ANALYSIS.value,
-            trace_id=trace_id,
-        )
+
+        # 初始化会话上下文管理器
         await context_manager.init_session_context(session_id, session.context)
-        event_log: List[Dict[str, Any]] = []
+        event_log = session.context.get("event_log")
+        if not isinstance(event_log, list):
+            event_log = []
 
         async def _emit_and_record(event: Dict[str, Any]) -> None:
+            """
+            发射并记录事件
+
+            将事件持久化到会话上下文，同时调用回调函数推送。
+
+            Args:
+                event: 事件数据
+            """
             sequence = self._next_event_sequence(session)
             outbound = dict(event or {})
             outbound.setdefault("event_sequence", sequence)
             outbound.setdefault("session_id", session_id)
             payload = enrich_event(outbound, trace_id=trace_id)
+            # 事件日志既服务前端实时展示，也服务历史页和断点恢复。
             event_log.append(
                 {
                     "timestamp": datetime.utcnow().isoformat(),
                     "event": payload,
                 }
             )
+            # 限制事件日志大小
             if len(event_log) > 500:
                 del event_log[:-500]
             # 持续落库事件，保证分析中会话在刷新/历史页也可查看过程记录
@@ -288,180 +454,233 @@ class DebateService:
             await self._repository.save_session(session)
             await self._emit_event(event_callback, payload)
 
-        await _emit_and_record(
-            {
-                "type": "session_started",
-                "session_id": session_id,
-                "status": session.status.value,
-                "phase": DebatePhase.ANALYSIS.value,
-                "retry_failed_only": bool(retry_failed_only),
-            }
+        resume_after_review = (
+            session.status == DebateStatus.WAITING
+            and str(human_review.get("status") or "") == "approved"
+            and isinstance(pending_review_checkpoint, dict)
         )
-        await self._emit_seed_evidence_event(
-            session=session,
-            session_id=session_id,
-            emit=_emit_and_record,
+
+        await self._transition_status(
+            session,
+            DebateStatus.RUNNING,
+            event_callback=event_callback,
+            phase="running",
+            trace_id=trace_id,
         )
-        
-        try:
-            # ========== 模块1: 资产采集 ==========
-            logger.info("asset_collection_started", session_id=session_id)
-            session.current_phase = DebatePhase.ANALYSIS
-            await _emit_and_record(
-                {
-                    "type": "phase_changed",
-                    "phase": session.current_phase.value,
-                    "status": session.status.value,
-                }
-            )
-            
-            assets = await self._collect_assets(
-                session.context,
-                event_callback=_emit_and_record,
-            )
-            session.context["assets"] = assets
-            await context_manager.build_debate_context(
-                session_id=session_id,
-                base_context=session.context,
-                assets=assets,
-            )
-            
-            logger.info(
-                "asset_collection_completed",
-                session_id=session_id,
-                runtime_count=len(assets.get("runtime_assets", [])),
-                dev_count=len(assets.get("dev_assets", [])),
-                design_count=len(assets.get("design_assets", []))
-            )
-            
-            # ========== 模块2: AI辩论分析 ==========
-            logger.info("ai_debate_started", session_id=session_id)
+        if resume_after_review:
             await self._transition_status(
                 session,
-                DebateStatus.DEBATING,
-                event_callback=_emit_and_record,
-                phase="debating",
+                DebateStatus.JUDGING,
+                event_callback=event_callback,
+                phase=DebatePhase.JUDGMENT.value,
                 trace_id=trace_id,
             )
-            await _emit_and_record(
-                {
-                    "type": "phase_changed",
-                    "phase": "debating",
-                    "status": session.status.value,
-                }
+        else:
+            await self._transition_status(
+                session,
+                DebateStatus.ANALYZING,
+                event_callback=event_callback,
+                phase=DebatePhase.ANALYSIS.value,
+                trace_id=trace_id,
             )
 
-            execution_mode = str(session.context.get("execution_mode") or "standard").strip().lower()
-            runtime_strategy = session.context.get("runtime_strategy")
-            phase_mode = ""
-            if isinstance(runtime_strategy, dict):
-                phase_mode = str(runtime_strategy.get("phase_mode") or "").strip().lower()
-            max_attempts = 2
-            allow_peer_fallback_judgment = False
-            if execution_mode in {"quick", "background", "async"} or phase_mode in {
-                "economy",
-                "fast_track",
-                "failfast",
-            }:
-                max_attempts = 1
-                allow_peer_fallback_judgment = True
-            attempt = 0
+        if resume_after_review:
+            await _emit_and_record(
+                {
+                    "type": "human_review_resume_requested",
+                    "session_id": session_id,
+                    "status": session.status.value,
+                    "phase": DebatePhase.JUDGMENT.value,
+                    "resume_from_step": str(human_review.get("resume_from_step") or "report_generation"),
+                }
+            )
+        else:
+            # 发射会话开始事件
+            await _emit_and_record(
+                {
+                    "type": "session_started",
+                    "session_id": session_id,
+                    "status": session.status.value,
+                    "phase": DebatePhase.ANALYSIS.value,
+                    "retry_failed_only": bool(retry_failed_only),
+                }
+            )
+            # 发射种子证据事件（初始输入）
+            await self._emit_seed_evidence_event(
+                session=session,
+                session_id=session_id,
+                emit=_emit_and_record,
+            )
+        
+        try:
             debate_result: Dict[str, Any] = {}
-            while attempt < max_attempts:
-                if bool(session.context.get("is_cancel_requested")):
-                    raise asyncio.CancelledError("session cancel requested")
-                try:
-                    debate_result, runtime_session_id = await self._execute_ai_debate(
-                        session.context,
-                        assets,
-                        event_callback=_emit_and_record,
-                        session_id=session_id,
-                    )
-                    debate_result = self._promote_judge_conclusion(
-                        debate_result,
-                        allow_peer_fallback=allow_peer_fallback_judgment,
-                    )
-                    if settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION and not self._has_effective_llm_conclusion(
-                        debate_result
-                    ):
-                        raise RuntimeError("未获得有效大模型结论，已拒绝生成兜底结论")
-                    session.llm_session_id = runtime_session_id
-                    break
-                except Exception as exc:
-                    attempt += 1
-                    error_text = str(exc).strip() or exc.__class__.__name__
-                    lowered_error = error_text.lower()
-                    if "timeout" in lowered_error:
-                        timeout_failure = True
-                    no_effective_conclusion = "未获得有效大模型结论" in error_text
-                    if no_effective_conclusion and settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION:
-                        invalid_conclusion_failure = True
-                        await _emit_and_record(
-                            {
-                                "type": "debate_failed_no_effective_llm_conclusion",
-                                "phase": "debating",
-                                "attempt": attempt,
-                                "max_attempts": max_attempts,
-                                "error": error_text,
-                            }
-                        )
-                        raise RuntimeError(error_text) from exc
-                    if attempt >= max_attempts:
-                        if settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION:
-                            raise RuntimeError(f"未获得有效大模型结论: {error_text}") from exc
-                        debate_result = self._build_degraded_debate_result(
-                            context=session.context,
-                            assets=assets,
-                            error_text=error_text,
-                        )
-                        await _emit_and_record(
-                            {
-                                "type": "ai_debate_degraded",
-                                "phase": "debating",
-                                "attempt": attempt,
-                                "max_attempts": max_attempts,
-                                "error": error_text,
-                                "reason": "llm_unavailable_or_timeout",
-                            }
-                        )
-                        logger.warning(
-                            "ai_debate_degraded",
+            if resume_after_review:
+                checkpoint = dict(pending_review_checkpoint or {})
+                assets = dict(checkpoint.get("assets") or {})
+                debate_result = dict(checkpoint.get("debate_result") or {})
+                session.current_phase = DebatePhase.JUDGMENT
+            else:
+                # ========== 模块1: 资产采集 ==========
+                logger.info("asset_collection_started", session_id=session_id)
+                session.current_phase = DebatePhase.ANALYSIS
+                await _emit_and_record(
+                    {
+                        "type": "phase_changed",
+                        "phase": session.current_phase.value,
+                        "status": session.status.value,
+                    }
+                )
+
+                assets = await self._collect_assets(
+                    session.context,
+                    event_callback=_emit_and_record,
+                )
+                session.context["assets"] = assets
+                session.context["interface_mapping"] = dict(assets.get("interface_mapping") or {})
+                session.context["investigation_leads"] = dict(assets.get("investigation_leads") or {})
+                session.updated_at = datetime.utcnow()
+                await self._repository.save_session(session)
+                await context_manager.build_debate_context(
+                    session_id=session_id,
+                    base_context=session.context,
+                    assets=assets,
+                )
+
+                logger.info(
+                    "asset_collection_completed",
+                    session_id=session_id,
+                    runtime_count=len(assets.get("runtime_assets", [])),
+                    dev_count=len(assets.get("dev_assets", [])),
+                    design_count=len(assets.get("design_assets", []))
+                )
+
+                # ========== 模块2: AI辩论分析 ==========
+                logger.info("ai_debate_started", session_id=session_id)
+                await self._transition_status(
+                    session,
+                    DebateStatus.DEBATING,
+                    event_callback=_emit_and_record,
+                    phase="debating",
+                    trace_id=trace_id,
+                )
+                await _emit_and_record(
+                    {
+                        "type": "phase_changed",
+                        "phase": "debating",
+                        "status": session.status.value,
+                    }
+                )
+
+                execution_mode = str(session.context.get("execution_mode") or "standard").strip().lower()
+                runtime_strategy = session.context.get("runtime_strategy")
+                phase_mode = ""
+                if isinstance(runtime_strategy, dict):
+                    phase_mode = str(runtime_strategy.get("phase_mode") or "").strip().lower()
+                max_attempts = 2
+                allow_peer_fallback_judgment = False
+                if execution_mode in {"quick", "background", "async"} or phase_mode in {
+                    "economy",
+                    "fast_track",
+                    "failfast",
+                }:
+                    max_attempts = 1
+                    allow_peer_fallback_judgment = True
+                attempt = 0
+                while attempt < max_attempts:
+                    if bool(session.context.get("is_cancel_requested")):
+                        raise asyncio.CancelledError("session cancel requested")
+                    try:
+                        debate_result, runtime_session_id = await self._execute_ai_debate(
+                            session.context,
+                            assets,
+                            event_callback=_emit_and_record,
                             session_id=session_id,
-                            error=error_text,
                         )
+                        debate_result = self._promote_judge_conclusion(
+                            debate_result,
+                            allow_peer_fallback=allow_peer_fallback_judgment,
+                        )
+                        if settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION and not self._has_effective_llm_conclusion(
+                            debate_result
+                        ):
+                            raise RuntimeError("未获得有效大模型结论，已拒绝生成兜底结论")
+                        session.llm_session_id = runtime_session_id
                         break
-                    await self._transition_status(
-                        session,
-                        DebateStatus.RETRYING,
-                        event_callback=_emit_and_record,
-                        phase="debating",
-                        trace_id=trace_id,
-                    )
-                    had_retry = True
-                    await _emit_and_record(
-                        {
-                            "type": "debate_retry_scheduled",
-                            "phase": "debating",
-                            "attempt": attempt + 1,
-                            "max_attempts": max_attempts,
-                            "error": str(exc),
-                        }
-                    )
-                    await self._transition_status(
-                        session,
-                        DebateStatus.WAITING,
-                        event_callback=_emit_and_record,
-                        phase="waiting",
-                        trace_id=trace_id,
-                    )
-                    await asyncio.sleep(min(3, 2 ** attempt))
-                    await self._transition_status(
-                        session,
-                        DebateStatus.DEBATING,
-                        event_callback=_emit_and_record,
-                        phase="debating",
-                        trace_id=trace_id,
-                    )
+                    except Exception as exc:
+                        attempt += 1
+                        error_text = str(exc).strip() or exc.__class__.__name__
+                        lowered_error = error_text.lower()
+                        if "timeout" in lowered_error:
+                            timeout_failure = True
+                        no_effective_conclusion = "未获得有效大模型结论" in error_text
+                        if no_effective_conclusion and settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION:
+                            invalid_conclusion_failure = True
+                            await _emit_and_record(
+                                {
+                                    "type": "debate_failed_no_effective_llm_conclusion",
+                                    "phase": "debating",
+                                    "attempt": attempt,
+                                    "max_attempts": max_attempts,
+                                    "error": error_text,
+                                }
+                            )
+                            raise RuntimeError(error_text) from exc
+                        if attempt >= max_attempts:
+                            if settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION:
+                                raise RuntimeError(f"未获得有效大模型结论: {error_text}") from exc
+                            debate_result = self._build_degraded_debate_result(
+                                context=session.context,
+                                assets=assets,
+                                error_text=error_text,
+                            )
+                            await _emit_and_record(
+                                {
+                                    "type": "ai_debate_degraded",
+                                    "phase": "debating",
+                                    "attempt": attempt,
+                                    "max_attempts": max_attempts,
+                                    "error": error_text,
+                                    "reason": "llm_unavailable_or_timeout",
+                                }
+                            )
+                            logger.warning(
+                                "ai_debate_degraded",
+                                session_id=session_id,
+                                error=error_text,
+                            )
+                            break
+                        await self._transition_status(
+                            session,
+                            DebateStatus.RETRYING,
+                            event_callback=_emit_and_record,
+                            phase="debating",
+                            trace_id=trace_id,
+                        )
+                        had_retry = True
+                        await _emit_and_record(
+                            {
+                                "type": "debate_retry_scheduled",
+                                "phase": "debating",
+                                "attempt": attempt + 1,
+                                "max_attempts": max_attempts,
+                                "error": str(exc),
+                            }
+                        )
+                        await self._transition_status(
+                            session,
+                            DebateStatus.WAITING,
+                            event_callback=_emit_and_record,
+                            phase="waiting",
+                            trace_id=trace_id,
+                        )
+                        await asyncio.sleep(min(3, 2 ** attempt))
+                        await self._transition_status(
+                            session,
+                            DebateStatus.DEBATING,
+                            event_callback=_emit_and_record,
+                            phase="debating",
+                            trace_id=trace_id,
+                        )
             
             # 更新辩论历史
             session.rounds = [
@@ -491,6 +710,22 @@ class DebateService:
                 session_id=session_id,
                 confidence=debate_result.get("confidence", 0)
             )
+
+            human_review_payload = debate_result.get("human_review") if isinstance(debate_result.get("human_review"), dict) else {}
+            if (
+                str(((session.context.get("deployment_profile") or {}).get("name") or "")).strip() == "production_governed"
+                and bool(debate_result.get("awaiting_human_review") or False)
+            ):
+                await self._checkpoint_human_review(
+                    session=session,
+                    debate_result=debate_result,
+                    assets=assets,
+                    trace_id=trace_id,
+                    event_callback=_emit_and_record,
+                    review_reason=str(human_review_payload.get("reason") or debate_result.get("review_reason") or "需要人工审核确认"),
+                    review_payload=dict(human_review_payload.get("payload") or {}),
+                    resume_from_step=str(human_review_payload.get("resume_from_step") or "report_generation"),
+                )
             
             # ========== 模块3: 报告生成 ==========
             logger.info("report_generation_started", session_id=session_id)
@@ -522,6 +757,17 @@ class DebateService:
             )
             
             logger.info("report_generation_completed", session_id=session_id)
+
+            review_state = self._get_human_review_state(session)
+            if review_state:
+                review_state.update(
+                    {
+                        "status": "completed",
+                        "resumed_at": datetime.utcnow().isoformat(),
+                    }
+                )
+                session.context["human_review"] = review_state
+            session.context.pop("pending_review_checkpoint", None)
             
             # 更新会话状态
             await self._transition_status(
@@ -564,6 +810,10 @@ class DebateService:
             )
             
             return result
+        except HumanReviewRequired:
+            session.context["event_log"] = event_log
+            await self._repository.save_session(session)
+            raise
         except asyncio.CancelledError:
             await self._transition_status(
                 session,
@@ -730,6 +980,7 @@ class DebateService:
         )
 
     async def cancel_session(self, session_id: str, reason: str = "manual_cancel") -> bool:
+        """取消会话，并把取消事件写入会话事件流。"""
         session = await self._repository.get_session(session_id)
         if not session:
             return False
@@ -763,6 +1014,154 @@ class DebateService:
         session.context["event_log"] = event_log
         await self._repository.save_session(session)
         return True
+
+    def _get_human_review_state(self, session: DebateSession) -> Dict[str, Any]:
+        """从会话上下文提取人工审核状态。"""
+        payload = session.context.get("human_review")
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    def _append_session_event(self, session: DebateSession, event: Dict[str, Any]) -> Dict[str, Any]:
+        """向会话内置 `event_log` 追加一条标准化事件。"""
+        trace_id = str(session.context.get("trace_id") or "").strip() or new_trace_id("deb")
+        sequence = self._next_event_sequence(session)
+        enriched = enrich_event(
+            {
+                **dict(event or {}),
+                "session_id": session.id,
+                "event_sequence": sequence,
+            },
+            trace_id=trace_id,
+        )
+        event_log = session.context.get("event_log")
+        if not isinstance(event_log, list):
+            event_log = []
+        event_log.append({"timestamp": datetime.utcnow().isoformat(), "event": enriched})
+        if len(event_log) > 500:
+            del event_log[:-500]
+        session.context["event_log"] = event_log
+        return enriched
+
+    async def approve_human_review(self, session_id: str, approver: str = "sre-oncall", comment: str = "") -> bool:
+        """批准待人工审核的会话，但不直接恢复执行。"""
+        session = await self._repository.get_session(session_id)
+        if not session or session.status != DebateStatus.WAITING:
+            return False
+        review = self._get_human_review_state(session)
+        if not review or str(review.get("status") or "") not in {"pending", "approved"}:
+            return False
+        review.update(
+            {
+                "status": "approved",
+                "approver": str(approver or "sre-oncall"),
+                "comment": str(comment or ""),
+                "approved_at": datetime.utcnow().isoformat(),
+            }
+        )
+        session.context["human_review"] = review
+        self._append_session_event(
+            session,
+            {
+                "type": "human_review_approved",
+                "phase": DebatePhase.JUDGMENT.value,
+                "status": session.status.value,
+                "approver": review["approver"],
+                "comment": review["comment"],
+            },
+        )
+        session.updated_at = datetime.utcnow()
+        await self._repository.save_session(session)
+        return True
+
+    async def reject_human_review(self, session_id: str, approver: str = "sre-oncall", reason: str = "") -> bool:
+        """驳回待人工审核的会话，并推进到失败终态。"""
+        session = await self._repository.get_session(session_id)
+        if not session or session.status != DebateStatus.WAITING:
+            return False
+        review = self._get_human_review_state(session)
+        if not review or str(review.get("status") or "") not in {"pending", "approved"}:
+            return False
+        review.update(
+            {
+                "status": "rejected",
+                "approver": str(approver or "sre-oncall"),
+                "rejection_reason": str(reason or "manual_reject"),
+                "rejected_at": datetime.utcnow().isoformat(),
+            }
+        )
+        session.context["human_review"] = review
+        session.context.pop("pending_review_checkpoint", None)
+        session.context["last_error"] = review["rejection_reason"]
+        session.current_phase = None
+        session.status = DebateStatus.FAILED
+        session.updated_at = datetime.utcnow()
+        self._append_session_event(
+            session,
+            {
+                "type": "human_review_rejected",
+                "phase": "failed",
+                "status": session.status.value,
+                "approver": review["approver"],
+                "reason": review["rejection_reason"],
+            },
+        )
+        await self._repository.save_session(session)
+        return True
+
+    async def _checkpoint_human_review(
+        self,
+        *,
+        session: DebateSession,
+        debate_result: Dict[str, Any],
+        assets: Dict[str, Any],
+        trace_id: str,
+        event_callback,
+        review_reason: str,
+        review_payload: Dict[str, Any],
+        resume_from_step: str,
+    ) -> None:
+        """在进入人工审核前保存恢复断点和中间快照。"""
+        review_state = {
+            "status": "pending",
+            "reason": str(review_reason or ""),
+            "payload": dict(review_payload or {}),
+            "resume_from_step": str(resume_from_step or "report_generation"),
+            "requested_at": datetime.utcnow().isoformat(),
+        }
+        session.context["human_review"] = review_state
+        session.context["pending_review_checkpoint"] = {
+            "debate_result": debate_result,
+            "assets": assets,
+        }
+        session.current_phase = DebatePhase.JUDGMENT
+        await self._transition_status(
+            session,
+            DebateStatus.WAITING,
+            event_callback=event_callback,
+            phase="waiting_review",
+            trace_id=trace_id,
+        )
+        await self._emit_event(
+            event_callback,
+            self._append_session_event(
+                session,
+                {
+                    "type": "human_review_requested",
+                    "phase": DebatePhase.JUDGMENT.value,
+                    "status": session.status.value,
+                    "reason": review_state["reason"],
+                    "resume_from_step": review_state["resume_from_step"],
+                    "payload": review_state["payload"],
+                },
+            ),
+        )
+        session.updated_at = datetime.utcnow()
+        await self._repository.save_session(session)
+        raise HumanReviewRequired(
+            session.id,
+            review_state["reason"],
+            review_payload=review_state["payload"],
+            resume_from_step=review_state["resume_from_step"],
+        )
     
     async def _collect_assets(
         self,
@@ -797,6 +1196,7 @@ class DebateService:
         domain_name = metadata.get("domain_name")
 
         async def _collect_runtime() -> List[Any]:
+            """执行收集运行时相关逻辑，并为当前模块提供可复用的处理能力。"""
             try:
                 return await asset_collection_service.collect_runtime_assets(
                     log_content=log_content,
@@ -815,6 +1215,7 @@ class DebateService:
                 return []
 
         async def _collect_dev() -> List[Any]:
+            """执行收集dev相关逻辑，并为当前模块提供可复用的处理能力。"""
             try:
                 return await asset_collection_service.collect_dev_assets(
                     repo_url=repo_url,
@@ -834,6 +1235,7 @@ class DebateService:
                 return []
 
         async def _collect_design() -> List[Any]:
+            """执行收集design相关逻辑，并为当前模块提供可复用的处理能力。"""
             try:
                 return await asset_collection_service.collect_design_assets(
                     domain_name=domain_name,
@@ -852,6 +1254,7 @@ class DebateService:
                 return []
 
         async def _collect_mapping() -> Dict[str, Any]:
+            """执行收集mapping相关逻辑，并为当前模块提供可复用的处理能力。"""
             try:
                 return await asset_service.locate_interface_context(
                     log_content=log_content or "",
@@ -899,16 +1302,25 @@ class DebateService:
             design_task,
             mapping_task,
         )
+        normalized_mapping = self._normalize_interface_mapping_payload(interface_mapping)
+        investigation_leads = self._build_investigation_leads(
+            context=context,
+            interface_mapping=normalized_mapping,
+        )
         await self._emit_event(
             event_callback,
             {
                 "type": "asset_interface_mapping_completed",
                 "phase": "asset_analysis",
-                "matched": interface_mapping.get("matched", False),
-                "confidence": interface_mapping.get("confidence", 0.0),
-                "domain": interface_mapping.get("domain"),
-                "aggregate": interface_mapping.get("aggregate"),
-                "owner_team": interface_mapping.get("owner_team"),
+                "matched": normalized_mapping.get("matched", False),
+                "confidence": normalized_mapping.get("confidence", 0.0),
+                "domain": normalized_mapping.get("domain"),
+                "aggregate": normalized_mapping.get("aggregate"),
+                "owner_team": normalized_mapping.get("owner_team"),
+                "api_count": len(list(investigation_leads.get("api_endpoints") or [])),
+                "code_count": len(list(investigation_leads.get("code_artifacts") or [])),
+                "table_count": len(list(investigation_leads.get("database_tables") or [])),
+                "monitor_count": len(list(investigation_leads.get("monitor_items") or [])),
             },
         )
         
@@ -916,7 +1328,8 @@ class DebateService:
             "runtime_assets": [a.model_dump() for a in runtime_assets],
             "dev_assets": [a.model_dump() for a in dev_assets],
             "design_assets": [a.model_dump() for a in design_assets],
-            "interface_mapping": interface_mapping,
+            "interface_mapping": normalized_mapping,
+            "investigation_leads": investigation_leads,
         }
     
     async def _execute_ai_debate(
@@ -944,6 +1357,7 @@ class DebateService:
             "dev_assets": assets.get("dev_assets", []),
             "design_assets": assets.get("design_assets", []),
             "interface_mapping": assets.get("interface_mapping", {}),
+            "investigation_leads": assets.get("investigation_leads", {}),
             "trace_id": context.get("trace_id"),
             "execution_mode": context.get("execution_mode", "standard"),
             "runtime_strategy": context.get("runtime_strategy", {}),
@@ -963,6 +1377,7 @@ class DebateService:
         )
 
         async def _forward_event(event: Dict[str, Any]):
+            """执行forward事件相关逻辑，并为当前模块提供可复用的处理能力。"""
             if session_id:
                 await context_manager.update_session_context(
                     session_id,
@@ -1042,12 +1457,151 @@ class DebateService:
 
         return result, getattr(orchestrator, "session_id", None)
 
+    @staticmethod
+    def _normalize_text_list(value: Any, *, limit: int = 20) -> List[str]:
+        """把字符串或列表规整为去重后的短文本列表。"""
+        picks: List[str] = []
+        if isinstance(value, list):
+            items = value
+        elif isinstance(value, str):
+            items = re.split(r"[\n,;|]+", value)
+        else:
+            items = []
+        for item in items:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            picks.append(text[:180])
+        return list(dict.fromkeys(picks))[:limit]
+
+    def _normalize_interface_mapping_payload(self, payload: Any) -> Dict[str, Any]:
+        """统一责任田映射结果中的接口、代码、表和监控字段。"""
+        mapping = dict(payload or {}) if isinstance(payload, dict) else {}
+        matched_endpoint = mapping.get("matched_endpoint")
+        if not isinstance(matched_endpoint, dict):
+            matched_endpoint = {}
+        design_details = mapping.get("design_details")
+        if not isinstance(design_details, dict):
+            design_details = {}
+        dependency_services = self._normalize_text_list(
+            mapping.get("dependency_services") or design_details.get("domain_services") or [],
+            limit=20,
+        )
+        monitor_items = self._normalize_text_list(mapping.get("monitor_items") or [], limit=20)
+        code_artifacts: List[Dict[str, Any]] = []
+        for item in list(mapping.get("code_artifacts") or [])[:20]:
+            if isinstance(item, dict):
+                path = str(item.get("path") or item.get("symbol") or "").strip()
+                symbol = str(item.get("symbol") or item.get("path") or "").strip()
+            else:
+                path = str(item or "").strip()
+                symbol = path
+            if not path and not symbol:
+                continue
+            code_artifacts.append({"path": path[:240], "symbol": symbol[:180]})
+        database_tables = self._normalize_text_list(
+            mapping.get("database_tables") or mapping.get("db_tables") or [],
+            limit=20,
+        )
+        mapping["matched_endpoint"] = matched_endpoint
+        mapping["database_tables"] = database_tables
+        mapping["db_tables"] = list(database_tables)
+        mapping["dependency_services"] = dependency_services
+        mapping["monitor_items"] = monitor_items
+        mapping["code_artifacts"] = code_artifacts
+        return mapping
+
+    def _build_investigation_leads(
+        self,
+        *,
+        context: Dict[str, Any],
+        interface_mapping: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        从解析结果和责任田映射中构建标准化调查线索包。
+
+        这一步是“主 Agent 下发方向”与“专家 Agent 自主扩展分析”之间的桥梁：
+        统一整理接口、服务、类名、表名、监控项、依赖服务和 trace 线索，
+        供后续命令注入、工具上下文构建和前端责任田展示复用。
+        """
+        parsed_data = context.get("parsed_data")
+        parsed_data = parsed_data if isinstance(parsed_data, dict) else {}
+        endpoint = interface_mapping.get("matched_endpoint")
+        endpoint = endpoint if isinstance(endpoint, dict) else {}
+        method = str(endpoint.get("method") or "").strip().upper()
+        path = str(endpoint.get("path") or "").strip()
+        interface_text = str(endpoint.get("interface") or "").strip()
+        api_endpoints = self._normalize_text_list(
+            [
+                " ".join(part for part in [method, path] if part).strip(),
+                interface_text,
+                *(parsed_data.get("urls") or [] if isinstance(parsed_data.get("urls"), list) else []),
+            ],
+            limit=12,
+        )
+        service_names = self._normalize_text_list(
+            [
+                endpoint.get("service"),
+                parsed_data.get("service"),
+                *((interface_mapping.get("dependency_services") or [])[:6] if isinstance(interface_mapping.get("dependency_services"), list) else []),
+            ],
+            limit=12,
+        )
+        class_names = self._normalize_text_list(
+            [
+                *(parsed_data.get("class_names") or [] if isinstance(parsed_data.get("class_names"), list) else []),
+                *(parsed_data.get("key_classes") or [] if isinstance(parsed_data.get("key_classes"), list) else []),
+            ],
+            limit=16,
+        )
+        code_artifacts: List[str] = []
+        for item in list(interface_mapping.get("code_artifacts") or [])[:20]:
+            if isinstance(item, dict):
+                value = str(item.get("symbol") or item.get("path") or "").strip()
+            else:
+                value = str(item or "").strip()
+            if value:
+                code_artifacts.append(value[:240])
+        trace_ids = self._normalize_text_list(
+            [
+                parsed_data.get("trace_id"),
+                context.get("trace_id"),
+            ],
+            limit=6,
+        )
+        error_keywords = self._normalize_text_list(
+            [
+                parsed_data.get("error_type"),
+                parsed_data.get("error_message"),
+                parsed_data.get("exception_class"),
+                parsed_data.get("exception_message"),
+                *((parsed_data.get("exceptions") or [])[0].values() if isinstance((parsed_data.get("exceptions") or [None])[0], dict) else []),
+            ],
+            limit=12,
+        )
+        return {
+            "api_endpoints": api_endpoints,
+            "service_names": service_names,
+            "code_artifacts": list(dict.fromkeys(code_artifacts))[:16],
+            "class_names": class_names,
+            "database_tables": self._normalize_text_list(interface_mapping.get("database_tables") or [], limit=20),
+            "monitor_items": self._normalize_text_list(interface_mapping.get("monitor_items") or [], limit=16),
+            "dependency_services": self._normalize_text_list(interface_mapping.get("dependency_services") or [], limit=16),
+            "domain": str(interface_mapping.get("domain") or "").strip(),
+            "aggregate": str(interface_mapping.get("aggregate") or "").strip(),
+            "owner_team": str(interface_mapping.get("owner_team") or "").strip(),
+            "owner": str(interface_mapping.get("owner") or "").strip(),
+            "trace_ids": trace_ids,
+            "error_keywords": error_keywords,
+        }
+
     def _recover_timeout_result(
         self,
         *,
         orchestrator: Any,
         max_rounds: int,
     ) -> Optional[Dict[str, Any]]:
+        """在辩论超时时尝试从 orchestrator 快照中恢复可用结果。"""
         try:
             history_cards = orchestrator._history_cards_snapshot(limit=20)
             payload = orchestrator._build_final_payload(
@@ -1067,6 +1621,7 @@ class DebateService:
 
     @staticmethod
     def _is_placeholder_conclusion(text: str) -> bool:
+        """判断结论是否只是占位或降级文案。"""
         summary = str(text or "").strip()
         if not summary:
             return True
@@ -1098,6 +1653,7 @@ class DebateService:
 
     @staticmethod
     def _coerce_confidence(value: Any, default: float = 0.0) -> float:
+        """把任意置信度值安全收敛到 0~1 区间。"""
         try:
             return max(0.0, min(1.0, float(value)))
         except (TypeError, ValueError):
@@ -1105,6 +1661,7 @@ class DebateService:
 
     @staticmethod
     def _has_meaningful_evidence(raw_items: Any) -> bool:
+        """判断证据链里是否至少存在一条非空证据。"""
         if not isinstance(raw_items, list):
             return False
         for item in raw_items:
@@ -1124,6 +1681,7 @@ class DebateService:
         return False
 
     def _has_effective_llm_conclusion(self, debate_result: Dict[str, Any]) -> bool:
+        """判断当前结果是否满足“有效大模型结论”门禁。"""
         if not isinstance(debate_result, dict):
             return False
         final_judgment = debate_result.get("final_judgment")
@@ -1206,6 +1764,7 @@ class DebateService:
         *,
         allow_peer_fallback: bool = False,
     ) -> Dict[str, Any]:
+        """执行promote裁决结论相关逻辑，并为当前模块提供可复用的处理能力。"""
         if not isinstance(debate_result, dict):
             return debate_result
         history = debate_result.get("debate_history")
@@ -1319,6 +1878,7 @@ class DebateService:
         assets: Dict[str, Any],
         error_text: str,
     ) -> Dict[str, Any]:
+        """构造一份可审计的降级辩论结果。"""
         parsed_data = context.get("parsed_data") if isinstance(context.get("parsed_data"), dict) else {}
         interface_mapping = assets.get("interface_mapping") if isinstance(assets.get("interface_mapping"), dict) else {}
         endpoint = interface_mapping.get("matched_endpoint") if isinstance(interface_mapping.get("matched_endpoint"), dict) else {}
@@ -1406,6 +1966,7 @@ class DebateService:
         }
 
     async def _emit_event(self, event_callback, event: Dict[str, Any]) -> None:
+        """安全触发事件回调；回调为空时直接跳过。"""
         if not event_callback:
             return
         maybe_coro = event_callback(event)
@@ -1421,6 +1982,7 @@ class DebateService:
         trace_id: Optional[str] = None,
         force: bool = False,
     ) -> None:
+        """执行一次受状态机约束的状态迁移，并按需发出状态变化事件。"""
         current = session.status
         allowed = self._STATUS_TRANSITIONS.get(current, set())
         if not force and next_status != current and next_status not in allowed:
@@ -1479,6 +2041,7 @@ class DebateService:
         debate_session_id: str,
         trace_id: Optional[str] = None,
     ) -> None:
+        """把报告快照持久化到报告仓储；失败时仅记录 warning。"""
         try:
             # 延迟导入，避免 debate_service <-> report_service 的模块循环依赖。
             from app.services.report_service import report_service
@@ -1548,6 +2111,7 @@ class DebateService:
         return result
 
     def _is_placeholder_root_cause(self, root_cause: Optional[str]) -> bool:
+        """判断根因文本是否为空或明显属于占位描述。"""
         text = str(root_cause or "").strip()
         if not text:
             return True
@@ -1558,6 +2122,7 @@ class DebateService:
         return False
 
     def _pick_best_round_conclusion(self, rounds: List[DebateRound]) -> Optional[Dict[str, Any]]:
+        """从历史轮次中挑出最可信的一条专家结论作为兜底。"""
         best: Optional[Dict[str, Any]] = None
         best_score = -1.0
         category_map = {
@@ -1862,6 +2427,7 @@ class DebateService:
         session: DebateSession,
         evidence: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        """基于上下游传播关系估算拓扑传播得分。"""
         return score_topology_propagation(
             context=session.context if isinstance(session.context, dict) else {},
             evidence=evidence,
@@ -1876,6 +2442,7 @@ class DebateService:
         evidence_chain: List[EvidenceItem],
         topology_score: float,
     ) -> List[RootCauseCandidate]:
+        """从主结论和专家轮次中构建 Top-K 根因候选。"""
         candidates: List[RootCauseCandidate] = []
         seen = set()
         base_refs = [
@@ -1958,6 +2525,7 @@ class DebateService:
         return candidates
 
     def _fallback_cross_source_evidence(self, session: DebateSession) -> List[Dict[str, Any]]:
+        """正式证据链不足时，从专家轮次里补一份跨源证据兜底。"""
         fallback: List[Dict[str, Any]] = []
         for round_ in reversed(session.rounds):
             output = round_.output_content if isinstance(round_.output_content, dict) else {}
@@ -1991,6 +2559,7 @@ class DebateService:
         return fallback
 
     def _self_consistency_score(self, session: DebateSession) -> Dict[str, Any]:
+        """根据 Judge/Critic/Rebuttal 结论一致性估算自洽得分。"""
         conclusions: List[str] = []
         for round_ in session.rounds:
             if round_.agent_name in {"JudgeAgent", "CriticAgent", "RebuttalAgent"}:

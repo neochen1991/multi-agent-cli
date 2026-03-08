@@ -204,6 +204,10 @@ class RoutingState(TypedDict, total=False):
     supervisor_stop_requested: bool
     supervisor_stop_reason: str
     supervisor_notes: List[Dict[str, Any]]
+    awaiting_human_review: bool
+    human_review_reason: str
+    human_review_payload: Dict[str, Any]
+    resume_from_step: str
 
 
 class OutputState(TypedDict, total=False):
@@ -234,6 +238,10 @@ _ROUTING_KEY_MAP: Dict[str, str] = {
     "supervisor_stop_requested": "supervisor_stop_requested",
     "supervisor_stop_reason": "supervisor_stop_reason",
     "supervisor_notes": "supervisor_notes",
+    "awaiting_human_review": "awaiting_human_review",
+    "human_review_reason": "human_review_reason",
+    "human_review_payload": "human_review_payload",
+    "resume_from_step": "resume_from_step",
 }
 
 _OUTPUT_KEY_MAP: Dict[str, str] = {
@@ -247,6 +255,7 @@ _OUTPUT_KEY_MAP: Dict[str, str] = {
 
 
 def _mapping_value(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    """执行mapping价值相关逻辑，并为当前模块提供可复用的处理能力。"""
     value = payload.get(key)
     if isinstance(value, Mapping):
         return value
@@ -527,6 +536,18 @@ class DebateExecState(DebateMessagesState):
     # 记录每次路由决策的详细信息
     supervisor_notes: Annotated[List[Dict[str, Any]], take_latest]
 
+    # 是否等待人工审核（取最新）
+    awaiting_human_review: Annotated[bool, take_latest]
+
+    # 人工审核原因（取最新）
+    human_review_reason: Annotated[str, take_latest]
+
+    # 人工审核载荷（取最新）
+    human_review_payload: Annotated[Dict[str, Any], take_latest]
+
+    # 审核通过后的恢复步骤（取最新）
+    resume_from_step: Annotated[str, take_latest]
+
     # ==================== 输出 ====================
 
     # 最终结果载荷（取最新）
@@ -656,6 +677,10 @@ def create_initial_state(
             "supervisor_stop_requested": False,
             "supervisor_stop_reason": "",
             "supervisor_notes": [],
+            "awaiting_human_review": False,
+            "human_review_reason": "",
+            "human_review_payload": {},
+            "resume_from_step": "",
         },
         output_state={
             "history_cards": [],
@@ -683,6 +708,10 @@ def create_initial_state(
         supervisor_stop_requested=False,
         supervisor_stop_reason="",
         supervisor_notes=[],
+        awaiting_human_review=False,
+        human_review_reason="",
+        human_review_payload={},
+        resume_from_step="",
         final_payload={},
     )
 
@@ -740,6 +769,10 @@ def structured_state_snapshot(state: Mapping[str, Any]) -> Dict[str, Dict[str, A
         "supervisor_stop_requested": bool(flat.get("supervisor_stop_requested") or False),
         "supervisor_stop_reason": str(flat.get("supervisor_stop_reason") or ""),
         "supervisor_notes": list(flat.get("supervisor_notes") or []),
+        "awaiting_human_review": bool(flat.get("awaiting_human_review") or False),
+        "human_review_reason": str(flat.get("human_review_reason") or ""),
+        "human_review_payload": dict(flat.get("human_review_payload") or {}),
+        "resume_from_step": str(flat.get("resume_from_step") or ""),
     }
     output_state: OutputState = {
         "history_cards": list(flat.get("history_cards") or []),
@@ -788,6 +821,10 @@ def build_session_init_update(max_discussion_steps: int) -> Dict[str, Any]:
         "supervisor_stop_requested": False,
         "supervisor_stop_reason": "",
         "supervisor_notes": [],
+        "awaiting_human_review": False,
+        "human_review_reason": "",
+        "human_review_payload": {},
+        "resume_from_step": "",
     }
     return sync_structured_state(seed)
 

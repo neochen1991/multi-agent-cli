@@ -1,7 +1,10 @@
-"""Pure routing and guardrail helpers for LangGraph debate runtime.
+"""
+LangGraph 运行时的纯路由辅助模块。
 
-This module contains helper functions extracted from the original routing.py
-for backward compatibility and reuse.
+这个文件只负责“如何决定下一步该走到哪里”，不负责真正执行 Agent。
+拆出这些函数的目的有两个：
+1. 让路由规则可以单测，不必依赖完整 orchestrator。
+2. 让 supervisor / fallback / guardrail 的判断逻辑保持集中，避免散落在运行时主类里。
 """
 
 from __future__ import annotations
@@ -10,9 +13,11 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from app.runtime.messages import AgentEvidence
 
+KEY_EVIDENCE_AGENTS = ("LogAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent")
+
 
 def _agent_output_from_state(state: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
-    """Get agent output from state."""
+    """从运行态 state 中提取某个 Agent 最近一次结构化输出。"""
     outputs = state.get("agent_outputs")
     if not isinstance(outputs, dict):
         return {}
@@ -21,7 +26,12 @@ def _agent_output_from_state(state: Dict[str, Any], agent_name: str) -> Dict[str
 
 
 def _output_confidence(payload: Dict[str, Any], default: float = 0.0) -> float:
-    """Extract confidence from an agent output payload."""
+    """
+    从 Agent 输出里提取置信度。
+
+    这里优先读取顶层 `confidence`，其次兼容 `final_judgment.root_cause.confidence`
+    这种嵌套结构，避免不同 Agent 输出形态不一致时读不到置信度。
+    """
     if not isinstance(payload, dict):
         return float(default or 0.0)
     for key in ("confidence",):
@@ -43,19 +53,108 @@ def _output_confidence(payload: Dict[str, Any], default: float = 0.0) -> float:
     return float(default or 0.0)
 
 
+def _payload_is_degraded(payload: Dict[str, Any]) -> bool:
+    """判断一个 Agent 输出是否已经进入降级/缺证据语义。"""
+    if not isinstance(payload, dict):
+        return False
+    if bool(payload.get("degraded")):
+        return True
+    evidence_status = str(payload.get("evidence_status") or "").strip().lower()
+    if evidence_status in {"degraded", "missing", "inferred_without_tool"}:
+        return True
+    conclusion = str(payload.get("conclusion") or "").strip().lower()
+    return "调用超时，已降级继续" in conclusion or "调用异常，已降级继续" in conclusion
+
+
+def _agent_has_effective_evidence(round_cards: List[AgentEvidence], state: Dict[str, Any], agent_name: str) -> bool:
+    """
+    判断某个关键证据 Agent 是否已经给出“可用于裁决”的有效证据。
+
+    判定条件不是单纯“有输出”：
+    - 不能是 degraded/missing/inferred_without_tool
+    - 必须有结论或证据链
+    - 置信度要高于最小阈值
+    """
+    card = recent_agent_card(round_cards, agent_name)
+    payload = card.raw_output if card and isinstance(getattr(card, "raw_output", None), dict) else {}
+    if not payload:
+        payload = _agent_output_from_state(state, agent_name)
+    if not isinstance(payload, dict) or not payload:
+        return False
+    if _payload_is_degraded(payload):
+        return False
+    confidence = _output_confidence(payload, default=float(card.confidence or 0.0) if card else 0.0)
+    evidence = payload.get("evidence_chain")
+    has_evidence = isinstance(evidence, list) and len(evidence) > 0
+    conclusion = str(payload.get("conclusion") or "").strip()
+    return bool(conclusion or has_evidence) and confidence >= 0.35
+
+
+def _extract_judge_summary(payload: Dict[str, Any]) -> str:
+    """从 Judge 或主 Agent 的结构化输出里提取最适合展示/收口的总结文本。"""
+    if not isinstance(payload, dict):
+        return ""
+    final_judgment = payload.get("final_judgment")
+    if isinstance(final_judgment, dict):
+        root_cause = final_judgment.get("root_cause")
+        if isinstance(root_cause, dict):
+            summary = str(root_cause.get("summary") or "").strip()
+            if summary:
+                return summary
+    for key in ("conclusion", "chat_message", "summary"):
+        text = str(payload.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _has_effective_agent_conclusion(
+    round_cards: List[AgentEvidence],
+    state: Dict[str, Any],
+    agent_name: str,
+    is_placeholder_summary: Any,
+) -> bool:
+    """
+    判断指定 Agent 是否已经产出“不是占位语句”的有效结论。
+
+    这个函数主要用于收口门禁：
+    - Judge 已经有可靠裁决时，不应继续无意义续跑。
+    - 主 Agent 已总结完成时，应允许直接结束会话。
+    """
+    card = recent_agent_card(round_cards, agent_name)
+    payload = card.raw_output if card and isinstance(getattr(card, "raw_output", None), dict) else {}
+    if not payload:
+        payload = _agent_output_from_state(state, agent_name)
+    if not isinstance(payload, dict) or not payload:
+        return False
+    if _payload_is_degraded(payload):
+        return False
+    summary = _extract_judge_summary(payload)
+    return bool(summary) and not bool(is_placeholder_summary(summary))
+
+
 def step_for_agent(agent_name: str) -> str:
-    """Convert an agent name to a step string."""
+    """把 Agent 名称转换成 supervisor 使用的 `speak:*` 步骤字符串。"""
     return f"speak:{str(agent_name or '').strip()}"
 
 
 def agent_from_step(step: str) -> str:
-    """Extract agent name from a step string."""
+    """从 `speak:*` 形式的步骤名里还原 Agent 名称。"""
     text = str(step or "").strip()
     return text.split(":", 1)[1].strip() if text.startswith("speak:") and ":" in text else ""
 
 
 def supervisor_step_to_node(next_step: str) -> str:
-    """Convert a supervisor step to a node name."""
+    """
+    把 supervisor 产出的抽象步骤转换成图节点名。
+
+    supervisor 的输出是业务语义步骤，例如：
+    - `analysis_parallel`
+    - `critic`
+    - `speak:DatabaseAgent`
+
+    真正进入 LangGraph 时需要映射成具体 node 名称。
+    """
     step = str(next_step or "").strip()
     if not step:
         return "round_evaluate"
@@ -91,7 +190,7 @@ def supervisor_step_to_node(next_step: str) -> str:
 
 
 def recent_agent_card(round_cards: List[AgentEvidence], agent_name: str) -> Optional[AgentEvidence]:
-    """Get the most recent card for a specific agent."""
+    """获取某个 Agent 最近一张 round card。"""
     target = str(agent_name or "").strip()
     if not target:
         return None
@@ -102,17 +201,17 @@ def recent_agent_card(round_cards: List[AgentEvidence], agent_name: str) -> Opti
 
 
 def _recent_agent_card(round_cards: List[AgentEvidence], agent_name: str) -> Optional[AgentEvidence]:
-    """Alias for backward compatibility."""
+    """兼容旧调用入口，内部仍复用 `recent_agent_card`。"""
     return recent_agent_card(round_cards, agent_name)
 
 
 def recent_judge_card(round_cards: List[AgentEvidence]) -> Optional[AgentEvidence]:
-    """Get the most recent JudgeAgent card."""
+    """获取 JudgeAgent 最近一张 round card。"""
     return recent_agent_card(round_cards, "JudgeAgent")
 
 
 def round_agent_counts(round_cards: List[AgentEvidence]) -> Dict[str, int]:
-    """Count how many times each agent has appeared in the round."""
+    """统计当前轮每个 Agent 出现次数，用于检测重复续跑和异常循环。"""
     counts: Dict[str, int] = {}
     for card in round_cards:
         name = str(card.agent_name or "").strip()
@@ -125,12 +224,26 @@ def round_agent_counts(round_cards: List[AgentEvidence]) -> Dict[str, int]:
 def judge_is_ready(
     round_cards: List[AgentEvidence],
     *,
+    state: Optional[Dict[str, Any]] = None,
     parallel_analysis_agents: Sequence[str],
     debate_enable_critique: bool,
 ) -> bool:
-    """Check if judge is ready to make a decision."""
+    """
+    判断是否已经满足进入 Judge 的最小条件。
+
+    当前策略要求：
+    - 关键分析 Agent 至少都已经参与过
+    - 关键证据 Agent 至少有 2 个给出有效证据
+    - 如果开启 critique，则 Critic/Rebuttal 也必须完成
+    """
     seen = {str(card.agent_name or "").strip() for card in round_cards}
     if not all(name in seen for name in parallel_analysis_agents):
+        return False
+    runtime_state = state or {}
+    effective_key_agents = sum(
+        1 for name in KEY_EVIDENCE_AGENTS if _agent_has_effective_evidence(round_cards, runtime_state, name)
+    )
+    if effective_key_agents < 2:
         return False
     if debate_enable_critique:
         return "CriticAgent" in seen and "RebuttalAgent" in seen
@@ -147,14 +260,18 @@ def route_guardrail(
     parallel_analysis_agents: Sequence[str],
     debate_enable_critique: bool,
 ) -> Dict[str, Any]:
-    """Constrain supervisor routing to avoid low-signal loops.
+    """
+    对 supervisor 的路由结果施加守卫规则，防止低价值循环。
 
-    This function implements guardrail logic that can override the proposed
-    routing decision based on various heuristics.
+    这里不会自己发明路由，而是在“已有 route_decision”基础上做兜底修正，例如：
+    - 已有有效裁决时强制收口
+    - 讨论步数过多时阻止继续发散
+    - 缺证据时优先补关键证据而不是随意跳转
     """
     from app.runtime.langgraph.routing.rule_engine import RoutingRuleEngine
 
-    # Use the rule engine for evaluation
+    # 统一委托给规则引擎，保证这里的行为和治理/测试口径一致。
+    # guardrail 的职责不是替代 supervisor，而是在危险或低价值路由上兜底修正。
     engine = RoutingRuleEngine()
     return engine.evaluate_from_state(
         state=state,
@@ -177,11 +294,16 @@ def fallback_supervisor_route(
     max_discussion_steps_default: int,
     parallel_analysis_agents: Sequence[str],
 ) -> Dict[str, Any]:
-    """Fallback routing logic when LLM-based routing fails.
-
-    This implements a deterministic routing strategy based on agent coverage
-    and discussion state.
     """
+    当 LLM 路由失败时，使用确定性 fallback 规则决定下一步。
+
+    这个分支的目标不是“最聪明”，而是“可预期、可继续、可结束”：
+    - 优先补尚未覆盖的关键分析 Agent
+    - 满足裁决条件后进入 Judge
+    - 避免在缺少信息时无限循环
+    """
+    # fallback 路由只在 supervisor 没给出可用 next_step 时兜底。
+    # 规则保持保守：能 Judge 就 Judge，否则优先补缺失证据，再不行才继续并行分析。
     seen_agents = [card.agent_name for card in round_cards]
     seen_set = {str(name or "").strip() for name in seen_agents if str(name or "").strip()}
     outputs = state.get("agent_outputs")
@@ -197,10 +319,22 @@ def fallback_supervisor_route(
         if str(card.agent_name or "").strip() == "JudgeAgent":
             judge_count += 1
 
+    effective_key_agents = sum(
+        1 for name in KEY_EVIDENCE_AGENTS if _agent_has_effective_evidence(round_cards, state, name)
+    )
+
     if not all(name in seen_set for name in parallel_analysis_agents):
         return {
             "next_step": "analysis_parallel",
             "reason": "分析三专家尚未全部发言，先并行收集证据",
+            "should_stop": False,
+            "stop_reason": "",
+        }
+
+    if effective_key_agents < 2:
+        return {
+            "next_step": "analysis_parallel",
+            "reason": "关键证据Agent有效证据不足，继续补采日志/代码/数据库/指标证据",
             "should_stop": False,
             "stop_reason": "",
         }
@@ -300,8 +434,18 @@ def route_from_commander_output(
     fallback_supervisor_route_fn: Any,
     route_guardrail_fn: Any,
 ) -> Dict[str, Any]:
+    """
+    把主 Agent 的结构化路由输出转换成运行时最终使用的 route decision。
+
+    这个阶段会叠加多层约束：
+    - commander 原始意图
+    - 当前状态与 round cards
+    - guardrail 规则
+    - fallback 路由
+    """
     """Convert commander output to routing decision."""
     def _norm_agent_name(value: str) -> str:
+        """把 commander 输出里的 Agent 名称归一化成系统标准名称。"""
         text = str(value or "").strip()
         if not text:
             return ""
@@ -326,6 +470,9 @@ def route_from_commander_output(
     next_agent = str(payload.get("next_agent") or "").strip()
     should_stop = bool(payload.get("should_stop") or False)
     stop_reason = str(payload.get("stop_reason") or "").strip()
+    should_pause_for_review = bool(payload.get("should_pause_for_review") or False)
+    review_reason = str(payload.get("review_reason") or "").strip()
+    review_payload = payload.get("review_payload") if isinstance(payload.get("review_payload"), dict) else {}
 
     allowed_agent_set = {str(name or "").strip() for name in allowed_agents if str(name or "").strip()}
     if next_agent and next_agent not in allowed_agent_set:
@@ -374,10 +521,57 @@ def route_from_commander_output(
                 should_stop = False
                 stop_reason = "JudgeAgent 结论仍为占位，继续裁决一次"
 
+    if not should_stop and next_step:
+        next_agent_name = agent_from_step(next_step)
+        judge_ready = _has_effective_agent_conclusion(
+            round_cards,
+            state,
+            "JudgeAgent",
+            is_placeholder_summary,
+        )
+        commander_ready = _has_effective_agent_conclusion(
+            round_cards,
+            state,
+            "ProblemAnalysisAgent",
+            is_placeholder_summary,
+        )
+        next_agent_card = recent_agent_card(round_cards, next_agent_name) if next_agent_name else None
+        next_agent_payload = (
+            next_agent_card.raw_output
+            if next_agent_card and isinstance(getattr(next_agent_card, "raw_output", None), dict)
+            else _agent_output_from_state(state, next_agent_name)
+        )
+        rerunning_degraded_agent = bool(next_agent_name) and bool(next_agent_payload) and _payload_is_degraded(next_agent_payload)
+        discussion_step_count = int(state.get("discussion_step_count") or 0)
+        max_steps = int(state.get("max_discussion_steps") or 0)
+        near_budget_end = max_steps > 0 and discussion_step_count >= max_steps - 1
+        if (
+            next_agent_name
+            and next_agent_name != "VerificationAgent"
+            and judge_ready
+            and (commander_ready or rerunning_degraded_agent or near_budget_end)
+        ):
+            next_step = ""
+            should_stop = True
+            stop_reason = stop_reason or (
+                "JudgeAgent 已形成有效裁决，主Agent 已完成收敛，停止继续调度额外专家"
+            )
+
+    if should_stop:
+        return {
+            "next_step": "",
+            "should_stop": True,
+            "stop_reason": stop_reason,
+            "reason": "主Agent动态调度决策",
+            "should_pause_for_review": should_pause_for_review,
+            "review_reason": review_reason,
+            "review_payload": review_payload,
+        }
+
     if not next_step and not should_stop:
         return fallback_supervisor_route_fn(state=state, round_cards=round_cards)
 
-    return route_guardrail_fn(
+    result = route_guardrail_fn(
         state=state,
         round_cards=round_cards,
         route_decision={
@@ -385,8 +579,17 @@ def route_from_commander_output(
             "should_stop": should_stop,
             "stop_reason": stop_reason,
             "reason": "主Agent动态调度决策",
+            "should_pause_for_review": should_pause_for_review,
+            "review_reason": review_reason,
+            "review_payload": review_payload,
         },
     )
+    if should_pause_for_review:
+        result["should_pause_for_review"] = True
+        result["review_reason"] = review_reason
+        result["review_payload"] = review_payload
+        result.setdefault("resume_from_step", "report_generation")
+    return result
 
 
 __all__ = [

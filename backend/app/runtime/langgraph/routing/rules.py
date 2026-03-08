@@ -139,6 +139,7 @@ class RoutingRule(ABC):
         ...
 
     def __repr__(self) -> str:
+        """返回便于调试和日志排查的对象文本表示。"""
         return f"{self.__class__.__name__}(name={self.name!r}, priority={self.priority})"
 
 
@@ -166,13 +167,16 @@ class CompositeRule(RoutingRule):
 
     @property
     def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._name
 
     @property
     def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
         return self._priority if self._priority is not None else super().priority
 
     def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
         results = []
         for rule in self._rules:
             result = rule.evaluate(ctx)

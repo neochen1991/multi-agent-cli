@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-轻量压测脚本（非 pytest）
-"""
+"""冒烟加载test相关测试。"""
 
 from __future__ import annotations
 
@@ -14,6 +12,8 @@ import httpx
 
 
 async def worker(client: httpx.AsyncClient, base_url: str, count: int, latencies: list[float]):
+    """为测试场景提供worker辅助逻辑。"""
+    
     for _ in range(count):
         start = time.perf_counter()
         resp = await client.get(f"{base_url}/health")
@@ -22,6 +22,8 @@ async def worker(client: httpx.AsyncClient, base_url: str, count: int, latencies
 
 
 async def main():
+    """为测试场景提供主流程辅助逻辑。"""
+    
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://localhost:8000")
     parser.add_argument("--requests", type=int, default=200)

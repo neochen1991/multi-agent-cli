@@ -11,6 +11,7 @@ class PhaseManager:
     """Simple phase transitions for RCA workflow."""
 
     def phase_for_round(self, current_round: int, max_rounds: int) -> str:
+        """执行phaseforround相关逻辑，并为当前模块提供可复用的处理能力。"""
         if current_round <= 0:
             return "coordination"
         if current_round >= max_rounds:
@@ -18,6 +19,7 @@ class PhaseManager:
         return "analysis"
 
     def summarize(self, *, current_round: int, max_rounds: int) -> Dict[str, int | str]:
+        """执行summarize相关逻辑，并为当前模块提供可复用的处理能力。"""
         return {
             "current_round": current_round,
             "max_rounds": max_rounds,

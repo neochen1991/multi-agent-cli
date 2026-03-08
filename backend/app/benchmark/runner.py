@@ -23,6 +23,7 @@ logger = structlog.get_logger()
 
 @dataclass(frozen=True)
 class BenchmarkRunOptions:
+    """封装BenchmarkRunOptions相关数据结构或服务能力。"""
     limit: int = 3
     timeout_seconds: int = 240
     write_baseline: bool = True
@@ -32,6 +33,7 @@ class BenchmarkRunner:
     """Execute fixtures end-to-end and produce a baseline report JSON."""
 
     def __init__(self) -> None:
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
         self._metrics_dir = Path(__file__).resolve().parents[3] / "docs" / "metrics"
         self._metrics_dir.mkdir(parents=True, exist_ok=True)
 
@@ -59,6 +61,7 @@ class BenchmarkRunner:
         return updated
 
     async def _run_one(self, fixture: IncidentFixture, timeout_seconds: int) -> Dict[str, Any]:
+        """负责运行one，并处理调用过程中的超时、错误与返回结果。"""
         started = perf_counter()
         status = "ok"
         predicted_root_cause = ""
@@ -189,6 +192,7 @@ class BenchmarkRunner:
         }
 
     async def run(self, options: BenchmarkRunOptions | None = None) -> Dict[str, Any]:
+        """负责运行，并处理调用过程中的超时、错误与返回结果。"""
         opts = options or BenchmarkRunOptions()
         await self._cleanup_stale_benchmark_incidents()
         fixtures = load_fixtures(limit=max(1, int(opts.limit or 3)))

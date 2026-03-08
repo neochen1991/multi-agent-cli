@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Generate a visual PPTX deck for:
-Vibe Coding in production SRE agent systems.
-"""
+"""generateVibeCoding大纲PPT脚本。"""
 
 from __future__ import annotations
 
@@ -31,6 +28,8 @@ OUT_REFS = OUT_DIR / "refs.md"
 
 
 class Theme:
+    """封装Theme相关常量或数据结构。"""
+    
     white = RGBColor(255, 255, 255)
     bg = RGBColor(245, 248, 253)
     navy = RGBColor(18, 42, 76)
@@ -52,6 +51,8 @@ class Theme:
 
 
 def ensure_dirs() -> None:
+    """确保dirs相关前置条件已经满足。"""
+    
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -66,6 +67,8 @@ def add_chart(
     categories: list[str],
     series: list[tuple[str, list[float]]],
 ) -> None:
+    """向当前页补充图表相关元素，并统一样式与布局。"""
+    
     chart_data = CategoryChartData()
     chart_data.categories = categories
     for name, values in series:
@@ -97,6 +100,8 @@ def add_chart(
 
 
 def new_prs() -> Presentation:
+    """执行新增prs相关逻辑。"""
+    
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
@@ -104,6 +109,8 @@ def new_prs() -> Presentation:
 
 
 def add_bg(slide, prs: Presentation) -> None:
+    """向当前页补充背景相关元素，并统一样式与布局。"""
+    
     bg = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
     bg.fill.solid()
     bg.fill.fore_color.rgb = Theme.bg
@@ -111,6 +118,8 @@ def add_bg(slide, prs: Presentation) -> None:
 
 
 def add_topbar(slide, title: str, subtitle: str, page: int) -> None:
+    """向当前页补充topbar相关元素，并统一样式与布局。"""
+    
     bar = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(0.86)
     )
@@ -142,6 +151,8 @@ def add_topbar(slide, title: str, subtitle: str, page: int) -> None:
 
 
 def add_footer_source(slide, source: str) -> None:
+    """向当前页补充页脚来源相关元素，并统一样式与布局。"""
+    
     box = slide.shapes.add_textbox(Inches(0.55), Inches(7.12), Inches(11.8), Inches(0.2))
     p = box.text_frame.paragraphs[0]
     p.text = f"Source: {source}"
@@ -150,6 +161,8 @@ def add_footer_source(slide, source: str) -> None:
 
 
 def add_pill(slide, x: float, y: float, w: float, text: str, fill: RGBColor, color: RGBColor = Theme.text) -> None:
+    """向当前页补充标签相关元素，并统一样式与布局。"""
+    
     pill = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(0.42)
     )
@@ -166,6 +179,8 @@ def add_pill(slide, x: float, y: float, w: float, text: str, fill: RGBColor, col
 
 
 def add_card(slide, x: float, y: float, w: float, h: float, fill: RGBColor = Theme.white):
+    """向当前页补充卡片相关元素，并统一样式与布局。"""
+    
     card = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h)
     )
@@ -188,6 +203,8 @@ def add_text(
     color: RGBColor = Theme.text,
     align: str = "left",
 ) -> None:
+    """向当前页补充文本相关元素，并统一样式与布局。"""
+    
     box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
     tf = box.text_frame
     tf.word_wrap = True
@@ -205,6 +222,8 @@ def add_text(
 def add_bullets(
     slide, x: float, y: float, w: float, h: float, lines: Iterable[str], *, size: int = 14, color: RGBColor = Theme.text
 ) -> None:
+    """向当前页补充bullets相关元素，并统一样式与布局。"""
+    
     box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
     tf = box.text_frame
     tf.word_wrap = True
@@ -216,6 +235,8 @@ def add_bullets(
 
 
 def add_arrow(slide, x: float, y: float, w: float, h: float, color: RGBColor = Theme.blue) -> None:
+    """向当前页补充箭头相关元素，并统一样式与布局。"""
+    
     arr = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RIGHT_ARROW, Inches(x), Inches(y), Inches(w), Inches(h))
     arr.fill.solid()
     arr.fill.fore_color.rgb = color
@@ -223,6 +244,8 @@ def add_arrow(slide, x: float, y: float, w: float, h: float, color: RGBColor = T
 
 
 def slide_1_cover(prs: Presentation) -> None:
+    """构建1封面对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
 
@@ -289,6 +312,8 @@ def slide_1_cover(prs: Presentation) -> None:
 
 
 def slide_2_why(prs: Presentation) -> None:
+    """构建2why对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "为什么现在必须做 Vibe Coding", "Speed with quality", 2)
@@ -341,6 +366,8 @@ def slide_2_why(prs: Presentation) -> None:
 
 
 def slide_3_harness(prs: Presentation) -> None:
+    """构建3harness对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "业界共识 1：Harness Engineering", "System over ad-hoc prompts", 3)
@@ -366,6 +393,8 @@ def slide_3_harness(prs: Presentation) -> None:
 
 
 def slide_4_context(prs: Presentation) -> None:
+    """构建4上下文对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "业界共识 2：上下文工程优先", "Context > long prompts", 4)
@@ -407,6 +436,8 @@ def slide_4_context(prs: Presentation) -> None:
 
 
 def slide_5_workflow(prs: Presentation) -> None:
+    """构建5工作流对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "业界共识 3：标准工作流", "Explore -> Plan -> Build -> Verify -> Release", 5)
@@ -445,6 +476,8 @@ def slide_5_workflow(prs: Presentation) -> None:
 
 
 def slide_6_gate(prs: Presentation) -> None:
+    """构建6门禁对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "业界共识 4：测试和评测是 Vibe Coding 的刹车系统", "Quality gate as brakes", 6)
@@ -485,6 +518,8 @@ def slide_6_gate(prs: Presentation) -> None:
 
 
 def slide_7_mcp(prs: Presentation) -> None:
+    """构建7MCP对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "业界共识 5：MCP/工具化接入必须标准化", "Capability with governance", 7)
@@ -516,6 +551,8 @@ def slide_7_mcp(prs: Presentation) -> None:
 
 
 def slide_8_multi_agent(prs: Presentation) -> None:
+    """构建8multiAgent对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "业界共识 6：多 Agent 不是多线程，而是可控协作机制", "Protocol over parallel noise", 8)
@@ -552,6 +589,8 @@ def slide_8_multi_agent(prs: Presentation) -> None:
 
 
 def slide_9_antipattern(prs: Presentation) -> None:
+    """构建9antipattern对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "业界反模式（必须避开）", "Common failure patterns", 9)
@@ -573,6 +612,8 @@ def slide_9_antipattern(prs: Presentation) -> None:
 
 
 def slide_10_project_harness(prs: Presentation) -> None:
+    """构建10项目harness对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "本项目案例 1：我们如何实现 Harness 化", "Runtime orchestration", 10)
@@ -626,6 +667,8 @@ def slide_10_project_harness(prs: Presentation) -> None:
 
 
 def slide_11_skill_tool(prs: Presentation) -> None:
+    """构建11Skill工具对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "本项目案例 2：Skill + Tool + 审计闭环", "Controlled capabilities", 11)
@@ -679,6 +722,8 @@ def slide_11_skill_tool(prs: Presentation) -> None:
 
 
 def slide_12_resilience(prs: Presentation) -> None:
+    """构建12韧性对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "本项目案例 3：韧性设计（超时、降级、恢复）", "Timeout, degrade, recover", 12)
@@ -720,6 +765,8 @@ def slide_12_resilience(prs: Presentation) -> None:
 
 
 def slide_13_2week(prs: Presentation) -> None:
+    """构建132week对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "团队落地模板（2 周可执行）", "From idea to operational practice", 13)
@@ -765,6 +812,8 @@ def slide_13_2week(prs: Presentation) -> None:
 
 
 def slide_14_roadmap(prs: Presentation) -> None:
+    """构建14路线图对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "90 天路线图（从可用到规模化）", "P0 -> P3 capability maturity", 14)
@@ -800,6 +849,8 @@ def slide_14_roadmap(prs: Presentation) -> None:
 
 
 def slide_15_close(prs: Presentation) -> None:
+    """构建15关闭对应的幻灯片内容，并完成该页布局与文案写入。"""
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     add_bg(slide, prs)
     add_topbar(slide, "结尾与行动清单", "Execution checklist", 15)
@@ -828,6 +879,8 @@ def slide_15_close(prs: Presentation) -> None:
 
 
 def write_readme() -> None:
+    """写出说明文档相关产物。"""
+    
     OUT_README.write_text(
         "\n".join(
             [
@@ -847,6 +900,8 @@ def write_readme() -> None:
 
 
 def write_slides_md() -> None:
+    """写出幻灯片md相关产物。"""
+    
     OUT_SLIDES.write_text(
         "# Vibe Coding 实践分享 Slides\n\n"
         "来源提纲：`docs/plans/2026-03-06-vibe-coding-ppt-outline.md`\n\n"
@@ -885,6 +940,8 @@ def write_slides_md() -> None:
 
 
 def write_notes_md() -> None:
+    """写出备注md相关产物。"""
+    
     OUT_NOTES.write_text(
         "# Speaker Notes\n\n"
         "受众：研发负责人、SRE、平台工程、AI 工程团队\n"
@@ -924,6 +981,8 @@ def write_notes_md() -> None:
 
 
 def write_refs_md() -> None:
+    """写出参考资料md相关产物。"""
+    
     OUT_REFS.write_text(
         "# References\n\n"
         "1. OpenAI Harness Engineering\n"
@@ -955,6 +1014,8 @@ def write_refs_md() -> None:
 
 
 def main() -> None:
+    """执行脚本主流程，串联参数解析、内容生成与结果输出。"""
+    
     ensure_dirs()
 
     prs = new_prs()

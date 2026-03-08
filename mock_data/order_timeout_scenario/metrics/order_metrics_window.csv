@@ -1,0 +1,7 @@
+timestamp,service,order.error.rate,order.latency.p99,inventory.lock.wait.p95,payment.timeout.rate,hikari.pending.connections,db.active.connections,jvm.thread.count,process.cpu.usage
+2026-03-08T10:35:00,order-service,0.8,0.42,0.018,0.3,0,6,148,42
+2026-03-08T10:38:00,inventory-service,1.4,0.76,1.84,0.8,2,9,162,49
+2026-03-08T10:39:00,payment-service,4.9,2.8,3.12,3.8,9,14,198,68
+2026-03-08T10:40:00,order-service,9.8,5.7,5.21,7.6,28,19,244,82
+2026-03-08T10:41:00,order-service,18.7,12.4,11.8,12.4,87,20,286,91
+2026-03-08T10:42:00,order-service,11.2,4.2,4.7,6.1,18,15,203,73

@@ -1,6 +1,6 @@
-"""
-API 路由汇总
-API Router Aggregation
+"""API 路由汇总模块。
+
+集中挂载各业务子路由，保证 `api/v1` 入口只在一处维护前缀和标签。
 """
 
 from fastapi import APIRouter
@@ -9,7 +9,7 @@ from app.api import incidents, assets, debates, reports, auth, settings as setti
 
 api_router = APIRouter()
 
-# 注册各模块路由
+# 统一在此处注册业务子路由，避免主应用层散落 include_router 调用。
 api_router.include_router(
     auth.router,
     prefix="/auth",

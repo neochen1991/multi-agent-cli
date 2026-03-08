@@ -15,11 +15,15 @@ router = APIRouter()
 
 
 class LoginRequest(BaseModel):
+    """登录请求体，要求提供用户名和密码。"""
+
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
 
 
 class LoginResponse(BaseModel):
+    """登录成功响应，返回访问令牌及其过期时间。"""
+
     access_token: str
     token_type: str
     expires_at: datetime
@@ -28,12 +32,15 @@ class LoginResponse(BaseModel):
 
 
 class UserResponse(BaseModel):
+    """当前登录用户信息。"""
+
     username: str
     role: str
 
 
 @router.post("/login", response_model=LoginResponse, summary="用户登录")
 async def login(request: LoginRequest):
+    """校验用户名密码并签发访问令牌。"""
     user = authenticate_user(request.username, request.password)
     if not user:
         raise HTTPException(
@@ -53,6 +60,7 @@ async def login(request: LoginRequest):
 
 @router.get("/me", response_model=UserResponse, summary="获取当前用户")
 async def me(authorization: str = Header(default="")):
+    """解析 Bearer Token，返回当前登录用户身份。"""
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Bearer token")
     user = decode_token(authorization.replace("Bearer ", "", 1).strip())

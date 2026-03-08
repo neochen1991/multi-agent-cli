@@ -1,8 +1,6 @@
-"""
-业务服务层
-Business Services
+"""业务服务层导出入口。
 
-Use lazy export to avoid importing heavy service graphs at package import time.
+通过惰性导出避免在 `app.services` 包导入时一次性加载所有重型依赖，减少启动期循环依赖和初始化开销。
 """
 
 from __future__ import annotations
@@ -27,6 +25,7 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
+    """按名称延迟导入具体服务模块。"""
     service_module_map = {
         "IncidentService": "app.services.incident_service",
         "incident_service": "app.services.incident_service",

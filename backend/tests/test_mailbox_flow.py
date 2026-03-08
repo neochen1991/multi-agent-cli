@@ -1,4 +1,4 @@
-"""Tests for explicit mailbox-based agent communication."""
+"""test邮箱flow相关测试。"""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from app.runtime.messages import AgentMessage
 
 
 def test_mailbox_enqueue_and_dequeue_roundtrip():
+    """验证邮箱enqueueanddequeue往返。"""
+    
     mailbox = {}
     enqueue_message(
         mailbox,
@@ -34,10 +36,13 @@ def test_mailbox_enqueue_and_dequeue_roundtrip():
 
 @pytest.mark.asyncio
 async def test_round_start_enqueues_commander_commands_to_mailbox(monkeypatch):
+    """验证轮次startenqueues主Agentcommandsto邮箱。"""
+    
     orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
     orchestrator._emit_event = AsyncMock()
 
     async def _fake_commander(**kwargs):
+        """为测试场景提供主Agent模拟实现。"""
         _ = kwargs
         return {
             "commands": {
