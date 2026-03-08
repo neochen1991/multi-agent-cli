@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SRE RCA Investigation Workbench Mock</title>
+    <link rel="stylesheet" href="/figma-mockups/mockups.css" />
+    <script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="topbar-brand">
+          <div class="logo">RC</div>
+          <div class="brand-copy">
+            <h1>Incident Investigation Workbench</h1>
+            <p>Evidence-first multi-agent investigation console</p>
+          </div>
+        </div>
+        <div class="topbar-status">
+          <div class="status-chip">session deb_958527ac · round 1/1</div>
+          <div>2026-03-08 22:36 CST</div>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar">
+          <div class="sidebar-section">
+            <div class="sidebar-label">Navigation</div>
+            <div class="nav-list">
+              <div class="nav-item">首页总控台</div>
+              <div class="nav-item active">故障分析</div>
+              <div class="nav-item">历史会话</div>
+              <div class="nav-item">责任田资产</div>
+              <div class="nav-item">设置</div>
+              <div class="nav-item">高级能力</div>
+            </div>
+          </div>
+          <div class="sidebar-section sidebar-card">
+            <h3>当前事件</h3>
+            <p>inc_958527ac<br />/orders 接口 502，CPU 飙升，DB 连接打满。目标是让操作者先看到命令、证据和结论，而不是一堆 tab。</p>
+          </div>
+          <div class="sidebar-section sidebar-card">
+            <h4>运行状态</h4>
+            <p>Main Agent 已下发命令，LogAgent / CodeAgent / DomainAgent / DatabaseAgent 正在并行取证。</p>
+          </div>
+        </aside>
+
+        <main class="main">
+          <section class="page-header">
+            <div>
+              <h2>故障分析工作台</h2>
+              <p>页面结构改为左中右调查台：左侧控制输入，中部展示对话和证据，右侧收敛责任田映射、根因候选和行动建议。</p>
+            </div>
+            <div class="header-actions">
+              <button class="btn">重新生成报告</button>
+              <button class="btn primary">继续调查</button>
+            </div>
+          </section>
+
+          <section class="workbench-grid">
+            <div class="stack">
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h3 class="panel-title">事件输入</h3>
+                    <div class="panel-subtitle">保留输入，但弱化为侧边控制区。</div>
+                  </div>
+                </div>
+                <div class="stack">
+                  <div class="field">
+                    <label>事件标题</label>
+                    <div class="input">/orders 接口 502，CPU 超过 100%</div>
+                  </div>
+                  <div class="field">
+                    <label>会话模式</label>
+                    <div class="pill-row">
+                      <div class="pill active">standard</div>
+                      <div class="pill">quick</div>
+                      <div class="pill">background</div>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label>日志摘要</label>
+                    <div class="textarea">Gateway 502 / costMs 30211
+OrderAppService CannotCreateTransactionException
+HikariPool request timed out after 30000ms
+MySQL lock wait timeout exceeded on t_order_item</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h3 class="panel-title">会话控制</h3>
+                    <div class="panel-subtitle">把状态、轮次、自动调查入口收在一个可操作区域。</div>
+                  </div>
+                </div>
+                <div class="status-grid">
+                  <div class="status-row">
+                    <div>
+                      <div class="status-name">阶段</div>
+                      <div class="status-meta">DEBATING</div>
+                    </div>
+                    <span class="badge amber">Live</span>
+                  </div>
+                  <div class="status-row">
+                    <div>
+                      <div class="status-name">轮次</div>
+                      <div class="status-meta">1 / 1</div>
+                    </div>
+                    <span class="badge brand">locked</span>
+                  </div>
+                  <div class="status-row">
+                    <div>
+                      <div class="status-name">工具调用</div>
+                      <div class="status-meta">4 agents / 7 calls</div>
+                    </div>
+                    <span class="badge teal">Audited</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="timeline">
+                <div class="section-label">原始事件明细</div>
+                <div class="timeline-card">
+                  <div class="timeline-meta"><span>22:35:07</span><span>gateway</span></div>
+                  <h4>POST /api/v1/orders 502</h4>
+                  <p>网关在 30s 超时后返回 502，traceId 已与 order-service 日志串联。</p>
+                </div>
+                <div class="timeline-card">
+                  <div class="timeline-meta"><span>22:35:38</span><span>order-service</span></div>
+                  <h4>CannotCreateTransactionException</h4>
+                  <p>连接池在事务开启前耗尽，pending threads 超过 400。</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="stack">
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h3 class="panel-title">辩论过程</h3>
+                    <div class="panel-subtitle">主工作区以对话和证据条为核心，事件明细降级到底部。</div>
+                  </div>
+                  <span class="badge brand">Discord-like stream</span>
+                </div>
+
+                <div class="chat-card">
+                  <div class="message">
+                    <div class="message-head">
+                      <div class="message-title">ProblemAnalysisAgent · 指挥命令</div>
+                      <div class="message-time">22:35:10</div>
+                    </div>
+                    <div class="bubble command">
+                      /orders 502 已命中 order-domain-team。请 LogAgent 聚焦超时链路与线程放大，CodeAgent 检查 OrderAppService 事务边界和近 24h 变更，DomainAgent 校验责任田与依赖边界，DatabaseAgent 核查 t_order / t_order_item / t_inventory 的锁、索引和慢 SQL。
+                    </div>
+                  </div>
+
+                  <div class="tool-strip">
+                    <strong>DatabaseAgent 调用 PostgreSQL 诊断工具</strong>
+                    <span>读取表结构、索引和锁等待摘要，耗时 1.8s，命中 t_order_item 与 t_inventory 写锁竞争。</span>
+                  </div>
+
+                  <div class="message">
+                    <div class="message-head">
+                      <div class="message-title">LogAgent · 初步结论</div>
+                      <div class="message-time">22:35:17</div>
+                    </div>
+                    <div class="bubble agent">
+                      Trace 已贯通：网关 30211ms 超时与 order-service 事务创建失败在同一请求链。CPU 与线程飙升更像是连接池阻塞引发的级联放大，而不是单纯上游网络超时。
+                    </div>
+                  </div>
+
+                  <div class="tool-strip">
+                    <strong>CodeAgent 调用 Git 仓库搜索</strong>
+                    <span>命中 `OrderAppService.createOrder`、`InventoryClient.deduct` 与近 24 小时事务相关改动 3 条。</span>
+                  </div>
+
+                  <div class="message">
+                    <div class="message-head">
+                      <div class="message-title">CodeAgent · 代码侧判断</div>
+                      <div class="message-time">22:35:22</div>
+                    </div>
+                    <div class="bubble agent">
+                      createOrder 在同一事务内串行执行订单落库和库存扣减，若库存调用阻塞，会长时间持有连接与行锁，足以解释连接池耗尽和后续 CPU 放大。
+                    </div>
+                  </div>
+
+                  <div class="message">
+                    <div class="message-head">
+                      <div class="message-title">JudgeAgent · 阶段结论</div>
+                      <div class="message-time">22:35:31</div>
+                    </div>
+                    <div class="bubble judge">
+                      Top1 根因：订单创建事务边界过宽，叠加库存写锁竞争导致连接池耗尽。建议先缩短事务范围并隔离库存扣减链路，再复核连接池参数是否匹配峰值流量。
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="stack">
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h3 class="panel-title">责任田映射</h3>
+                    <div class="panel-subtitle">固定展示在右栏，不再埋在 tab 里。</div>
+                  </div>
+                  <span class="badge teal">Matched</span>
+                </div>
+                <dl class="summary-grid">
+                  <div class="summary-row"><dt>领域</dt><dd>订单域</dd></div>
+                  <div class="summary-row"><dt>聚合根</dt><dd>Order</dd></div>
+                  <div class="summary-row"><dt>Owner</dt><dd>order-domain-team / alice</dd></div>
+                  <div class="summary-row"><dt>API</dt><dd>POST /api/v1/orders</dd></div>
+                  <div class="summary-row"><dt>表</dt><dd>t_order, t_order_item, t_inventory</dd></div>
+                </dl>
+              </div>
+
+              <div class="evidence-card">
+                <div class="panel-head" style="margin-bottom:0;">
+                  <div>
+                    <h3 class="panel-title">证据链</h3>
+                    <div class="panel-subtitle">强调“结论背后有哪些证据”。</div>
+                  </div>
+                </div>
+                <div class="evidence-item">
+                  <h5>22:35:07 · 网关超时</h5>
+                  <p>gateway costMs=30211，说明上游等待超过 30s，非纯瞬时错误。</p>
+                </div>
+                <div class="evidence-item">
+                  <h5>22:35:18 · 连接池耗尽</h5>
+                  <p>HikariPool request timed out after 30000ms，pending threads &gt; 400。</p>
+                </div>
+                <div class="evidence-item">
+                  <h5>22:35:24 · DB 锁竞争</h5>
+                  <p>t_order_item lock wait timeout，blocking SQL 指向 t_inventory 更新语句。</p>
+                </div>
+              </div>
+
+              <div class="evidence-card">
+                <div class="panel-head" style="margin-bottom:0;">
+                  <div>
+                    <h3 class="panel-title">Top-K 根因候选</h3>
+                    <div class="panel-subtitle">报告区域要可视化，不再直接渲染 Markdown。</div>
+                  </div>
+                </div>
+                <div class="evidence-item">
+                  <h5>Top1 · 0.81</h5>
+                  <p>事务边界过宽 + 库存写锁竞争 -> 连接池耗尽 -> 网关 502。</p>
+                </div>
+                <div class="evidence-item">
+                  <h5>Top2 · 0.46</h5>
+                  <p>连接池参数偏小，在峰值流量下无缓冲空间。</p>
+                </div>
+                <div class="evidence-item">
+                  <h5>Top3 · 0.28</h5>
+                  <p>近 24h 代码变更引入库存重试路径，放大锁持有时间。</p>
+                </div>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

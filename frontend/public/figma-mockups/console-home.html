@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SRE RCA Console Home Mock</title>
+    <link rel="stylesheet" href="/figma-mockups/mockups.css" />
+    <script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="topbar-brand">
+          <div class="logo">RC</div>
+          <div class="brand-copy">
+            <h1>SRE Root Cause Console</h1>
+            <p>Production Incident Investigation Workspace</p>
+          </div>
+        </div>
+        <div class="topbar-status">
+          <div class="status-chip">LLM / Tools / Audit all healthy</div>
+          <div>2026-03-08 22:30 CST</div>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar">
+          <div class="sidebar-section">
+            <div class="sidebar-label">Navigation</div>
+            <div class="nav-list">
+              <div class="nav-item active">首页总控台</div>
+              <div class="nav-item">故障分析</div>
+              <div class="nav-item">历史会话</div>
+              <div class="nav-item">责任田资产</div>
+              <div class="nav-item">设置</div>
+              <div class="nav-item">高级能力</div>
+            </div>
+          </div>
+          <div class="sidebar-section sidebar-card">
+            <h3>本班次摘要</h3>
+            <p>运行中会话 7 个，需人工关注 2 个。告警自动建会话已开启，最近 30 分钟无阻塞任务。</p>
+          </div>
+          <div class="sidebar-section sidebar-card">
+            <h4>接入状态</h4>
+            <p>日志文件、责任田 Excel、Git 仓库、PostgreSQL 配置齐全，Grafana / APM 预留入口待启用。</p>
+          </div>
+        </aside>
+
+        <main class="main">
+          <section class="page-header">
+            <div>
+              <h2>生产问题根因分析总控台</h2>
+              <p>首页不再承担宣传职责，只回答三件事：现在系统里发生了什么、有哪些会话在跑、下一步应该启动哪类调查。</p>
+            </div>
+            <div class="header-actions">
+              <button class="btn">导入责任田</button>
+              <button class="btn primary">创建并启动分析</button>
+            </div>
+          </section>
+
+          <section class="grid-4">
+            <div class="metric-card">
+              <div class="label">今日新建分析</div>
+              <div class="metric-value"><strong>28</strong><span>+6 vs 昨日</span></div>
+            </div>
+            <div class="metric-card">
+              <div class="label">运行中会话</div>
+              <div class="metric-value"><strong>7</strong><span>2 个需人工关注</span></div>
+            </div>
+            <div class="metric-card">
+              <div class="label">闭环率</div>
+              <div class="metric-value"><strong>83%</strong><span>Top1 命中率 71%</span></div>
+            </div>
+            <div class="metric-card">
+              <div class="label">平均定位时长</div>
+              <div class="metric-value"><strong>11m</strong><span>低于上周 18%</span></div>
+            </div>
+          </section>
+
+          <section class="split-hero">
+            <div class="panel">
+              <div class="panel-head">
+                <div>
+                  <h3 class="panel-title">快速创建分析</h3>
+                  <div class="panel-subtitle">在首页完成创建，不需要再先进入别的页面。</div>
+                </div>
+                <span class="badge brand">Default mode</span>
+              </div>
+              <div class="form-grid">
+                <div class="field">
+                  <label>故障标题</label>
+                  <div class="input">/orders 接口 502，CPU 飙升且 DB 连接打满</div>
+                </div>
+                <div class="field">
+                  <label>服务名称</label>
+                  <div class="input">order-service</div>
+                </div>
+                <div class="field">
+                  <label>环境</label>
+                  <div class="pill-select">production</div>
+                </div>
+                <div class="field">
+                  <label>严重级别</label>
+                  <div class="pill-row">
+                    <div class="pill">P3</div>
+                    <div class="pill">P2</div>
+                    <div class="pill active">P1</div>
+                    <div class="pill">P0</div>
+                  </div>
+                </div>
+                <div class="field" style="grid-column: 1 / -1;">
+                  <label>故障日志 / 现象摘要</label>
+                  <div class="textarea">网关 502，order-service CPU 320%~380%，Hikari pending threads &gt; 400，MySQL lock wait timeout，traceId=trc-9f3a7c2e5c3f4d5e。</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="stack">
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h3 class="panel-title">系统状态</h3>
+                    <div class="panel-subtitle">强调“平台可用性”，不是装饰信息。</div>
+                  </div>
+                  <span class="badge teal">Healthy</span>
+                </div>
+                <div class="status-grid">
+                  <div class="status-row">
+                    <div>
+                      <div class="status-name">LLM Runtime</div>
+                      <div class="status-meta">kimi-k2.5 via Ark Coding</div>
+                    </div>
+                    <span class="badge brand">P95 7.8s</span>
+                  </div>
+                  <div class="status-row">
+                    <div>
+                      <div class="status-name">Tool Connectors</div>
+                      <div class="status-meta">Git / Logs / Excel / PostgreSQL</div>
+                    </div>
+                    <span class="badge teal">4 / 4</span>
+                  </div>
+                  <div class="status-row">
+                    <div>
+                      <div class="status-name">Automatic Investigation</div>
+                      <div class="status-meta">Alert to session pipeline</div>
+                    </div>
+                    <span class="badge amber">Queued 2</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h3 class="panel-title">近期风险信号</h3>
+                    <div class="panel-subtitle">只保留需要 operator 关注的信息。</div>
+                  </div>
+                  <span class="badge red">Attention</span>
+                </div>
+                <div class="status-grid">
+                  <div class="status-row">
+                    <div>
+                      <div class="status-name">Incident inc_958527ac</div>
+                      <div class="status-meta">需要人工确认 DB 锁与连接池因果关系</div>
+                    </div>
+                    <span class="badge red">Pending</span>
+                  </div>
+                  <div class="status-row">
+                    <div>
+                      <div class="status-name">Git Connector</div>
+                      <div class="status-meta">1 个仓库远程 clone 超时，需要调整缓存策略</div>
+                    </div>
+                    <span class="badge amber">Retrying</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="data-grid">
+            <div class="panel">
+              <div class="panel-head">
+                <div>
+                  <h3 class="panel-title">进行中的事件</h3>
+                  <div class="panel-subtitle">工作台优先展示“正在发生”的会话，而不是历史装饰数据。</div>
+                </div>
+                <span class="badge brand">7 active</span>
+              </div>
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>事件</th>
+                    <th>状态</th>
+                    <th>主结论</th>
+                    <th>更新时间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><span class="row-title">inc_850be312</span><br /><span class="muted">/orders 404 route miss</span></td>
+                    <td><span class="badge amber">Debating</span></td>
+                    <td>主 Agent 正要求 CodeAgent 与 DomainAgent 对齐路由归属</td>
+                    <td>22:28</td>
+                  </tr>
+                  <tr>
+                    <td><span class="row-title">inc_41043833</span><br /><span class="muted">payment upstream timeout</span></td>
+                    <td><span class="badge teal">Reporting</span></td>
+                    <td>Judge 已收敛到上游依赖慢响应 + 本地重试放大</td>
+                    <td>22:19</td>
+                  </tr>
+                  <tr>
+                    <td><span class="row-title">inc_958527ac</span><br /><span class="muted">orders 502 / CPU high / DB lock</span></td>
+                    <td><span class="badge red">Need review</span></td>
+                    <td>根因候选已出，但 DB 锁与线程打满仍需人工二次确认</td>
+                    <td>22:07</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="stack">
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h3 class="panel-title">最近完成分析</h3>
+                    <div class="panel-subtitle">强调结论可读性，不展示原始 JSON。</div>
+                  </div>
+                </div>
+                <div class="status-grid">
+                  <div class="status-row">
+                    <div>
+                      <div class="status-name">inventory timeout storm</div>
+                      <div class="status-meta">Top1: cache miss + retry amplification</div>
+                    </div>
+                    <span class="badge teal">Closed</span>
+                  </div>
+                  <div class="status-row">
+                    <div>
+                      <div class="status-name">user-center 500 spike</div>
+                      <div class="status-meta">Top1: missing config rollout and null fallback</div>
+                    </div>
+                    <span class="badge teal">Closed</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h3 class="panel-title">Agent 能力矩阵</h3>
+                    <div class="panel-subtitle">从“角色介绍”改成“谁能干什么”。</div>
+                  </div>
+                </div>
+                <div class="agent-matrix">
+                  <div class="mini-panel"><h4>Main</h4><p>调度、阶段判断、命令分派、结果收敛</p></div>
+                  <div class="mini-panel"><h4>Log</h4><p>日志、异常链路、时间线与信号相关性</p></div>
+                  <div class="mini-panel"><h4>Code</h4><p>仓库定位、实现路径、变更窗口与热区</p></div>
+                  <div class="mini-panel"><h4>Domain</h4><p>责任田、领域归属、接口和聚合根映射</p></div>
+                  <div class="mini-panel"><h4>Database</h4><p>表结构、索引、慢 SQL、会话与锁</p></div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>
