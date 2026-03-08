@@ -104,6 +104,17 @@ type QualityFocus = {
   statusFilter?: 'all' | 'inferred_without_tool' | 'missing';
 } | null;
 
+type PersistedRunningTask = {
+  incidentId: string;
+  sessionId: string;
+  taskId: string;
+  mode: string;
+  startedAt: string;
+  status?: string;
+};
+
+const RUNNING_ANALYSIS_STORAGE_KEY = 'incident_running_analysis_task';
+
 const IncidentPage: React.FC = () => {
   const [searchParams] = useSearchParams();
   const { incidentId: routeIncidentId } = useParams();
@@ -157,6 +168,38 @@ const IncidentPage: React.FC = () => {
   const seenEventFingerprintsRef = useRef<Set<string>>(new Set());
   const pendingEventRecordsRef = useRef<EventRecord[]>([]);
   const eventFlushTimerRef = useRef<number | null>(null);
+
+  const readPersistedRunningTask = (): PersistedRunningTask | null => {
+    try {
+      const raw = localStorage.getItem(RUNNING_ANALYSIS_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as PersistedRunningTask;
+      if (!parsed || typeof parsed !== 'object') return null;
+      if (!parsed.sessionId || !parsed.taskId) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
+  const persistRunningTask = (payload: PersistedRunningTask) => {
+    try {
+      localStorage.setItem(RUNNING_ANALYSIS_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // 本地存储失败不会影响后台任务继续运行。
+    }
+  };
+
+  const clearPersistedRunningTask = (sid?: string) => {
+    try {
+      const existing = readPersistedRunningTask();
+      if (!existing) return;
+      if (sid && existing.sessionId !== sid) return;
+      localStorage.removeItem(RUNNING_ANALYSIS_STORAGE_KEY);
+    } catch {
+      // 忽略本地清理异常，避免影响界面主流程。
+    }
+  };
 
   const isLowLevelRealtimeNoise = (kind: string): boolean => [
     'llm_stream_delta',
@@ -1368,6 +1411,9 @@ const IncidentPage: React.FC = () => {
   const loadSessionArtifacts = async (sid: string) => {
     const detail = await debateApi.get(sid);
     const status = String(detail.status || '').toLowerCase();
+    if (['completed', 'failed', 'cancelled'].includes(status)) {
+      clearPersistedRunningTask(sid);
+    }
     const shouldLoadFinalResult = status === 'completed';
     const result = shouldLoadFinalResult
       ? await debateApi.getResult(sid).catch(() => null)
@@ -1525,116 +1571,83 @@ const IncidentPage: React.FC = () => {
     }
   };
 
-  const pollResultUntilReady = async (sid: string) => {
+  const pollTaskUntilDone = async (taskId: string, sid: string) => {
     if (pollingRef.current) return;
     pollingRef.current = true;
     try {
-      const maxAttempts = 60;
+      const maxAttempts = 120;
       for (let i = 0; i < maxAttempts; i += 1) {
-        const detail = await debateApi.get(sid).catch(() => null);
-        if (detail) {
-          setSessionDetail(detail);
-        }
-        const status = String(detail?.status || '').toLowerCase();
+        const task = await debateApi.getTask(taskId).catch(() => null);
+        const status = String(task?.status || 'pending').toLowerCase();
+        persistRunningTask({
+          incidentId: incidentId || String(sessionDetail?.incident_id || ''),
+          sessionId: sid,
+          taskId,
+          mode: executionMode,
+          startedAt: new Date().toISOString(),
+          status,
+        });
+        appendEvent('task_status', `后台任务状态: ${status}`, { task_id: taskId, status });
         if (status === 'completed') {
-          const result = await debateApi.getResult(sid).catch(() => null);
-          if (result) {
-            appendEvent('result_polled', '后台任务已完成，正在刷新结果');
-            setDebateResult(result);
-            await loadSessionArtifacts(sid);
-            advanceStep(3);
+          const resultStatus = String(task?.result?.status || '').toLowerCase();
+          if (resultStatus === 'waiting_review') {
+            appendEvent('human_review_requested', `会话进入人工审核: ${String(task?.result?.review_reason || '等待人工审核')}`, {
+              type: 'human_review_requested',
+              phase: 'judgment',
+              status: 'waiting',
+              reason: String(task?.result?.review_reason || ''),
+              resume_from_step: String(task?.result?.resume_from_step || ''),
+            });
+            await loadSessionArtifacts(sid).catch(() => undefined);
+            advanceStep(2);
             setRunning(false);
             return;
           }
+          await loadSessionArtifacts(sid);
+          advanceStep(3);
+          setRunning(false);
+          clearPersistedRunningTask(sid);
+          return;
         }
         if (status === 'failed') {
-          const error = extractSessionError(detail);
-          appendEvent(
-            'session_failed',
-            `会话执行失败${error ? `: ${error}` : ''}`,
-            { type: 'session_failed', phase: 'failed', status: 'failed', error },
-          );
-          advanceStep(2);
-          setRunning(false);
-          return;
-        }
-        if (status === 'cancelled') {
-          appendEvent('session_cancelled', '会话已取消', {
-            type: 'session_cancelled',
-            phase: 'cancelled',
-            status: 'cancelled',
-          });
-          setRunning(false);
-          return;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-      }
-      appendEvent('result_timeout', '等待结果超时，请稍后点击“辩论结果”查看最新状态');
-    } finally {
-      pollingRef.current = false;
-      setRunning(false);
-    }
-  };
-
-  const pollTaskUntilDone = async (taskId: string, sid: string) => {
-    const maxAttempts = 120;
-    for (let i = 0; i < maxAttempts; i += 1) {
-      const task = await debateApi.getTask(taskId).catch(() => null);
-      const status = String(task?.status || 'pending').toLowerCase();
-      appendEvent('task_status', `后台任务状态: ${status}`, { task_id: taskId, status });
-      if (status === 'completed') {
-        const resultStatus = String(task?.result?.status || '').toLowerCase();
-        if (resultStatus === 'waiting_review') {
-          appendEvent('human_review_requested', `会话进入人工审核: ${String(task?.result?.review_reason || '等待人工审核')}`, {
-            type: 'human_review_requested',
-            phase: 'judgment',
-            status: 'waiting',
-            reason: String(task?.result?.review_reason || ''),
-            resume_from_step: String(task?.result?.resume_from_step || ''),
+          appendEvent('session_failed', `后台任务失败: ${String(task?.error || '')}`, {
+            task_id: taskId,
+            status,
+            error: String(task?.error || ''),
           });
           await loadSessionArtifacts(sid).catch(() => undefined);
           advanceStep(2);
           setRunning(false);
+          clearPersistedRunningTask(sid);
           return;
         }
-        await loadSessionArtifacts(sid);
-        advanceStep(3);
-        setRunning(false);
-        return;
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       }
-      if (status === 'failed') {
-        appendEvent('session_failed', `后台任务失败: ${String(task?.error || '')}`, {
-          task_id: taskId,
-          status,
-          error: String(task?.error || ''),
-        });
-        await loadSessionArtifacts(sid).catch(() => undefined);
-        advanceStep(2);
-        setRunning(false);
-        return;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      appendEvent('result_timeout', '后台任务等待超时，请稍后查看结果');
+      setRunning(false);
+    } finally {
+      pollingRef.current = false;
     }
-    appendEvent('result_timeout', '后台任务等待超时，请稍后查看结果');
-    setRunning(false);
   };
 
-  const startRealtimeDebate = async (
+  const attachDebateStream = async (
     options?: { sessionId?: string; incidentId?: string },
   ) => {
     const targetSessionId = options?.sessionId || sessionId;
     const targetIncidentId = options?.incidentId || incidentId;
     if (!targetSessionId || !targetIncidentId) return;
     resetDialogueFilters();
-    setRunning(true);
-    appendEvent('start', '开始实时辩论');
+    appendEvent('stream_attach', '已连接后台分析事件流');
 
     try {
-      const ws = new WebSocket(buildDebateWsUrl(targetSessionId));
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.close();
+      }
+      const ws = new WebSocket(buildDebateWsUrl(targetSessionId, { autoStart: false }));
       wsRef.current = ws;
 
       ws.onopen = () => {
-        appendEvent('ws_open', 'WebSocket 已连接');
+        appendEvent('ws_open', '后台分析事件流已连接');
       };
 
       ws.onmessage = async (event) => {
@@ -1645,6 +1658,7 @@ const IncidentPage: React.FC = () => {
             appendEvent(type, formatEventText(type, payload.data || {}), payload.data);
             if (type === 'session_failed') {
               setRunning(false);
+              clearPersistedRunningTask(targetSessionId);
               advanceStep(2);
               await loadSessionArtifacts(targetSessionId).catch(() => undefined);
               return;
@@ -1661,6 +1675,7 @@ const IncidentPage: React.FC = () => {
             }
             if (type === 'human_review_rejected') {
               setRunning(false);
+              clearPersistedRunningTask(targetSessionId);
               advanceStep(2);
               await loadSessionArtifacts(targetSessionId).catch(() => undefined);
               return;
@@ -1732,6 +1747,7 @@ const IncidentPage: React.FC = () => {
             await loadSessionArtifacts(targetSessionId);
             advanceStep(3);
             setRunning(false);
+            clearPersistedRunningTask(targetSessionId);
             return;
           }
           if (payload.type === 'ack') {
@@ -1740,28 +1756,49 @@ const IncidentPage: React.FC = () => {
           }
           if (payload.type === 'error') {
             appendEvent('error', `错误: ${payload.message || 'unknown'}`, payload.data || payload);
-            setRunning(false);
             await loadSessionArtifacts(targetSessionId).catch(() => undefined);
-            advanceStep(2);
           }
         } catch {
           appendEvent('unknown_payload', '收到非结构化消息');
         }
       };
 
-      ws.onerror = async () => {
-        appendEvent('ws_error', 'WebSocket 连接异常，改为后台轮询结果');
-        await pollResultUntilReady(targetSessionId);
+      ws.onerror = () => {
+        appendEvent('ws_error', '后台事件流连接异常，将继续通过任务状态轮询观察');
       };
 
       ws.onclose = () => {
-        appendEvent('ws_close', 'WebSocket 已关闭');
-        if (runningRef.current) {
-          void pollResultUntilReady(targetSessionId);
-        }
+        appendEvent('ws_close', '后台事件流订阅已关闭');
       };
     } catch (e: any) {
       message.error(e?.message || '启动失败');
+    }
+  };
+
+  const startBackgroundAnalysis = async (targetSessionId: string, targetIncidentId: string) => {
+    setRunning(true);
+    appendEvent('start', '开始后台持续分析');
+    try {
+      const task = await debateApi.executeBackground(targetSessionId);
+      persistRunningTask({
+        incidentId: targetIncidentId,
+        sessionId: targetSessionId,
+        taskId: task.task_id,
+        mode: executionMode,
+        startedAt: new Date().toISOString(),
+        status: String(task.status || 'pending'),
+      });
+      appendEvent('task_submitted', `后台任务已提交: ${task.task_id}`, {
+        task_id: task.task_id,
+        status: task.status,
+        mode: executionMode,
+      });
+      advanceStep(2);
+      await attachDebateStream({ sessionId: targetSessionId, incidentId: targetIncidentId });
+      await pollTaskUntilDone(task.task_id, targetSessionId);
+    } catch (e: any) {
+      clearPersistedRunningTask(targetSessionId);
+      message.error(e?.response?.data?.detail || e?.message || '后台任务启动失败');
       setRunning(false);
     }
   };
@@ -1782,27 +1819,7 @@ const IncidentPage: React.FC = () => {
     if (!targetIncidentId || !targetSessionId) return;
     advanceStep(1);
     await loadSessionArtifacts(targetSessionId).catch(() => undefined);
-    if (executionMode === 'async' || executionMode === 'background') {
-      setRunning(true);
-      appendEvent('start', `开始${executionMode === 'async' ? '异步' : '后台'}辩论任务`);
-      try {
-        const task = executionMode === 'async'
-          ? await debateApi.executeAsync(targetSessionId)
-          : await debateApi.executeBackground(targetSessionId);
-        appendEvent('task_submitted', `任务已提交: ${task.task_id}`, {
-          task_id: task.task_id,
-          status: task.status,
-          mode: executionMode,
-        });
-        advanceStep(2);
-        await pollTaskUntilDone(task.task_id, targetSessionId);
-      } catch (e: any) {
-        message.error(e?.response?.data?.detail || e?.message || '后台任务启动失败');
-        setRunning(false);
-      }
-      return;
-    }
-    await startRealtimeDebate({ sessionId: targetSessionId, incidentId: targetIncidentId });
+    await startBackgroundAnalysis(targetSessionId, targetIncidentId);
   };
 
   const sendWsControl = async (action: 'cancel' | 'resume' | 'approve' | 'reject') => {
@@ -1834,6 +1851,7 @@ const IncidentPage: React.FC = () => {
             status: 'cancelled',
           });
           setRunning(false);
+          clearPersistedRunningTask(sessionId);
           message.success('会话已取消');
         } else {
           message.info('当前无可取消的运行任务');
@@ -1862,6 +1880,7 @@ const IncidentPage: React.FC = () => {
             status: 'failed',
           });
           setRunning(false);
+          clearPersistedRunningTask(sessionId);
           await loadSessionArtifacts(sessionId).catch(() => undefined);
           message.success('人工审核已驳回');
         }
@@ -1884,17 +1903,41 @@ const IncidentPage: React.FC = () => {
             status: 'running',
           });
           const task = await debateApi.executeBackground(sessionId);
+          persistRunningTask({
+            incidentId,
+            sessionId,
+            taskId: task.task_id,
+            mode: executionMode,
+            startedAt: new Date().toISOString(),
+            status: String(task.status || 'pending'),
+          });
+          await attachDebateStream({ sessionId, incidentId });
           await pollTaskUntilDone(task.task_id, sessionId);
         } catch (e: any) {
+          clearPersistedRunningTask(sessionId);
           setRunning(false);
           message.error(e?.response?.data?.detail || e?.message || '恢复失败');
         }
         return;
       }
-      void startRealtimeDebate();
+      const persisted = readPersistedRunningTask();
+      if (persisted && persisted.sessionId === sessionId) {
+        setRunning(true);
+        await attachDebateStream({ sessionId, incidentId });
+        await pollTaskUntilDone(persisted.taskId, sessionId);
+        return;
+      }
+      message.info('当前没有可恢复的后台任务，请直接重新启动分析');
       return;
     }
-    void startRealtimeDebate();
+    const persisted = readPersistedRunningTask();
+    if (persisted && persisted.sessionId === sessionId) {
+      setRunning(true);
+      await attachDebateStream({ sessionId, incidentId });
+      await pollTaskUntilDone(persisted.taskId, sessionId);
+      return;
+    }
+    message.info('当前没有可恢复的后台任务，请直接重新启动分析');
   };
 
   const retryFailedAgents = async () => {
@@ -1921,7 +1964,6 @@ const IncidentPage: React.FC = () => {
   useEffect(() => {
     const iid = routeIncidentId || searchParams.get('incident_id');
     const querySessionId = String(searchParams.get('session_id') || '').trim();
-    const autoStart = String(searchParams.get('auto_start') || '').trim() === '1';
     const modeParam = String(searchParams.get('mode') || '').trim().toLowerCase();
     if (modeParam === 'standard' || modeParam === 'quick' || modeParam === 'background' || modeParam === 'async') {
       setExecutionMode(modeParam);
@@ -1973,11 +2015,20 @@ const IncidentPage: React.FC = () => {
           } else {
             advanceStep(1);
           }
+          const persisted = readPersistedRunningTask();
           const lowerStatus = String(status || '').toLowerCase();
+          const hasPersistedRunningTask =
+            persisted &&
+            persisted.sessionId === targetSessionId &&
+            ['pending', 'running', 'waiting_review', 'waiting_resume'].includes(String(persisted.status || 'running').toLowerCase());
           const runningLike = ['pending', 'running', 'analyzing', 'debating', 'waiting', 'retrying'].includes(lowerStatus);
-          if (autoStart && !autoStartConsumedRef.current.has(targetSessionId) && runningLike) {
+          if (hasPersistedRunningTask && !autoStartConsumedRef.current.has(targetSessionId)) {
             autoStartConsumedRef.current.add(targetSessionId);
-            void startRealtimeDebate({ sessionId: targetSessionId, incidentId: iid });
+            setRunning(runningLike || String(persisted.status || '').toLowerCase() === 'running');
+            void attachDebateStream({ sessionId: targetSessionId, incidentId: iid });
+            if (['pending', 'running'].includes(String(persisted.status || '').toLowerCase())) {
+              void pollTaskUntilDone(persisted.taskId, targetSessionId);
+            }
           }
         } else if (preferredView === 'analysis') {
           advanceStep(0);
@@ -2002,6 +2053,7 @@ const IncidentPage: React.FC = () => {
         window.clearTimeout(eventFlushTimerRef.current);
         eventFlushTimerRef.current = null;
       }
+      pollingRef.current = false;
     };
   }, []);
 
@@ -3310,7 +3362,7 @@ const IncidentPage: React.FC = () => {
             loading={loading}
             sessionStatus={String(sessionDetail?.status || '')}
             debateMaxRounds={debateMaxRounds}
-            onStartRealtimeDebate={startRealtimeDebate}
+            onStartAnalysis={startAnalysisFromInput}
             onCancel={() => sendWsControl('cancel')}
             onResume={() => sendWsControl('resume')}
             onApproveReview={() => sendWsControl('approve')}

@@ -48,6 +48,7 @@ from app.config import settings
 from app.core.event_schema import enrich_event, new_trace_id
 from app.core.observability import metrics_store
 from app.runtime.evidence import normalize_evidence_items
+from app.runtime.langgraph.parsers import extract_readable_text
 from app.runtime.judgement import causal_score, has_cross_source_evidence, score_topology_propagation
 from app.runtime.langgraph.deployment_center import deployment_center
 from app.runtime_serve import normalize_execution_mode
@@ -1350,7 +1351,13 @@ class DebateService:
             辩论结果
         """
         # 构建辩论上下文
+        incident = context.get("incident") if isinstance(context.get("incident"), dict) else {}
         debate_context = {
+            "incident": incident,
+            "title": context.get("title") or incident.get("title") or "",
+            "description": context.get("description") or incident.get("description") or "",
+            "severity": context.get("severity") or incident.get("severity") or "",
+            "service_name": context.get("service_name") or incident.get("service_name") or "",
             "log_content": context.get("log_content", ""),
             "parsed_data": context.get("parsed_data", {}),
             "runtime_assets": assets.get("runtime_assets", []),
@@ -1361,6 +1368,7 @@ class DebateService:
             "trace_id": context.get("trace_id"),
             "execution_mode": context.get("execution_mode", "standard"),
             "runtime_strategy": context.get("runtime_strategy", {}),
+            "deployment_profile": context.get("deployment_profile", {}),
         }
         
         debate_config = context.get("debate_config") if isinstance(context.get("debate_config"), dict) else {}
@@ -2208,10 +2216,14 @@ class DebateService:
 
         root_cause_raw = final_judgment.get("root_cause", {})
         if isinstance(root_cause_raw, dict):
-            root_cause_summary = str(root_cause_raw.get("summary") or "Unknown").strip() or "Unknown"
+            root_cause_summary = extract_readable_text(
+                root_cause_raw.get("summary"),
+                fallback="Unknown",
+                max_len=420,
+            ) or "Unknown"
             root_cause_category = root_cause_raw.get("category")
         else:
-            root_cause_summary = str(root_cause_raw or "Unknown").strip() or "Unknown"
+            root_cause_summary = extract_readable_text(root_cause_raw, fallback="Unknown", max_len=420) or "Unknown"
             root_cause_category = None
 
         # 构建证据链（统一标准化模型）
@@ -2261,7 +2273,11 @@ class DebateService:
         fix_recommendation = None
         if fix_rec:
             fix_recommendation = FixRecommendation(
-                summary=str(fix_rec.get("summary", "")),
+                summary=extract_readable_text(
+                    fix_rec.get("summary", ""),
+                    fallback=str(fix_rec.get("summary", "")),
+                    max_len=420,
+                ),
                 steps=steps,
                 code_changes_required=bool(fix_rec.get("code_changes_required", False)),
                 rollback_recommended=bool(fix_rec.get("rollback_recommended", False)),
@@ -2319,7 +2335,7 @@ class DebateService:
                 else:
                     text = str(item or "").strip()
                     if text:
-                        action_items.append({"summary": text})
+                        action_items.append({"summary": extract_readable_text(text, fallback=text, max_len=220)})
 
         dissent_raw = flow_result.get("dissenting_opinions", [])
         dissenting_opinions: List[Dict[str, Any]] = []
@@ -2330,7 +2346,7 @@ class DebateService:
                 else:
                     text = str(item or "").strip()
                     if text:
-                        dissenting_opinions.append({"summary": text})
+                        dissenting_opinions.append({"summary": extract_readable_text(text, fallback=text, max_len=220)})
 
         verification_plan_raw = flow_result.get("verification_plan")
         if not isinstance(verification_plan_raw, list):

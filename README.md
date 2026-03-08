@@ -218,6 +218,55 @@ npm run stop:all:force
 - `LOCAL_STORE_DIR=/tmp/sre_debate_store`
 - `DEBATE_MAX_ROUNDS=1`
 - `AUTH_ENABLED=false`
+
+### 7.1 本地调试：记录完整 LLM Prompt / Response
+
+当前仓库已在本地开发配置中打开以下开关：
+
+- `LLM_LOG_FULL_PROMPT=true`
+- `LLM_LOG_FULL_RESPONSE=true`
+
+位置：
+
+- `/Users/neochen/multi-agent-cli_v2/backend/.env`
+
+作用：
+
+- 保留原有 `prompt_preview` / `response_preview`
+- 额外为完整文本生成引用：
+  - `prompt_ref`
+  - `system_prompt_ref`
+  - `response_ref`
+
+这些引用会出现在以下事件中：
+
+- `llm_call_started`
+- `llm_request_started`
+- `llm_http_request`
+- `llm_http_response`
+- `llm_call_completed`
+- `llm_request_completed`
+
+完整文本落盘目录：
+
+- `/tmp/sre_debate_store/output_refs`
+
+读取完整文本：
+
+```bash
+curl http://127.0.0.1:8000/api/v1/debates/output-refs/{ref_id}
+```
+
+典型排查流程：
+
+1. 先在 runtime 事件或会话详情里找到 `prompt_ref / response_ref`
+2. 再调用 `/api/v1/debates/output-refs/{ref_id}`
+3. 查看完整 prompt、system prompt 或完整 response
+
+说明：
+
+- 这两个开关只增加日志审计，不改变原有调度、工具调用和前端流程。
+- 生产环境建议默认关闭，仅在本地调试或问题复盘时开启。
 - `LOG_FORMAT=json`
 
 ## 8. API 速览

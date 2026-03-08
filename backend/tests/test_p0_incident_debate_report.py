@@ -525,6 +525,36 @@ def test_execute_debate_accepts_coordination_phase_in_history(monkeypatch):
     assert rounds[0]["phase"] == "coordination"
 
 
+def test_execute_debate_failure_closes_incident(monkeypatch):
+    """验证同步执行失败时 incident 会从 analyzing 收口到 closed。"""
+
+    _reset_state()
+    client = TestClient(app)
+
+    async def _fail_execute(*args, **kwargs):
+        """模拟运行时未拿到有效大模型结论。"""
+        _ = args, kwargs
+        raise RuntimeError("未获得有效大模型结论: TimeoutError")
+
+    monkeypatch.setattr(debate_service, "execute_debate", _fail_execute)
+
+    created = client.post("/api/v1/incidents/", json={"title": "failed debate incident"})
+    assert created.status_code == 201
+    incident_id = created.json()["id"]
+
+    session_resp = client.post(f"/api/v1/debates/?incident_id={incident_id}")
+    assert session_resp.status_code == 201
+    session_id = session_resp.json()["id"]
+
+    execute_resp = client.post(f"/api/v1/debates/{session_id}/execute")
+    assert execute_resp.status_code == 500
+
+    incident_detail = client.get(f"/api/v1/incidents/{incident_id}")
+    assert incident_detail.status_code == 200
+    assert incident_detail.json()["status"] == "closed"
+    assert "未获得有效大模型结论" in str(incident_detail.json().get("fix_suggestion") or "")
+
+
 def test_interface_locate_endpoint_maps_to_domain_aggregate():
     """验证interfacelocateendpoint映射todomainaggregate。"""
     

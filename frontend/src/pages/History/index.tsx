@@ -28,21 +28,51 @@ const severityColor: Record<string, string> = {
   low: 'green',
 };
 
+const ACTIVE_STATUSES = ['pending', 'running', 'analyzing', 'debating', 'waiting', 'retrying'];
+const TERMINAL_STATUSES = ['resolved', 'completed', 'closed', 'failed', 'cancelled'];
+
+const parseTimestamp = (value?: string): number | null => {
+  if (!value) return null;
+  const ts = Date.parse(value);
+  return Number.isFinite(ts) ? ts : null;
+};
+
+const formatDuration = (start?: string, end?: string, running = false): string => {
+  const startTs = parseTimestamp(start);
+  if (!startTs) return '-';
+  const endTs = parseTimestamp(end) ?? Date.now();
+  const diffMs = Math.max(0, endTs - startTs);
+  const totalSeconds = Math.floor(diffMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const formatted = hours > 0
+    ? `${hours}小时${minutes}分${seconds}秒`
+    : minutes > 0
+      ? `${minutes}分${seconds}秒`
+      : `${seconds}秒`;
+  return running ? `进行中 · ${formatted}` : formatted;
+};
+
 const HistoryPage: React.FC = () => {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<Incident[]>([]);
+  const [nowTs, setNowTs] = useState(() => Date.now());
   const [sessionMeta, setSessionMeta] = useState<
     Record<
       string,
-      {
-        mode: string;
-        currentPhase: string;
-        reviewStatus: string;
-        reviewReason: string;
-        confidence: number | null;
-        limitedAnalysis: boolean;
-        evidenceGap: boolean;
+        {
+          mode: string;
+          currentPhase: string;
+          reviewStatus: string;
+          reviewReason: string;
+          createdAt: string;
+          completedAt: string;
+          updatedAt: string;
+          confidence: number | null;
+          limitedAnalysis: boolean;
+          evidenceGap: boolean;
         evidenceCoverage: {
           ok: number;
           degraded: number;
@@ -79,6 +109,9 @@ const HistoryPage: React.FC = () => {
             currentPhase: string;
             reviewStatus: string;
             reviewReason: string;
+            createdAt: string;
+            completedAt: string;
+            updatedAt: string;
             confidence: number | null;
             limitedAnalysis: boolean;
             evidenceGap: boolean;
@@ -135,6 +168,9 @@ const HistoryPage: React.FC = () => {
             currentPhase,
             reviewStatus: String(humanReview.status || ''),
             reviewReason: String(humanReview.reason || ''),
+            createdAt: String(detail.created_at || ''),
+            completedAt: String(detail.completed_at || ''),
+            updatedAt: String(detail.updated_at || ''),
             confidence: typeof result?.confidence === 'number' ? result.confidence : null,
             limitedAnalysis,
             evidenceGap,
@@ -157,9 +193,7 @@ const HistoryPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const hasActive = items.some((item) =>
-      ['pending', 'running', 'analyzing', 'debating', 'waiting', 'retrying'].includes(item.status),
-    );
+    const hasActive = items.some((item) => ACTIVE_STATUSES.includes(item.status));
     if (!hasActive) return;
     const timer = window.setInterval(() => {
       void loadIncidents();
@@ -167,8 +201,17 @@ const HistoryPage: React.FC = () => {
     return () => window.clearInterval(timer);
   }, [items]);
 
+  useEffect(() => {
+    const hasActive = items.some((item) => ACTIVE_STATUSES.includes(item.status));
+    if (!hasActive) return;
+    const timer = window.setInterval(() => {
+      setNowTs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [items]);
+
   const summary = useMemo(() => {
-    const running = items.filter((item) => ['pending', 'running', 'analyzing', 'debating', 'waiting', 'retrying'].includes(item.status)).length;
+    const running = items.filter((item) => ACTIVE_STATUSES.includes(item.status)).length;
     const completed = items.filter((item) => ['resolved', 'completed', 'closed'].includes(item.status)).length;
     const failed = items.filter((item) => item.status === 'failed').length;
     return { total: items.length, running, completed, failed };
@@ -274,18 +317,19 @@ const HistoryPage: React.FC = () => {
       },
     },
     {
-      title: '预计耗时',
-      key: 'eta',
+      title: '分析耗时',
+      key: 'duration',
       width: 140,
       render: (_: unknown, record) => {
         const sid = String(record.debate_session_id || '');
-        const mode = sid ? String(sessionMeta[sid]?.mode || 'standard') : 'standard';
-        if (['resolved', 'completed', 'closed', 'failed', 'cancelled'].includes(record.status)) {
-          return '-';
+        const running = ACTIVE_STATUSES.includes(record.status);
+        const meta = sid ? sessionMeta[sid] : null;
+        if (meta) {
+          const endAt = meta.completedAt || (running ? new Date(nowTs).toISOString() : meta.updatedAt);
+          return formatDuration(meta.createdAt, endAt, running);
         }
-        if (mode === 'quick') return '1-3 分钟';
-        if (mode === 'background' || mode === 'async') return '3-8 分钟';
-        return '2-6 分钟';
+        if (TERMINAL_STATUSES.includes(record.status)) return '-';
+        return formatDuration(record.created_at, running ? new Date(nowTs).toISOString() : record.updated_at, running);
       },
     },
     {
@@ -313,7 +357,7 @@ const HistoryPage: React.FC = () => {
               继续处理
             </Button>
           )}
-          {record.debate_session_id && ['pending', 'running', 'analyzing', 'debating', 'waiting', 'retrying'].includes(record.status) ? (
+          {record.debate_session_id && ACTIVE_STATUSES.includes(record.status) ? (
             <Button
               size="small"
               danger

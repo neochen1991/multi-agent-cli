@@ -18,6 +18,7 @@ import structlog
 from app.core.llm_client import llm_client
 from app.core.json_utils import extract_json_dict
 from app.config import settings
+from app.runtime.langgraph.parsers import extract_readable_text
 
 logger = structlog.get_logger()
 
@@ -255,13 +256,20 @@ class ReportGenerationService:
         debate_summary = {
             "confidence": debate_result.get("confidence"),
             "root_cause": {
-                "summary": str(root_cause.get("summary") or "")[:220],
+                "summary": extract_readable_text(root_cause.get("summary"), fallback=str(root_cause.get("summary") or ""), max_len=220),
                 "category": root_cause.get("category"),
             },
             "evidence_chain": evidence_chain_compact,
             "fix_recommendation": {
-                "summary": str(fix_recommendation.get("summary") or "")[:300],
-                "steps": [str(step)[:140] for step in (fix_recommendation.get("steps") or [])[:3]],
+                "summary": extract_readable_text(
+                    fix_recommendation.get("summary"),
+                    fallback=str(fix_recommendation.get("summary") or ""),
+                    max_len=300,
+                ),
+                "steps": [
+                    extract_readable_text(step, fallback=str(step), max_len=140)
+                    for step in (fix_recommendation.get("steps") or [])[:3]
+                ],
             },
             "impact_analysis": {
                 "affected_services": (impact.get("affected_services") or [])[:4],
@@ -345,13 +353,37 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
         fix = self._safe_dict(final_judgment.get("fix_recommendation", {}))
         evidence = self._safe_list(final_judgment.get("evidence_chain", []))
         action_items = self._safe_list(debate_result.get("action_items", []))
+        root_summary = extract_readable_text(root_cause.get("summary"), fallback=str(root_cause.get("summary") or "待进一步确认"), max_len=300)
+        fix_summary = extract_readable_text(fix.get("summary"), fallback=str(fix.get("summary") or ""), max_len=300)
+        fix_steps = [
+            extract_readable_text(item, fallback=str(item or ""), max_len=180)
+            for item in self._safe_list(fix.get("steps"))[:6]
+            if extract_readable_text(item, fallback=str(item or ""), max_len=180)
+        ]
+        normalized_actions = []
+        for item in action_items[:6]:
+            if isinstance(item, dict):
+                normalized_actions.append(
+                    {
+                        **item,
+                        "action": extract_readable_text(
+                            item.get("action") or item.get("summary"),
+                            fallback=str(item.get("action") or item.get("summary") or ""),
+                            max_len=220,
+                        ),
+                    }
+                )
+            else:
+                text = extract_readable_text(item, fallback=str(item or ""), max_len=220)
+                if text:
+                    normalized_actions.append({"action": text})
 
         return self._normalize_report_structure(
             {
                 "executive_summary": {
                     "title": f"故障分析报告 - {incident.get('title', '未知故障')}",
                     "severity": risk.get("risk_level") or incident.get("severity") or "medium",
-                    "root_cause_summary": root_cause.get("summary") or "待进一步确认",
+                    "root_cause_summary": root_summary or "待进一步确认",
                     "resolution_status": "已生成降级报告",
                 },
                 "incident_overview": {
@@ -365,7 +397,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
                     "affected_services": impact.get("affected_services") or [incident.get("service_name") or "未知服务"],
                 },
                 "root_cause_analysis": {
-                    "primary_cause": root_cause.get("summary") or "待确认",
+                    "primary_cause": root_summary or "待确认",
                     "contributing_factors": risk.get("risk_factors") or [],
                     "evidence_chain": evidence[:6],
                 },
@@ -376,8 +408,8 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
                     "duration": "待补充",
                 },
                 "recommendations": {
-                    "immediate_actions": action_items[:6],
-                    "long_term_fixes": self._safe_list(fix.get("steps"))[:6],
+                    "immediate_actions": normalized_actions,
+                    "long_term_fixes": fix_steps or ([fix_summary] if fix_summary else []),
                     "prevention_measures": self._safe_list(risk.get("mitigation_suggestions"))[:6],
                 },
                 "lessons_learned": [

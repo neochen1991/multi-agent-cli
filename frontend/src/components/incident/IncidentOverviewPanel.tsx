@@ -151,10 +151,10 @@ const IncidentOverviewPanel: React.FC<Props> = ({
               style={{ width: '100%' }}
               onChange={onExecutionModeChange}
               options={[
-                { label: 'Standard（实时）', value: 'standard' },
-                { label: 'Quick（快速）', value: 'quick' },
-                { label: 'Background（后台）', value: 'background' },
-                { label: 'Async（异步）', value: 'async' },
+                { label: 'Standard（后台持续分析）', value: 'standard' },
+                { label: 'Quick（后台快速分析）', value: 'quick' },
+                { label: 'Background（后台持续分析）', value: 'background' },
+                { label: 'Async（后台异步分析）', value: 'async' },
               ]}
             />
           </div>

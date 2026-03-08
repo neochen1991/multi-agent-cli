@@ -24,6 +24,7 @@ from app.runtime.langgraph.prompts import (
     judge_output_schema as judge_output_schema_template,
 )
 from app.runtime.langgraph.parsers import (
+    extract_readable_text,
     normalize_agent_output as normalize_agent_output_parser,
     normalize_commander_output as normalize_commander_output_parser,
     normalize_judge_output,
@@ -159,6 +160,8 @@ class LangGraphRuntimeOrchestrator:
         self._enable_collaboration: bool = bool(settings.DEBATE_ENABLE_COLLABORATION)
         self._enable_critique: bool = bool(settings.DEBATE_ENABLE_CRITIQUE)
         self._require_verification_plan: bool = True
+        self._deployment_profile_name: str = ""
+        self._execution_mode_name: str = "standard"
         self._event_dispatcher = EventDispatcher()
         self._agent_runner = AgentRunner(self)
         self._routing_strategy = HybridRouter()
@@ -242,6 +245,7 @@ class LangGraphRuntimeOrchestrator:
             require_verification_plan = True
 
         if isinstance(deployment_profile, dict) and deployment_profile.get("name"):
+            self._deployment_profile_name = str(deployment_profile.get("name") or "").strip().lower()
             selected_agents = tuple(
                 str(name or "").strip()
                 for name in list(deployment_profile.get("analysis_agents") or [])
@@ -250,6 +254,9 @@ class LangGraphRuntimeOrchestrator:
             enable_collaboration = bool(deployment_profile.get("collaboration_enabled") or False)
             enable_critique = bool(deployment_profile.get("critique_enabled") or False)
             require_verification_plan = bool(deployment_profile.get("require_verification_plan") or False)
+        else:
+            self._deployment_profile_name = ""
+        self._execution_mode_name = execution_mode
 
         self.PARALLEL_ANALYSIS_AGENTS = tuple(selected_agents)
         self.MAX_DISCUSSION_STEPS_PER_ROUND = int(max_discussion_steps)
@@ -289,6 +296,16 @@ class LangGraphRuntimeOrchestrator:
         """
         reserve_slots = 1 if self._llm_semaphore_limit > 1 else 0
         batch_limit = max(1, self._llm_semaphore_limit - reserve_slots)
+
+        # investigation_full / production_governed 会带更多专家、更长 prompt 和更重的收口链路。
+        # 这里主动把分析波次压窄，优先保证 commander / judge 不被并行波次挤出队列。
+        if self._deployment_profile_name in {"investigation_full", "production_governed"}:
+            reserve_slots = 2 if self._llm_semaphore_limit > 2 else reserve_slots
+            batch_limit = max(1, self._llm_semaphore_limit - reserve_slots)
+            if collaboration:
+                return 1
+            return max(1, min(batch_limit, 2))
+
         if collaboration:
             return max(1, min(batch_limit, 2))
         return batch_limit
@@ -348,6 +365,12 @@ class LangGraphRuntimeOrchestrator:
             },
         )
         context_summary = {
+            "incident_summary": {
+                "title": str(context.get("title") or "")[:160],
+                "description": str(context.get("description") or "")[:280],
+                "severity": str(context.get("severity") or ""),
+                "service_name": str(context.get("service_name") or ""),
+            },
             "log_excerpt": str(context.get("log_content") or "")[:1400],
             "parsed_data": context.get("parsed_data") or {},
             "interface_mapping": context.get("interface_mapping") or {},
@@ -1336,6 +1359,28 @@ class LangGraphRuntimeOrchestrator:
                 existing = self._normalize_database_tables(cmd.get(field))
             cmd[field] = list(dict.fromkeys(existing + list(values or [])))[:limit]
 
+        def _requires_tool(target: str, cmd: Dict[str, Any]) -> bool:
+            """关键证据 Agent 在命中结构化线索时必须保留工具检索能力。"""
+            if target == "LogAgent":
+                return bool(
+                    cmd.get("api_endpoints")
+                    or cmd.get("trace_ids")
+                    or cmd.get("error_keywords")
+                    or cmd.get("service_names")
+                )
+            if target == "CodeAgent":
+                return bool(
+                    cmd.get("class_names")
+                    or cmd.get("code_artifacts")
+                    or cmd.get("api_endpoints")
+                    or cmd.get("service_names")
+                )
+            if target == "DatabaseAgent":
+                return bool(cmd.get("database_tables"))
+            if target == "ChangeAgent":
+                return bool(cmd.get("service_names") or cmd.get("code_artifacts"))
+            return False
+
         for target, base in list(commands.items()):
             if not isinstance(base, dict):
                 continue
@@ -1430,6 +1475,11 @@ class LangGraphRuntimeOrchestrator:
                     cmd["focus"] = "；".join(focus_bits)
                 if not str(cmd.get("expected_output") or "").strip():
                     cmd["expected_output"] = "输出匹配的 SOP、相似案例、止血动作与验证步骤"
+
+            # 对关键证据型 Agent，如果责任田已经给出了可检索线索，就不允许 commander 在这里把工具关掉。
+            if _requires_tool(target, cmd):
+                cmd["use_tool"] = True
+                cmd["tool_requirement"] = "required_by_investigation_leads"
             commands[target] = cmd
         return commands
 
@@ -2541,6 +2591,9 @@ class LangGraphRuntimeOrchestrator:
 
     def _compact_round_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """压缩 round 级上下文，避免 Prompt 被无关历史撑大。"""
+        incident_summary = context.get("incident_summary")
+        if not isinstance(incident_summary, dict):
+            incident_summary = {}
         interface_mapping = context.get("interface_mapping")
         if not isinstance(interface_mapping, dict):
             interface_mapping = {}
@@ -2610,8 +2663,16 @@ class LangGraphRuntimeOrchestrator:
         }
 
         return {
+            "incident_summary": {
+                "title": str(incident_summary.get("title") or "")[:160],
+                "description": str(incident_summary.get("description") or "")[:280],
+                "severity": str(incident_summary.get("severity") or "")[:40],
+                "service_name": str(incident_summary.get("service_name") or "")[:120],
+            },
             "log_excerpt": str(context.get("log_excerpt") or "")[:240],
             "parsed_data": compact_parsed,
+            "execution_mode": str(context.get("execution_mode") or "")[:40],
+            "available_analysis_agents": list(context.get("available_analysis_agents") or [])[:10],
             "interface_mapping": {
                 "matched": bool(interface_mapping.get("matched")),
                 "confidence": interface_mapping.get("confidence"),
@@ -2855,6 +2916,8 @@ class LangGraphRuntimeOrchestrator:
             return max(480, min(configured, 900))
         if agent_name == "ProblemAnalysisAgent":
             configured = int(settings.DEBATE_ANALYSIS_MAX_TOKENS)
+            if self._deployment_profile_name in {"investigation_full", "production_governed"} and not self.turns:
+                return max(280, min(configured, 360))
             return max(520, min(configured, 900))
         configured = int(settings.DEBATE_ANALYSIS_MAX_TOKENS)
         return max(420, min(configured, 800))
@@ -2892,12 +2955,26 @@ class LangGraphRuntimeOrchestrator:
     def _agent_queue_timeout(self, agent_name: str) -> float:
         """返回该 Agent 在 LLM 队列里允许等待的最长时间。"""
         base_timeout = float(max(2, int(settings.llm_queue_timeout)))
+        analysis_timeout = float(max(base_timeout, int(settings.llm_analysis_queue_timeout)))
+        metrics_timeout = float(max(analysis_timeout, int(settings.llm_metrics_queue_timeout)))
+        judge_timeout = float(max(analysis_timeout, int(settings.llm_judge_queue_timeout)))
         if agent_name == "JudgeAgent":
-            return float(max(base_timeout + 12.0, 20.0))
+            return judge_timeout
         if agent_name == "ProblemAnalysisAgent":
-            return float(max(base_timeout + 8.0, 18.0))
+            if self._deployment_profile_name in {"investigation_full", "production_governed"} and not self.turns:
+                return float(max(min(judge_timeout - 5.0, judge_timeout), analysis_timeout + 10.0, 55.0))
+            return float(max(min(judge_timeout - 10.0, judge_timeout), analysis_timeout + 5.0, 50.0))
+        if agent_name == "MetricsAgent":
+            if self._deployment_profile_name in {"investigation_full", "production_governed"}:
+                return float(max(metrics_timeout, 75.0))
+            return float(max(metrics_timeout, 60.0))
+        if (
+            self._deployment_profile_name in {"investigation_full", "production_governed"}
+            and agent_name in {"LogAgent", "CodeAgent", "DatabaseAgent", "ChangeAgent", "DomainAgent"}
+        ):
+            return float(max(analysis_timeout, 45.0))
         if agent_name in {"CriticAgent", "RebuttalAgent", "VerificationAgent"}:
-            return float(max(base_timeout + 4.0, 16.0))
+            return float(max(base_timeout + 10.0, 40.0))
         return base_timeout
 
     def _remaining_session_budget_seconds(self) -> Optional[float]:
@@ -3048,22 +3125,37 @@ class LangGraphRuntimeOrchestrator:
                 }
             )
 
-        key_factors = [f"{best.agent_name}: {str(best.summary or best.conclusion)[:140]}"]
+        best_summary = extract_readable_text(
+            best.summary or best.conclusion,
+            fallback=str(best.summary or best.conclusion),
+            max_len=260,
+        )
+        best_conclusion = extract_readable_text(
+            best.conclusion or best.summary,
+            fallback=str(best.conclusion or best.summary),
+            max_len=260,
+        )
+        key_factors = [f"{best.agent_name}: {best_summary[:140]}"]
         if second:
-            key_factors.append(f"{second.agent_name}: {str(second.summary or second.conclusion)[:140]}")
+            second_summary = extract_readable_text(
+                second.summary or second.conclusion,
+                fallback=str(second.summary or second.conclusion),
+                max_len=260,
+            )
+            key_factors.append(f"{second.agent_name}: {second_summary[:140]}")
 
         return {
             "confidence": root_confidence,
             "final_judgment": {
                 "root_cause": {
-                    "summary": str(best.conclusion)[:260],
+                    "summary": best_conclusion[:260],
                     "category": category,
                     "confidence": root_confidence,
                 },
                 "evidence_chain": evidence_chain,
                 "fix_recommendation": {
-                    "summary": str(best.conclusion)[:260],
-                    "steps": [str(best.summary or best.conclusion)[:180]],
+                    "summary": best_conclusion[:260],
+                    "steps": [best_summary[:180]],
                     "code_changes_required": best.agent_name in {"CodeAgent", "RebuttalAgent"},
                     "rollback_recommended": False,
                     "testing_requirements": ["回归故障链路", "压力与超时测试"],
@@ -3075,7 +3167,7 @@ class LangGraphRuntimeOrchestrator:
                 },
                 "risk_assessment": {
                     "risk_level": "high" if root_confidence < 0.75 else "medium",
-                    "risk_factors": ["JudgeAgent 超时，采用高置信 Agent 结论合成最终结论"],
+                    "risk_factors": ["JudgeAgent 未返回有效裁决，系统采用专家结论保守收口"],
                     "mitigation_suggestions": ["补充关键指标后可再次触发全量辩论"],
                 },
             },
@@ -3084,7 +3176,7 @@ class LangGraphRuntimeOrchestrator:
                 "reasoning": "JudgeAgent 未在时限内返回，系统已基于成功 Agent 的高置信结论自动收敛。",
             },
             "action_items": [
-                {"priority": 1, "action": str(best.conclusion)[:180], "owner": "待确认"},
+                {"priority": 1, "action": best_conclusion[:180], "owner": "待确认"},
             ],
             "responsible_team": {"team": "待确认", "owner": "待确认"},
         }

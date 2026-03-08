@@ -49,6 +49,70 @@ from app.core.json_utils import extract_json_dict
 logger = structlog.get_logger()
 
 
+def _build_llm_log_refs(
+    *,
+    session_id: str,
+    trace_id: str,
+    agent_name: str,
+    phase: str,
+    stage: str,
+    prompt: str = "",
+    system_prompt: str = "",
+    response: str = "",
+) -> Dict[str, str]:
+    """按调试开关保存完整 LLM 文本，并返回 ref_id。"""
+    from app.runtime.langgraph.output_truncation import save_output_reference
+
+    refs: Dict[str, str] = {}
+    metadata = {
+        "trace_id": trace_id,
+        "agent_name": agent_name,
+        "phase": phase,
+        "stage": stage,
+    }
+    if settings.LLM_LOG_FULL_PROMPT:
+        if system_prompt:
+            refs["system_prompt_ref"] = save_output_reference(
+                content=system_prompt,
+                session_id=session_id,
+                category="llm_client_system_prompt",
+                metadata=metadata,
+            )
+        if prompt:
+            refs["prompt_ref"] = save_output_reference(
+                content=prompt,
+                session_id=session_id,
+                category="llm_client_prompt",
+                metadata=metadata,
+            )
+    if settings.LLM_LOG_FULL_RESPONSE and response:
+        refs["response_ref"] = save_output_reference(
+            content=response,
+            session_id=session_id,
+            category="llm_client_response",
+            metadata=metadata,
+        )
+    return refs
+
+
+def _build_full_log_fields(
+    *,
+    prompt: str = "",
+    system_prompt: str = "",
+    response: str = "",
+) -> Dict[str, str]:
+    """按调试开关返回应直接写入 backend.log 的完整 LLM 文本字段。"""
+    payload: Dict[str, str] = {}
+    if settings.LLM_LOG_FULL_PROMPT:
+        if system_prompt:
+            payload["system_prompt_full"] = system_prompt
+        if prompt:
+            payload["prompt_full"] = prompt
+    if settings.LLM_LOG_FULL_RESPONSE and response:
+        payload["response_full"] = response
+    return payload
+
+
 @dataclass
 class LLMClientConfig:
     """
@@ -996,6 +1060,15 @@ class LLMClient:
             "base_url": self._base_url_for_llm(),
         }
         endpoint = self._chat_endpoint()
+        prompt_refs = _build_llm_log_refs(
+            session_id=session_id,
+            trace_id=trace_id,
+            agent_name=str(trace_context.get("agent_name") or agent or "llm_agent"),
+            phase=str(trace_context.get("phase") or ""),
+            stage=str(trace_context.get("stage") or ""),
+            prompt=effective_prompt,
+            system_prompt=system_prompt,
+        )
 
         # 发射追踪事件
         await self._emit_trace_event(
@@ -1009,6 +1082,7 @@ class LLMClient:
                 "session_id": session_id,
                 "prompt_preview": effective_prompt[:1200],
                 "trace_id": trace_id,
+                **prompt_refs,
             },
         )
         await self._emit_trace_event(
@@ -1021,8 +1095,9 @@ class LLMClient:
                 "model": model_name,
                 "session_id": session_id,
                 "endpoint": endpoint,
-                "request_payload": request_payload_log,
+                "request_payload": {**request_payload_log, **prompt_refs},
                 "trace_id": trace_id,
+                **prompt_refs,
             },
         )
 
@@ -1035,7 +1110,26 @@ class LLMClient:
             phase=trace_context.get("phase"),
             stage=trace_context.get("stage"),
             prompt_preview=self._truncate_text(effective_prompt, 1500),
+            prompt_ref=prompt_refs.get("prompt_ref"),
+            system_prompt_ref=prompt_refs.get("system_prompt_ref"),
+            full_prompt_logging=bool(settings.LLM_LOG_FULL_PROMPT),
         )
+        if settings.LLM_LOG_FULL_PROMPT:
+            logger.info(
+                "llm_request_prompt_full",
+                backend="langgraph",
+                model=model_name,
+                session_id=session_id,
+                trace_id=trace_id,
+                phase=trace_context.get("phase"),
+                stage=trace_context.get("stage"),
+                prompt_ref=prompt_refs.get("prompt_ref"),
+                system_prompt_ref=prompt_refs.get("system_prompt_ref"),
+                **_build_full_log_fields(
+                    prompt=effective_prompt,
+                    system_prompt=system_prompt,
+                ),
+            )
 
         try:
             # 执行 LLM 调用
@@ -1094,6 +1188,14 @@ class LLMClient:
             )
 
             # 发射完成事件
+            response_refs = _build_llm_log_refs(
+                session_id=session_id,
+                trace_id=trace_id,
+                agent_name=str(trace_context.get("agent_name") or agent or "llm_agent"),
+                phase=str(trace_context.get("phase") or ""),
+                stage=str(trace_context.get("stage") or ""),
+                response=content,
+            )
             await self._emit_trace_event(
                 trace_callback,
                 {
@@ -1109,9 +1211,11 @@ class LLMClient:
                         "content_preview": content[:1500],
                         "content_length": len(content),
                         "structured": bool(structured),
+                        **response_refs,
                     },
                     "latency_ms": latency_ms,
                     "trace_id": trace_id,
+                    **response_refs,
                 },
             )
             await self._emit_trace_event(
@@ -1127,6 +1231,7 @@ class LLMClient:
                     "response_preview": content[:1500],
                     "structured": bool(structured),
                     "trace_id": trace_id,
+                    **response_refs,
                 },
             )
 
@@ -1138,8 +1243,23 @@ class LLMClient:
                 trace_id=trace_id,
                 latency_ms=latency_ms,
                 response_preview=self._truncate_text(content, 1200),
+                response_ref=response_refs.get("response_ref"),
+                full_response_logging=bool(settings.LLM_LOG_FULL_RESPONSE),
                 structured=bool(structured),
             )
+            if settings.LLM_LOG_FULL_RESPONSE:
+                logger.info(
+                    "llm_request_response_full",
+                    backend="langgraph",
+                    model=model_name,
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    phase=trace_context.get("phase"),
+                    stage=trace_context.get("stage"),
+                    response_ref=response_refs.get("response_ref"),
+                    structured=bool(structured),
+                    **_build_full_log_fields(response=content),
+                )
 
             return {
                 "content": content,

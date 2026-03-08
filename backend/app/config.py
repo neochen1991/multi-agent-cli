@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     LLM_REQUEST_TIMEOUT: Optional[int] = None  # 请求超时
     LLM_TOTAL_TIMEOUT: Optional[int] = None  # 总超时
     LLM_QUEUE_TIMEOUT: Optional[int] = None  # 队列等待超时
+    LLM_ANALYSIS_QUEUE_TIMEOUT: Optional[int] = None  # 分析阶段队列等待超时
+    LLM_METRICS_QUEUE_TIMEOUT: Optional[int] = None  # MetricsAgent 队列等待超时
+    LLM_JUDGE_QUEUE_TIMEOUT: Optional[int] = None  # 裁决阶段队列等待超时
+    LLM_REPORT_QUEUE_TIMEOUT: Optional[int] = None  # 报告阶段队列等待超时
     LLM_ASSET_TIMEOUT: Optional[int] = None  # 资产处理超时
     LLM_ANALYSIS_TIMEOUT: Optional[int] = None  # 分析阶段超时
     LLM_REVIEW_TIMEOUT: Optional[int] = None  # 审查阶段超时
@@ -121,6 +125,10 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = Field(default="https://ark.cn-beijing.volces.com/api/coding")
     # LLM API 密钥
     LLM_API_KEY: str = Field(default="7b446c97-7172-4c90-a4ef-3f3ff5a8f894")
+    # 调试开关：是否记录完整 prompt 到 output_refs，并在事件中保留 ref
+    LLM_LOG_FULL_PROMPT: bool = False
+    # 调试开关：是否记录完整 response 到 output_refs，并在事件中保留 ref
+    LLM_LOG_FULL_RESPONSE: bool = False
 
     # 辩论配置
     # 最大辩论轮次，默认 1 轮
@@ -342,8 +350,28 @@ class Settings(BaseSettings):
 
     @property
     def llm_queue_timeout(self) -> int:
-        """获取队列等待超时时间（秒），范围 4-15 秒"""
-        return self.LLM_QUEUE_TIMEOUT or max(4, min(self.llm_total_timeout, 15))
+        """获取通用队列等待超时时间（秒），默认放宽到 30 秒。"""
+        return self.LLM_QUEUE_TIMEOUT or max(12, min(self.llm_total_timeout, 30))
+
+    @property
+    def llm_analysis_queue_timeout(self) -> int:
+        """获取分析阶段队列等待超时时间（秒），默认放宽到 45 秒。"""
+        return self.LLM_ANALYSIS_QUEUE_TIMEOUT or max(int(self.llm_queue_timeout), 45)
+
+    @property
+    def llm_metrics_queue_timeout(self) -> int:
+        """获取 MetricsAgent 队列等待超时时间（秒），默认不低于 60 秒。"""
+        return self.LLM_METRICS_QUEUE_TIMEOUT or max(int(self.llm_analysis_queue_timeout), 60)
+
+    @property
+    def llm_judge_queue_timeout(self) -> int:
+        """获取裁决阶段队列等待超时时间（秒），默认放宽到 60 秒。"""
+        return self.LLM_JUDGE_QUEUE_TIMEOUT or max(int(self.llm_analysis_queue_timeout), 60)
+
+    @property
+    def llm_report_queue_timeout(self) -> int:
+        """获取报告阶段队列等待超时时间（秒），默认与分析阶段一致。"""
+        return self.LLM_REPORT_QUEUE_TIMEOUT or max(int(self.llm_queue_timeout), 45)
 
     @property
     def llm_asset_timeout(self) -> int:

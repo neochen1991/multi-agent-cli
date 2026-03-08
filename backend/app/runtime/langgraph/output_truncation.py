@@ -62,6 +62,22 @@ class OutputReferenceStore:
 output_reference_store = OutputReferenceStore()
 
 
+def save_output_reference(
+    *,
+    content: str,
+    session_id: str = "",
+    category: str = "",
+    metadata: Dict[str, Any] | None = None,
+) -> str:
+    """保存完整文本并返回 ref_id，供事件和日志按需引用。"""
+    return output_reference_store.save(
+        content=content,
+        session_id=session_id,
+        category=category,
+        metadata=metadata,
+    )
+
+
 def truncate_text(
     value: str,
     *,

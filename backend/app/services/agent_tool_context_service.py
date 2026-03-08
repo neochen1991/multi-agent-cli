@@ -2007,7 +2007,11 @@ class AgentToolContextService:
             ("cpu", r"cpu[^0-9]*([0-9]+(?:\.[0-9]+)?%?)", "CPU"),
             ("threads", r"(?:线程|threads?)[^0-9]*([0-9]+)", "线程"),
             ("hikari_pending", r"hikari[^,\n]*pending[^0-9]*([0-9]+)", "Hikari Pending"),
-            ("db_conn", r"(?:db|database)[^,\n]*([0-9]+/[0-9]+)", "DB连接"),
+            (
+                "db_conn",
+                r"(?:db_conn|db\.active\.connections|database\s+connections?)\s*[=:]?\s*([0-9]+/[0-9]+)",
+                "DB连接",
+            ),
             ("error_rate", r"(?:5xx|error(?:_rate)?)[^0-9]*([0-9]+(?:\.[0-9]+)?%?)", "错误率"),
         ]
         for source_text in text_sources:

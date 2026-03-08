@@ -87,7 +87,7 @@ class PromptBuilder:
         return build_problem_analysis_commander_prompt(
             loop_round=loop_round,
             max_rounds=self._max_rounds,
-            context=context,
+            context=self._compact_commander_context(context, loop_round=loop_round),
             history_cards=history_cards,
             skill_context=build_rca_skill_context(context=context, loop_round=loop_round, max_rounds=self._max_rounds),
             work_log_context=work_log_context,
@@ -95,6 +95,75 @@ class PromptBuilder:
             dialogue_items=dialogue_items,
             to_json=self._to_json,
         )
+
+    def _compact_commander_context(self, context: Dict[str, Any], *, loop_round: int) -> Dict[str, Any]:
+        """
+        为 commander 首轮拆解裁剪上下文，避免把责任田和 incident 全量对象整包塞进首轮 prompt。
+
+        commander 首轮最重要的是：
+        - incident 核心摘要
+        - 责任田映射出的关键接口 / 表 / 服务 / 代码线索
+        - 当前允许调度的 analysis agents
+        其它长尾字段留给后续专家 Agent 在各自 prompt 中消费。
+        """
+        if not isinstance(context, dict):
+            return {}
+
+        incident = context.get("incident") if isinstance(context.get("incident"), dict) else {}
+        incident_summary = context.get("incident_summary") if isinstance(context.get("incident_summary"), dict) else {}
+        mapping = context.get("interface_mapping") if isinstance(context.get("interface_mapping"), dict) else {}
+        leads = context.get("investigation_leads") if isinstance(context.get("investigation_leads"), dict) else {}
+        available_agents = list(context.get("available_analysis_agents") or [])[:10]
+        if not available_agents and isinstance(context.get("parallel_analysis_agents"), list):
+            available_agents = list(context.get("parallel_analysis_agents") or [])[:10]
+
+        compact: Dict[str, Any] = {
+            "incident_summary": {
+                "title": str((incident or {}).get("title") or incident_summary.get("title") or context.get("title") or "")[:160],
+                "description": str((incident or {}).get("description") or incident_summary.get("description") or context.get("description") or "")[:280],
+                "severity": str((incident or {}).get("severity") or incident_summary.get("severity") or context.get("severity") or ""),
+                "service_name": str((incident or {}).get("service_name") or incident_summary.get("service_name") or context.get("service_name") or ""),
+            },
+            "log_excerpt": str(context.get("log_excerpt") or "")[:320],
+            "available_analysis_agents": available_agents,
+            "execution_mode": str(context.get("execution_mode") or ""),
+        }
+
+        if mapping:
+            compact["interface_mapping"] = {
+                "matched": bool(mapping.get("matched")),
+                "confidence": mapping.get("confidence"),
+                "domain": str(mapping.get("domain") or "")[:80],
+                "aggregate": str(mapping.get("aggregate") or "")[:80],
+                "owner_team": str(mapping.get("owner_team") or "")[:80],
+                "owner": str(mapping.get("owner") or "")[:80],
+                "endpoint": mapping.get("matched_endpoint") or mapping.get("endpoint") or {},
+                "database_tables": list(mapping.get("database_tables") or mapping.get("db_tables") or [])[:8],
+                "code_artifacts": list(mapping.get("code_artifacts") or [])[:5],
+                "dependency_services": list(mapping.get("dependency_services") or [])[:6],
+                "monitor_items": list(mapping.get("monitor_items") or [])[:6],
+            }
+
+        if leads:
+            compact["investigation_leads"] = {
+                "api_endpoints": list(leads.get("api_endpoints") or [])[:4],
+                "service_names": list(leads.get("service_names") or [])[:6],
+                "code_artifacts": list(leads.get("code_artifacts") or [])[:6],
+                "class_names": list(leads.get("class_names") or [])[:6],
+                "database_tables": list(leads.get("database_tables") or [])[:8],
+                "monitor_items": list(leads.get("monitor_items") or [])[:6],
+                "dependency_services": list(leads.get("dependency_services") or [])[:6],
+                "trace_ids": list(leads.get("trace_ids") or [])[:4],
+                "error_keywords": list(leads.get("error_keywords") or [])[:6],
+                "domain": str(leads.get("domain") or "")[:80],
+                "aggregate": str(leads.get("aggregate") or "")[:80],
+            }
+
+        # 首轮 commander 只需要最小摘要；后续轮次再允许看完整一点的上下文。
+        if loop_round > 1:
+            compact["existing_agent_outputs"] = context.get("existing_agent_outputs") or {}
+
+        return compact
 
     def build_supervisor_prompt(
         self,

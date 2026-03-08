@@ -101,3 +101,38 @@ def test_build_result_fallbacks_confidence_from_root_cause():
     assert result.root_cause == "数据库连接池耗尽导致订单创建事务无法开启"
     assert result.root_cause_category == "runtime_log"
     assert result.confidence == pytest.approx(0.72, abs=1e-6)
+
+
+def test_build_result_extracts_readable_text_from_json_wrapped_fields():
+    """验证构建结果时会清洗 JSON 包裹的根因和修复建议文本。"""
+
+    service = DebateService()
+    session = _session()
+    flow_result = {
+        "final_judgment": {
+            "root_cause": {
+                "summary": """```json
+                {"summary":"库存热点锁竞争放大订单事务耗时，最终拖垮连接池","category":"db_lock"}
+                ```""",
+                "category": "db_lock",
+                "confidence": 0.68,
+            },
+            "fix_recommendation": {
+                "summary": """{"summary":"先限制热点 SKU 并缩短库存事务"}""",
+                "steps": [
+                    """{"summary":"排查 t_inventory 热点行锁等待"}""",
+                    "观察 Hikari 连接池 pending 指标",
+                ],
+            },
+            "evidence_chain": [],
+        },
+        "action_items": ['{"summary":"先对热点 SKU 做限流"}'],
+        "responsible_team": {"team": "inventory", "owner": "neo"},
+    }
+
+    result = service._build_result(session, flow_result, report={})
+
+    assert result.root_cause == "库存热点锁竞争放大订单事务耗时，最终拖垮连接池"
+    assert result.fix_recommendation is not None
+    assert result.fix_recommendation.summary == "先限制热点 SKU 并缩短库存事务"
+    assert result.action_items[0]["summary"] == "先对热点 SKU 做限流"

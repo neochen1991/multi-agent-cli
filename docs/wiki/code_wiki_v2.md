@@ -258,6 +258,164 @@ Service 层会先做责任田映射，包括：
 ### 6.7 前端流式展示
 
 前端通过 WebSocket 实时接收：
+
+## 7. LLM 调用审计与完整 Prompt 回查
+
+为方便定位多 Agent 调度质量、Prompt 漂移和模型输出异常，当前系统支持“完整 LLM 调用审计”模式。
+
+### 7.1 开关
+
+配置项定义在：
+
+- `/Users/neochen/multi-agent-cli_v2/backend/app/config.py`
+
+开关：
+
+- `LLM_LOG_FULL_PROMPT`
+- `LLM_LOG_FULL_RESPONSE`
+
+当前本地开发环境已打开：
+
+- `/Users/neochen/multi-agent-cli_v2/backend/.env`
+
+```env
+LLM_LOG_FULL_PROMPT=true
+LLM_LOG_FULL_RESPONSE=true
+```
+
+设计边界：
+
+- 默认预览字段仍保留：
+  - `prompt_preview`
+  - `response_preview`
+- 完整文本不会直接塞进事件体
+- 完整文本会额外落到 `output_refs`
+- 事件里只增加：
+  - `prompt_ref`
+  - `system_prompt_ref`
+  - `response_ref`
+
+这样做的原因是：
+
+1. 不破坏原有事件流结构
+2. 不把前端和 lineage 审计流撑爆
+3. 仍然能精确回查每次真实 Prompt 和 Response
+
+### 7.2 哪些模块会写完整引用
+
+1. 运行时 Agent 调用链
+
+- `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/execution.py`
+
+涉及事件：
+
+- `llm_call_started`
+- `llm_request_started`
+- `llm_http_request`
+- `llm_http_response`
+- `llm_call_completed`
+- `llm_request_completed`
+
+2. 通用 LLM Client
+
+- `/Users/neochen/multi-agent-cli_v2/backend/app/core/llm_client.py`
+
+这部分主要覆盖：
+
+- 资产解析阶段
+- 结构化修复阶段
+- 非 runtime 直接走 `LLMClient` 的调用链
+
+3. lineage 输入摘要
+
+- `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/event_dispatcher.py`
+
+当事件里带 `prompt_ref / system_prompt_ref / response_ref` 时，lineage 的 `input_summary / output_summary` 也会带上对应引用。
+
+### 7.3 完整文本存储在哪里
+
+目录：
+
+- `/tmp/sre_debate_store/output_refs`
+
+实现：
+
+- `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/output_truncation.py`
+
+每条完整文本会写成一个本地 JSON 文件，包含：
+
+- `ref_id`
+- `session_id`
+- `category`
+- `content`
+- `metadata`
+- `created_at`
+
+常见类别：
+
+- `llm_prompt`
+- `llm_system_prompt`
+- `llm_response`
+- `llm_client_prompt`
+- `llm_client_system_prompt`
+- `llm_client_response`
+
+### 7.4 如何读取完整 Prompt / Response
+
+后端 API：
+
+- `GET /api/v1/debates/output-refs/{ref_id}`
+
+代码入口：
+
+- `/Users/neochen/multi-agent-cli_v2/backend/app/api/debates.py`
+
+前端 API：
+
+- `/Users/neochen/multi-agent-cli_v2/frontend/src/services/api.ts`
+
+典型流程：
+
+1. 在事件流中找到某次调用：
+   - `llm_call_started`
+   - `llm_http_request`
+   - `llm_http_response`
+2. 取出其中的：
+   - `prompt_ref`
+   - `system_prompt_ref`
+   - `response_ref`
+3. 调用：
+
+```bash
+curl http://127.0.0.1:8000/api/v1/debates/output-refs/{ref_id}
+```
+
+4. 从返回结果中读取完整 `content`
+
+### 7.5 真实例子
+
+在本地 mock RCA 调试中，主 Agent 首轮调度事件已可直接看到：
+
+- `prompt_ref = out_e7a5d7ca49e54ab2`
+- `system_prompt_ref = out_a8a969797cef4425`
+
+这意味着：
+
+- 事件流仍然只展示预览
+- 但完整 Prompt 已经落盘
+- 可以通过 `output-refs` 接口回查到主 Agent 首轮的真实调度 Prompt
+
+### 7.6 对原流程的影响
+
+这项能力只增加审计信息，不改变原流程语义：
+
+- 不改变 Agent 路由
+- 不改变工具门禁
+- 不改变 Prompt 组装逻辑
+- 不改变前端主页面渲染逻辑
+- 不改变原有 preview 事件结构
+
+它只是让“预览日志”升级为“预览 + 完整引用”的双层模式。
 - 阶段事件
 - Agent 发言
 - 工具调用记录

@@ -22,11 +22,77 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt,
 from app.config import settings
 from app.core.llm_client import LLMClient
 from app.runtime.langgraph.parsers import normalize_agent_output
-from app.runtime.langgraph.output_truncation import truncate_payload, truncate_text
+from app.runtime.langgraph.output_truncation import (
+    save_output_reference,
+    truncate_payload,
+    truncate_text,
+)
 from app.runtime.langgraph.state import AgentSpec, DebateTurn
 from app.runtime.langgraph.schemas import get_schema_for_agent
 
 logger = structlog.get_logger()
+
+
+def _full_text_log_refs(
+    *,
+    session_id: str,
+    agent_name: str,
+    phase: str,
+    round_number: int,
+    loop_round: int,
+    prompt: str = "",
+    response: str = "",
+    system_prompt: str = "",
+) -> Dict[str, str]:
+    """按调试开关把完整 prompt/response 落盘，并返回事件可用的 ref。"""
+    refs: Dict[str, str] = {}
+    metadata = {
+        "agent_name": agent_name,
+        "phase": phase,
+        "round_number": round_number,
+        "loop_round": loop_round,
+    }
+    if settings.LLM_LOG_FULL_PROMPT:
+        if system_prompt:
+            refs["system_prompt_ref"] = save_output_reference(
+                content=system_prompt,
+                session_id=session_id,
+                category="llm_system_prompt",
+                metadata=metadata,
+            )
+        if prompt:
+            refs["prompt_ref"] = save_output_reference(
+                content=prompt,
+                session_id=session_id,
+                category="llm_prompt",
+                metadata=metadata,
+            )
+    if settings.LLM_LOG_FULL_RESPONSE and response:
+        refs["response_ref"] = save_output_reference(
+            content=response,
+            session_id=session_id,
+            category="llm_response",
+            metadata=metadata,
+        )
+    return refs
+
+
+def _build_full_log_fields(
+    *,
+    prompt: str = "",
+    system_prompt: str = "",
+    response: str = "",
+) -> Dict[str, str]:
+    """按调试开关返回应直接写入 backend.log 的完整 LLM 文本字段。"""
+    payload: Dict[str, str] = {}
+    if settings.LLM_LOG_FULL_PROMPT:
+        if system_prompt:
+            payload["system_prompt_full"] = system_prompt
+        if prompt:
+            payload["prompt_full"] = prompt
+    if settings.LLM_LOG_FULL_RESPONSE and response:
+        payload["response_full"] = response
+    return payload
 
 
 @dataclass
@@ -42,6 +108,24 @@ class RetryableAgentTimeoutError(RuntimeError):
 
 class FatalLLMError(RuntimeError):
     """Non-recoverable LLM error that should fail the session immediately."""
+
+
+def _is_transient_llm_error(error_text: str) -> bool:
+    """识别可短暂重试的连接抖动类 LLM 异常。"""
+    lowered = str(error_text or "").strip().lower()
+    if not lowered:
+        return False
+    transient_markers = (
+        "connection error",
+        "connection reset",
+        "server disconnected",
+        "temporarily unavailable",
+        "remoteprotocolerror",
+        "connecterror",
+        "readerror",
+        "broken pipe",
+    )
+    return any(marker in lowered for marker in transient_markers)
 
 
 async def emit_stream_deltas(
@@ -234,6 +318,15 @@ async def call_agent(
         "round_number": round_number,
         "prompt_template_version": prompt_template_version,
     }
+    prompt_refs = _full_text_log_refs(
+        session_id=str(orchestrator.session_id or ""),
+        agent_name=spec.name,
+        phase=spec.phase,
+        round_number=round_number,
+        loop_round=loop_round,
+        prompt=prompt,
+        system_prompt=str(spec.system_prompt or ""),
+    )
 
     # 在真正请求模型前先写开始事件，前端和审计系统才能看到完整调用链。
     await orchestrator._emit_event(
@@ -245,6 +338,7 @@ async def call_agent(
             "max_tokens": agent_max_tokens,
             "timeout_plan": timeout_plan,
             "max_attempts": max_attempts,
+            **prompt_refs,
         }
     )
     await orchestrator._emit_event(
@@ -256,6 +350,7 @@ async def call_agent(
             "max_tokens": agent_max_tokens,
             "timeout_plan": timeout_plan,
             "max_attempts": max_attempts,
+            **prompt_refs,
         }
     )
     await orchestrator._emit_event(
@@ -269,7 +364,9 @@ async def call_agent(
                 "message_count": 2,
                 "prompt_length": len(prompt),
                 "prompt_preview": prompt[:1200],
+                **prompt_refs,
             },
+            **prompt_refs,
         }
     )
     logger.info(
@@ -282,7 +379,25 @@ async def call_agent(
         timeout_plan=timeout_plan,
         max_tokens=attempt_max_tokens,
         prompt_length=len(attempt_prompt),
+        prompt_ref=prompt_refs.get("prompt_ref"),
+        system_prompt_ref=prompt_refs.get("system_prompt_ref"),
+        full_prompt_logging=bool(settings.LLM_LOG_FULL_PROMPT),
     )
+    if settings.LLM_LOG_FULL_PROMPT:
+        logger.info(
+            "runtime_agent_llm_prompt_full",
+            session_id=orchestrator.session_id,
+            agent_name=spec.name,
+            phase=spec.phase,
+            loop_round=loop_round,
+            round_number=round_number,
+            prompt_ref=prompt_refs.get("prompt_ref"),
+            system_prompt_ref=prompt_refs.get("system_prompt_ref"),
+            **_build_full_log_fields(
+                prompt=attempt_prompt,
+                system_prompt=str(spec.system_prompt or ""),
+            ),
+        )
     retrying = AsyncRetrying(
         stop=stop_after_attempt(max_attempts),
         wait=wait_exponential(multiplier=0.2, min=0.2, max=2.0),
@@ -291,7 +406,7 @@ async def call_agent(
     )
 
     try:
-        # execution 层的重试只覆盖“超时类短暂故障”，不覆盖认证/配额等致命错误。
+        # execution 层的重试只覆盖“超时/连接抖动类短暂故障”，不覆盖认证/配额等致命错误。
         async for attempt in retrying:
             attempt_idx = int(attempt.retry_state.attempt_number or 1)
             attempt_timeout = timeout_plan[min(attempt_idx - 1, len(timeout_plan) - 1)]
@@ -388,6 +503,14 @@ async def call_agent(
                         },
                     )
                     invoke_mode = str(getattr(invoke_result, "invoke_mode", "") or "direct")
+                    response_refs = _full_text_log_refs(
+                        session_id=str(orchestrator.session_id or ""),
+                        agent_name=spec.name,
+                        phase=spec.phase,
+                        round_number=round_number,
+                        loop_round=loop_round,
+                        response=raw_content,
+                    )
                     await orchestrator._emit_event(
                         {
                             "type": "llm_invoke_path",
@@ -479,9 +602,11 @@ async def call_agent(
                             "response_payload": {
                                 "content_preview": raw_content[:1200],
                                 "content_length": len(raw_content),
+                                **response_refs,
                             },
                             "latency_ms": latency_ms,
                             "invoke_mode": invoke_mode,
+                            **response_refs,
                         }
                     )
                     await orchestrator._emit_event(
@@ -535,6 +660,7 @@ async def call_agent(
                             "invoke_mode": invoke_mode,
                             "attempt": attempt_idx,
                             "max_attempts": max_attempts,
+                            **response_refs,
                         }
                     )
                     await orchestrator._emit_event(
@@ -547,6 +673,7 @@ async def call_agent(
                             "invoke_mode": invoke_mode,
                             "attempt": attempt_idx,
                             "max_attempts": max_attempts,
+                            **response_refs,
                         }
                     )
                     logger.info(
@@ -561,16 +688,31 @@ async def call_agent(
                         response_length=len(raw_content or ""),
                         confidence=float(payload.get("confidence", 0.0) or 0.0),
                         invoke_mode=invoke_mode,
+                        response_ref=response_refs.get("response_ref"),
+                        full_response_logging=bool(settings.LLM_LOG_FULL_RESPONSE),
                     )
+                    if settings.LLM_LOG_FULL_RESPONSE:
+                        logger.info(
+                            "runtime_agent_llm_response_full",
+                            session_id=orchestrator.session_id,
+                            agent_name=spec.name,
+                            phase=spec.phase,
+                            loop_round=loop_round,
+                            round_number=round_number,
+                            attempt=attempt_idx,
+                            response_ref=response_refs.get("response_ref"),
+                            **_build_full_log_fields(response=raw_content),
+                        )
                     return turn
                 except Exception as exc:
                     # 错误分流逻辑：
                     # 1. 致命错误直接抛 FatalLLMError
-                    # 2. 超时类错误允许按 timeout_plan 做重试
+                    # 2. 超时/连接抖动类错误允许按 timeout_plan 做重试
                     # 3. 其他错误由上层决定是否转 fallback turn
                     latency_ms = round((perf_counter() - started_clock) * 1000, 2)
                     error_text = str(exc).strip() or exc.__class__.__name__
                     is_timeout = isinstance(exc, asyncio.TimeoutError) or "timeout" in error_text.lower()
+                    is_transient = _is_transient_llm_error(error_text)
                     if settings.LLM_FAILFAST_ON_RATE_LIMIT and orchestrator._is_rate_limited_error(error_text):
                         error_text = f"LLM_RATE_LIMITED: {error_text}"
                     lowered_error = error_text.lower()
@@ -609,9 +751,9 @@ async def call_agent(
                             }
                         )
                         raise FatalLLMError(f"{spec.name} 调用不可恢复失败: {error_text}") from exc
-                    retryable = attempt_idx < max_attempts and is_timeout
+                    retryable = attempt_idx < max_attempts and (is_timeout or is_transient)
                     if retryable:
-                        # timeout 重试前允许压缩 prompt / 降低 token，尽量用更小代价拿到一次可用输出。
+                        # 短暂故障重试前允许压缩 prompt / 降低 token，尽量用更小代价拿到一次可用输出。
                         logger.warning(
                             "runtime_agent_llm_retry",
                             session_id=orchestrator.session_id,
@@ -671,7 +813,8 @@ async def call_agent(
                             )
                         raise RetryableAgentTimeoutError(error_text) from exc
 
-                    (logger.warning if is_timeout else logger.error)(
+                    failure_type = "timeout" if is_timeout else ("transient_error" if is_transient else "error")
+                    (logger.warning if (is_timeout or is_transient) else logger.error)(
                         "runtime_agent_llm_timeout" if is_timeout else "runtime_agent_llm_failed",
                         session_id=orchestrator.session_id,
                         agent_name=spec.name,
@@ -706,6 +849,7 @@ async def call_agent(
                             "attempt": attempt_idx,
                             "max_attempts": max_attempts,
                             "prompt_preview": attempt_prompt[:1200],
+                            "failure_type": failure_type,
                         }
                     )
                     await orchestrator._emit_event(
@@ -713,7 +857,7 @@ async def call_agent(
                             "type": "llm_request_failed",
                             **event_common,
                             "error": error_text,
-                            "failure_type": "timeout" if is_timeout else "error",
+                            "failure_type": failure_type,
                             "latency_ms": latency_ms,
                             "timeout_seconds": attempt_timeout,
                             "attempt": attempt_idx,

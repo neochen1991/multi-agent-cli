@@ -118,6 +118,17 @@ class DebateResultResponse(BaseModel):
     fix_recommendation: Optional[FixRecommendationResponse]
     impact_analysis: Optional[ImpactAnalysisResponse]
     risk_assessment: Optional[RiskAssessmentResponse]
+
+
+async def _close_incident_after_debate_failure(incident_id: str, error_message: str) -> None:
+    """把执行失败的 incident 从 analyzing 收口，避免列表页长期显示运行中。"""
+    await incident_service.update_incident(
+        incident_id,
+        IncidentUpdate(
+            status=IncidentStatus.CLOSED,
+            fix_suggestion=str(error_message or "")[:260],
+        ),
+    )
     responsible_team: Optional[str]
     responsible_owner: Optional[str]
     action_items: List[Dict[str, Any]]
@@ -342,6 +353,7 @@ async def execute_debate(
         )
         
     except Exception as e:
+        await _close_incident_after_debate_failure(session.incident_id, str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Debate execution failed: {str(e)}"
@@ -420,13 +432,7 @@ async def execute_debate_async(
             }
         except Exception as exc:
             await runtime_task_registry.mark_done(session_id, status="failed", error=str(exc))
-            await incident_service.update_incident(
-                session.incident_id,
-                IncidentUpdate(
-                    status=IncidentStatus.CLOSED,
-                    fix_suggestion=str(exc)[:260],
-                ),
-            )
+            await _close_incident_after_debate_failure(session.incident_id, str(exc))
             raise
 
     task_id = task_queue.submit(_run, timeout_seconds=max(60, int(settings.DEBATE_TIMEOUT or 600)))

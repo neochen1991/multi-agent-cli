@@ -10,6 +10,77 @@ from typing import Any, Dict, List, Optional
 from app.core.json_utils import extract_json_dict
 
 
+def _strip_code_fence(text: str) -> str:
+    """去掉外层 Markdown code fence，便于后续继续抽取结构化字段。"""
+    raw = str(text or "").strip()
+    if not raw.startswith("```"):
+        return raw
+    matched = re.match(r"^```(?:json|JSON)?\s*([\s\S]*?)\s*```$", raw)
+    if matched:
+        return str(matched.group(1) or "").strip()
+    return raw
+
+
+def extract_readable_text(
+    value: Any,
+    *,
+    preferred_keys: Optional[List[str]] = None,
+    fallback: str = "",
+    max_len: int = 400,
+) -> str:
+    """从 JSON 片段、代码块或普通字符串里提取适合展示的自然语言文本。"""
+    preferred = list(preferred_keys or ["summary", "conclusion", "chat_message", "analysis", "message"])
+
+    def _inner(obj: Any, *, depth: int = 0) -> str:
+        if depth > 4:
+            return ""
+        if isinstance(obj, dict):
+            for key in preferred:
+                text = _inner(obj.get(key), depth=depth + 1)
+                if text:
+                    return text
+            for nested_key in ("root_cause", "final_judgment", "fix_recommendation"):
+                text = _inner(obj.get(nested_key), depth=depth + 1)
+                if text:
+                    return text
+            return ""
+        if isinstance(obj, list):
+            for item in obj:
+                text = _inner(item, depth=depth + 1)
+                if text:
+                    return text
+            return ""
+        text = str(obj or "").strip()
+        if not text:
+            return ""
+        raw = _strip_code_fence(text)
+        parsed = extract_json_dict(raw)
+        if isinstance(parsed, dict) and parsed:
+            nested = _inner(parsed, depth=depth + 1)
+            if nested:
+                return nested
+        parsed = extract_largest_json_dict(raw)
+        if parsed:
+            nested = _inner(parsed, depth=depth + 1)
+            if nested:
+                return nested
+        lowered = raw.lower()
+        if lowered.startswith("我的判断是："):
+            raw = raw.split("：", 1)[-1].strip()
+            reparsed = extract_json_dict(_strip_code_fence(raw)) or extract_largest_json_dict(_strip_code_fence(raw))
+            if isinstance(reparsed, dict) and reparsed:
+                nested = _inner(reparsed, depth=depth + 1)
+                if nested:
+                    return nested
+        raw = re.sub(r"\s+", " ", raw).strip()
+        return raw[:max_len]
+
+    text = _inner(value)
+    if text:
+        return text[:max_len]
+    return str(fallback or "").strip()[:max_len]
+
+
 def extract_balanced_object(text: str, start_index: int) -> Optional[str]:
     """对输入执行提取balancedobject，将原始数据整理为稳定的内部结构。"""
     if start_index < 0 or start_index >= len(text) or text[start_index] != "{":
@@ -179,9 +250,19 @@ def parse_judge_payload(raw_content: str) -> Dict[str, Any]:
 
 def normalize_normal_output(parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
     """对输入执行归一化normaloutput，将原始数据整理为稳定的内部结构。"""
-    chat_message = str(parsed.get("chat_message") or "").strip()
-    analysis = str(parsed.get("analysis") or "").strip()
-    conclusion = str(parsed.get("conclusion") or analysis or "").strip()
+    chat_message = extract_readable_text(parsed.get("chat_message"), fallback="")
+    analysis = extract_readable_text(
+        parsed.get("analysis"),
+        preferred_keys=["symptom_summary", "summary", "analysis", "chat_message", "conclusion"],
+        fallback="",
+        max_len=600,
+    )
+    conclusion = extract_readable_text(
+        parsed.get("conclusion") or analysis or "",
+        preferred_keys=["summary", "conclusion", "chat_message", "analysis"],
+        fallback=analysis,
+        max_len=420,
+    )
     evidence = _normalize_evidence_items(parsed.get("evidence_chain"), source_hint="analysis", max_items=5)
 
     confidence = parsed.get("confidence")
@@ -192,7 +273,7 @@ def normalize_normal_output(parsed: Dict[str, Any], raw_content: str) -> Dict[st
     confidence_value = max(0.0, min(1.0, confidence_value))
 
     if not analysis and raw_content:
-        analysis = raw_content[:220]
+        analysis = extract_readable_text(raw_content, fallback=raw_content[:220], max_len=600)
     if not conclusion:
         conclusion = analysis
     if not chat_message:
@@ -324,6 +405,8 @@ def normalize_commander_output(parsed: Dict[str, Any], raw_content: str) -> Dict
                     "skill_hints": _normalize_skill_hints(item.get("skill_hints")),
                 }
             )
+    if not commands:
+        commands = _extract_commander_commands_from_markdown(raw_content)
     if not str(normalized.get("chat_message") or "").strip():
         normalized["chat_message"] = "我来拆解问题并给各专家Agent下达命令。"
     normalized["commands"] = commands
@@ -350,6 +433,165 @@ def normalize_commander_output(parsed: Dict[str, Any], raw_content: str) -> Dict
     return normalized
 
 
+def _extract_commander_commands_from_markdown(raw_content: str) -> List[Dict[str, Any]]:
+    """
+    当 commander 漂成 Markdown 表格时，尽量把表格行回收成最小可执行命令。
+
+    这是兜底，不替代正常的结构化 JSON 输出。
+    """
+    text = str(raw_content or "")
+    if "| **target_agent** |" not in text:
+        return []
+
+    row_commands = _extract_commander_commands_from_markdown_rows(text)
+    if row_commands:
+        return row_commands
+
+    commands: List[Dict[str, Any]] = []
+    current: Dict[str, Any] = {}
+    field_map = {
+        "target_agent": "target_agent",
+        "task": "task",
+        "focus": "focus",
+        "expected_output": "expected_output",
+        "use_tool": "use_tool",
+        "database_tables": "database_tables",
+        "skill_hints": "skill_hints",
+    }
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("|") or line.startswith("|:---"):
+            continue
+        parts = [part.strip() for part in line.strip("|").split("|")]
+        if len(parts) < 2:
+            continue
+        key = parts[0].replace("**", "").strip().lower()
+        value = parts[1].strip()
+        mapped = field_map.get(key)
+        if not mapped:
+            continue
+        if mapped == "target_agent":
+            if current.get("target_agent"):
+                commands.append(current)
+            current = {
+                "target_agent": value,
+                "task": "",
+                "focus": "",
+                "expected_output": "",
+                "use_tool": None,
+                "database_tables": [],
+                "skill_hints": [],
+            }
+            continue
+        if not current:
+            continue
+        if mapped == "use_tool":
+            normalized_value = value.strip().lower()
+            current["use_tool"] = normalized_value in {"true", "1", "yes", "y", "是"}
+            continue
+        if mapped == "database_tables":
+            current["database_tables"] = _normalize_commander_tables(_split_markdown_list(value))
+            continue
+        if mapped == "skill_hints":
+            current["skill_hints"] = _normalize_commander_skill_hints(_split_markdown_list(value))
+            continue
+        current[mapped] = value
+
+    if current.get("target_agent"):
+        commands.append(current)
+    return commands[:10]
+
+
+def _extract_commander_commands_from_markdown_rows(text: str) -> List[Dict[str, Any]]:
+    """从标准 Markdown 横表中回收 commander 命令。"""
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip().startswith("|")]
+    if len(lines) < 3:
+        return []
+
+    header_line = lines[0]
+    separator_line = lines[1]
+    if "| **target_agent** |" not in header_line or ":---" not in separator_line:
+        return []
+
+    headers = [part.strip().replace("**", "").lower() for part in header_line.strip("|").split("|")]
+    commands: List[Dict[str, Any]] = []
+    field_map = {
+        "target_agent": "target_agent",
+        "task": "task",
+        "focus": "focus",
+        "expected_output": "expected_output",
+        "use_tool": "use_tool",
+        "database_tables": "database_tables",
+        "skill_hints": "skill_hints",
+    }
+
+    for raw_line in lines[2:]:
+        if raw_line.startswith("|:---"):
+            continue
+        parts = [part.strip() for part in raw_line.strip("|").split("|")]
+        if len(parts) < len(headers):
+            parts.extend([""] * (len(headers) - len(parts)))
+        row = {headers[idx]: parts[idx] for idx in range(min(len(headers), len(parts)))}
+        target_agent = str(row.get("target_agent") or "").strip()
+        if not target_agent:
+            continue
+        use_tool_text = str(row.get("use_tool") or "").strip().lower()
+        commands.append(
+            {
+                "target_agent": target_agent,
+                "task": str(row.get("task") or "").strip(),
+                "focus": str(row.get("focus") or "").strip(),
+                "expected_output": str(row.get("expected_output") or "").strip(),
+                "use_tool": use_tool_text in {"true", "1", "yes", "y", "是"} if use_tool_text else None,
+                "database_tables": _normalize_commander_tables(_split_markdown_list(row.get("database_tables") or "")),
+                "skill_hints": _normalize_commander_skill_hints(_split_markdown_list(row.get("skill_hints") or "")),
+            }
+        )
+
+    return commands[:10]
+
+
+def _split_markdown_list(value: str) -> List[str]:
+    """把 Markdown 风格的数组/列表值拆成普通字符串数组。"""
+    text = str(value or "").strip()
+    if not text:
+        return []
+    stripped = text.strip("[]")
+    picks: List[str] = []
+    for item in stripped.split(","):
+        cleaned = item.strip().strip('"').strip("'")
+        if cleaned:
+            picks.append(cleaned)
+    return picks
+
+
+def _normalize_commander_tables(value: Any) -> List[str]:
+    """归一化 commander 命令里的表名数组。"""
+    if not isinstance(value, list):
+        return []
+    picks: List[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        picks.append(text[:120])
+    return list(dict.fromkeys(picks))[:20]
+
+
+def _normalize_commander_skill_hints(value: Any) -> List[str]:
+    """归一化 commander 命令里的 skill hints 数组。"""
+    if not isinstance(value, list):
+        return []
+    picks: List[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        picks.append(text[:80])
+    return list(dict.fromkeys(picks))[:8]
+
+
 def normalize_judge_output(
     parsed: Dict[str, Any],
     raw_content: str,
@@ -369,7 +611,7 @@ def normalize_judge_output(
     root_cause = final_judgment.get("root_cause")
     if isinstance(root_cause, str):
         root_cause = {
-            "summary": root_cause,
+            "summary": extract_readable_text(root_cause, fallback=str(root_cause or "")),
             "category": "unknown",
             "confidence": 0.6,
         }
@@ -384,7 +626,7 @@ def normalize_judge_output(
                 "confidence": 0.5,
             }
     if isinstance(root_cause, dict):
-        summary = str(root_cause.get("summary") or "").strip()
+        summary = extract_readable_text(root_cause.get("summary"), fallback=str(root_cause.get("summary") or ""))
         if not summary:
             root_cause["summary"] = fallback_summary
         else:
@@ -447,6 +689,17 @@ def normalize_judge_output(
             "rollback_recommended": False,
             "testing_requirements": [],
         }
+
+    fix_recommendation["summary"] = extract_readable_text(
+        fix_recommendation.get("summary"),
+        fallback=str(fix_recommendation.get("summary") or "建议先进行止损并补充监控告警"),
+        max_len=420,
+    )
+    fix_recommendation["steps"] = [
+        extract_readable_text(item, fallback=str(item or ""), max_len=220)
+        for item in list(fix_recommendation.get("steps") or [])
+        if extract_readable_text(item, fallback=str(item or ""), max_len=220)
+    ][:6]
 
     impact_analysis = final_judgment.get("impact_analysis")
     if not isinstance(impact_analysis, dict):

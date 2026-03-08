@@ -989,11 +989,17 @@ export const governanceApi = {
   },
 };
 
-export const buildDebateWsUrl = (sessionId: string): string => {
+export const buildDebateWsUrl = (
+  sessionId: string,
+  options?: { autoStart?: boolean },
+): string => {
   const token = localStorage.getItem('sre_token');
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
   const host = window.location.host;
-  const tokenQuery = token ? `?token=${encodeURIComponent(token)}&auto_start=true` : '?auto_start=true';
+  const autoStart = options?.autoStart === true ? 'true' : 'false';
+  const tokenQuery = token
+    ? `?token=${encodeURIComponent(token)}&auto_start=${autoStart}`
+    : `?auto_start=${autoStart}`;
   return `${protocol}://${host}/ws/debates/${sessionId}${tokenQuery}`;
 };
 

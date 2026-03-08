@@ -1,9 +1,15 @@
 """test运行时消息flow相关测试。"""
 
 import asyncio
+from typing import Any, Dict, List
 
+import pytest
 from langchain_core.messages import AIMessage
 
+import app.runtime.langgraph.execution as execution_module
+from app.config import settings
+from app.runtime.langgraph.execution import AgentInvokeResult, call_agent
+from app.runtime.langgraph.output_truncation import get_output_reference
 from app.runtime.langgraph.phase_executor import PhaseExecutor
 from app.runtime.langgraph_runtime import LangGraphRuntimeOrchestrator
 from app.runtime.langgraph.state import AgentSpec, DebateTurn
@@ -406,6 +412,59 @@ def test_enrich_agent_commands_passes_mapped_tables_to_database_agent():
     assert "责任田映射表" in str(db_cmd["focus"] or "")
 
 
+def test_enrich_agent_commands_forces_tools_for_key_evidence_agents():
+    """验证命中责任田线索时关键证据型Agent不会被关闭工具。"""
+
+    orchestrator = _orchestrator()
+    commands = {
+        "LogAgent": {
+            "target_agent": "LogAgent",
+            "task": "先基于已有信息总结",
+            "focus": "",
+            "expected_output": "",
+            "use_tool": False,
+        },
+        "CodeAgent": {
+            "target_agent": "CodeAgent",
+            "task": "梳理代码路径",
+            "focus": "",
+            "expected_output": "",
+            "use_tool": False,
+        },
+        "DatabaseAgent": {
+            "target_agent": "DatabaseAgent",
+            "task": "确认数据库瓶颈",
+            "focus": "",
+            "expected_output": "",
+            "use_tool": False,
+        },
+        "ChangeAgent": {
+            "target_agent": "ChangeAgent",
+            "task": "看最近变更",
+            "focus": "",
+            "expected_output": "",
+            "use_tool": False,
+        },
+    }
+    compact_context = {
+        "investigation_leads": {
+            "api_endpoints": ["POST /api/v1/orders"],
+            "service_names": ["order-service"],
+            "trace_ids": ["trace-001"],
+            "error_keywords": ["HikariPool timeout"],
+            "class_names": ["OrderService"],
+            "code_artifacts": ["services/order-service/src/main/java/com/acme/order/OrderService.java"],
+            "database_tables": ["public.t_order", "public.t_order_item"],
+        }
+    }
+
+    enriched = orchestrator._enrich_agent_commands_with_asset_mapping(commands, compact_context)
+
+    for agent_name in ("LogAgent", "CodeAgent", "DatabaseAgent", "ChangeAgent"):
+        assert enriched[agent_name]["use_tool"] is True
+        assert enriched[agent_name]["tool_requirement"] == "required_by_investigation_leads"
+
+
 def test_extract_agent_commands_preserves_skill_hints_and_tables():
     """验证提取AgentcommandspreservesSkill提示andtables。"""
     
@@ -566,6 +625,59 @@ def test_queue_timeout_prioritizes_commander_and_judge():
     assert judge_timeout > commander_timeout
 
 
+def test_investigation_full_first_round_commander_gets_extra_queue_time_and_lower_token_budget():
+    """验证 investigation_full 首轮 commander 拿到更高排队预算和更紧 token 上限。"""
+
+    orchestrator = _orchestrator()
+    orchestrator._deployment_profile_name = "investigation_full"
+    orchestrator.turns = []
+
+    first_round_timeout = orchestrator._agent_queue_timeout("ProblemAnalysisAgent")
+    first_round_tokens = orchestrator._agent_max_tokens("ProblemAnalysisAgent")
+
+    orchestrator.turns = [object()]
+    later_round_timeout = orchestrator._agent_queue_timeout("ProblemAnalysisAgent")
+    later_round_tokens = orchestrator._agent_max_tokens("ProblemAnalysisAgent")
+
+    assert first_round_timeout >= 50.0
+    assert first_round_timeout > later_round_timeout
+    assert first_round_tokens <= 360
+    assert later_round_tokens >= 520
+
+
+def test_investigation_full_key_evidence_agents_get_extra_queue_time():
+    """验证完整调查模式会提高关键证据 Agent 的排队等待预算。"""
+
+    orchestrator = _orchestrator()
+    orchestrator._deployment_profile_name = "investigation_full"
+
+    log_timeout = orchestrator._agent_queue_timeout("LogAgent")
+    code_timeout = orchestrator._agent_queue_timeout("CodeAgent")
+    db_timeout = orchestrator._agent_queue_timeout("DatabaseAgent")
+    metrics_timeout = orchestrator._agent_queue_timeout("MetricsAgent")
+    base_timeout = orchestrator._agent_queue_timeout("RunbookAgent")
+
+    assert log_timeout >= 45.0
+    assert code_timeout >= 45.0
+    assert db_timeout >= 45.0
+    assert metrics_timeout >= 75.0
+    assert log_timeout > base_timeout
+    assert metrics_timeout > log_timeout
+
+
+def test_metrics_agent_queue_timeout_is_not_capped_by_base_timeout():
+    """验证 MetricsAgent 不会退回到通用 30 秒队列超时。"""
+
+    orchestrator = _orchestrator()
+
+    metrics_timeout = orchestrator._agent_queue_timeout("MetricsAgent")
+    base_timeout = orchestrator._agent_queue_timeout("RunbookAgent")
+
+    assert base_timeout == float(max(2, int(settings.llm_queue_timeout)))
+    assert metrics_timeout >= 60.0
+    assert metrics_timeout > base_timeout
+
+
 def test_analysis_batch_limit_reserves_slot_for_settlement_agents():
     """验证分析batchlimitreservesslotforsettlementAgent。"""
     
@@ -577,6 +689,11 @@ def test_analysis_batch_limit_reserves_slot_for_settlement_agents():
 
     orchestrator._llm_semaphore_limit = 2
     assert orchestrator._analysis_batch_limit(collaboration=False) == 1
+
+    orchestrator._deployment_profile_name = "investigation_full"
+    orchestrator._llm_semaphore_limit = 4
+    assert orchestrator._analysis_batch_limit(collaboration=False) == 2
+    assert orchestrator._analysis_batch_limit(collaboration=True) == 1
 
 
 def test_phase_executor_batches_by_priority_and_limit():
@@ -595,3 +712,286 @@ def test_phase_executor_batches_by_priority_and_limit():
         ["CodeAgent"],
         ["DomainAgent"],
     ]
+
+
+@pytest.mark.asyncio
+async def test_call_agent_retries_transient_connection_errors(monkeypatch):
+    """验证单个Agent调用会对连接抖动做一次重试。"""
+
+    attempts: List[str] = []
+
+    def _fake_run_agent_once(orchestrator, spec, prompt, max_tokens):  # noqa: ANN001, ANN202
+        """第一次抛连接错误，第二次返回正常结果。"""
+        _ = orchestrator, prompt, max_tokens
+        attempts.append(spec.name)
+        if len(attempts) == 1:
+            raise RuntimeError("Connection error.")
+        return AgentInvokeResult(
+            content='{"chat_message":"我确认连接池耗尽","final_judgment":{"root_cause":{"summary":"连接池耗尽","category":"db_pool","confidence":0.73},"evidence_chain":[],"fix_recommendation":{"summary":"先限制热点事务","steps":["限制热点 SKU"]},"impact_analysis":{"affected_services":["order-service"],"business_impact":"下单失败"},"risk_assessment":{"risk_level":"high","risk_factors":[]}},"confidence":0.73}',
+            invoke_mode="direct",
+        )
+
+    monkeypatch.setattr("app.runtime.langgraph.execution.run_agent_once", _fake_run_agent_once)
+
+    class _StubOrchestrator:
+        """提供 call_agent 运行所需的最小编排器接口。"""
+
+        session_id = "deb_retry_connection"
+        STREAM_CHUNK_SIZE = 160
+        STREAM_MAX_CHUNKS = 16
+        JUDGE_FALLBACK_SUMMARY = "需要进一步分析"
+
+        def __init__(self):
+            self.events: List[Dict[str, Any]] = []
+            self._sem = asyncio.Semaphore(1)
+
+        async def _emit_event(self, event: Dict[str, Any]) -> None:
+            self.events.append(event)
+
+        def _prompt_template_version(self) -> str:
+            return "test"
+
+        def _chat_endpoint(self) -> str:
+            return "/v1/chat/completions"
+
+        def _agent_max_tokens(self, agent_name: str) -> int:
+            _ = agent_name
+            return 256
+
+        def _agent_timeout_plan(self, agent_name: str) -> List[float]:
+            _ = agent_name
+            return [5.0, 5.0]
+
+        def _remaining_session_budget_seconds(self) -> float:
+            return 60.0
+
+        def _agent_queue_timeout(self, agent_name: str) -> float:
+            _ = agent_name
+            return 5.0
+
+        def _get_llm_semaphore(self) -> asyncio.Semaphore:
+            return self._sem
+
+        def _is_rate_limited_error(self, error_text: str) -> bool:
+            _ = error_text
+            return False
+
+        def _prepare_timeout_retry_input(self, *, spec, prompt: str, max_tokens: int):  # noqa: ANN001
+            _ = spec
+            return prompt, max_tokens, False
+
+        def _history_cards_snapshot(self):
+            return []
+
+        def _infer_reply_target(self, **kwargs):  # noqa: ANN003
+            _ = kwargs
+            return "ProblemAnalysisAgent"
+
+    orchestrator = _StubOrchestrator()
+    turn = await call_agent(
+        orchestrator,
+        spec=AgentSpec(name="JudgeAgent", role="技术委员会主席", phase="judgment", system_prompt="test"),
+        prompt="请给出结论",
+        round_number=1,
+        loop_round=1,
+        history_cards_context=[],
+    )
+
+    assert len(attempts) == 2
+    assert turn.output_content["final_judgment"]["root_cause"]["summary"] == "连接池耗尽"
+    assert turn.output_content["chat_message"] == "我确认连接池耗尽"
+    assert any(item.get("type") == "llm_call_retry" for item in orchestrator.events)
+
+
+@pytest.mark.asyncio
+async def test_call_agent_emits_full_prompt_and_response_refs_when_enabled(monkeypatch):
+    """验证开启完整日志后，运行时事件会附带完整 prompt/response 引用。"""
+
+    monkeypatch.setattr(settings, "LLM_LOG_FULL_PROMPT", True)
+    monkeypatch.setattr(settings, "LLM_LOG_FULL_RESPONSE", True)
+
+    def _fake_run_agent_once(orchestrator, spec, prompt, max_tokens):  # noqa: ANN001, ANN202
+        _ = orchestrator, spec, prompt, max_tokens
+        return AgentInvokeResult(
+            content='{"chat_message":"日志证据确认完毕","conclusion":"连接池耗尽由库存锁等待放大","confidence":0.66}',
+            invoke_mode="direct",
+        )
+
+    monkeypatch.setattr("app.runtime.langgraph.execution.run_agent_once", _fake_run_agent_once)
+
+    class _StubOrchestrator:
+        """提供完整日志测试所需的最小编排器接口。"""
+
+        session_id = "deb_full_log_refs"
+        STREAM_CHUNK_SIZE = 160
+        STREAM_MAX_CHUNKS = 16
+        JUDGE_FALLBACK_SUMMARY = "需要进一步分析"
+
+        def __init__(self):
+            self.events: List[Dict[str, Any]] = []
+            self._sem = asyncio.Semaphore(1)
+
+        async def _emit_event(self, event: Dict[str, Any]) -> None:
+            self.events.append(event)
+
+        def _prompt_template_version(self) -> str:
+            return "test"
+
+        def _chat_endpoint(self) -> str:
+            return "/v1/chat/completions"
+
+        def _agent_max_tokens(self, agent_name: str) -> int:
+            _ = agent_name
+            return 256
+
+        def _agent_timeout_plan(self, agent_name: str) -> List[float]:
+            _ = agent_name
+            return [5.0]
+
+        def _remaining_session_budget_seconds(self) -> float:
+            return 60.0
+
+        def _agent_queue_timeout(self, agent_name: str) -> float:
+            _ = agent_name
+            return 5.0
+
+        def _get_llm_semaphore(self) -> asyncio.Semaphore:
+            return self._sem
+
+        def _is_rate_limited_error(self, error_text: str) -> bool:
+            _ = error_text
+            return False
+
+        def _prepare_timeout_retry_input(self, *, spec, prompt: str, max_tokens: int):  # noqa: ANN001
+            _ = spec
+            return prompt, max_tokens, False
+
+        def _history_cards_snapshot(self):
+            return []
+
+        def _infer_reply_target(self, **kwargs):  # noqa: ANN003
+            _ = kwargs
+            return "ProblemAnalysisAgent"
+
+    orchestrator = _StubOrchestrator()
+    prompt_text = "请根据日志分析连接池耗尽的直接证据链"
+    turn = await call_agent(
+        orchestrator,
+        spec=AgentSpec(name="LogAgent", role="日志分析专家", phase="analysis", system_prompt="你是日志专家"),
+        prompt=prompt_text,
+        round_number=1,
+        loop_round=1,
+        history_cards_context=[],
+    )
+
+    assert turn.output_content["chat_message"] == "日志证据确认完毕"
+    started_event = next(item for item in orchestrator.events if item.get("type") == "llm_call_started")
+    response_event = next(item for item in orchestrator.events if item.get("type") == "llm_http_response")
+
+    assert started_event.get("prompt_ref")
+    assert started_event.get("system_prompt_ref")
+    assert response_event.get("response_ref")
+
+    prompt_payload = get_output_reference(str(started_event.get("prompt_ref")))
+    system_payload = get_output_reference(str(started_event.get("system_prompt_ref")))
+    response_payload = get_output_reference(str(response_event.get("response_ref")))
+
+    assert prompt_payload and prompt_text in str(prompt_payload.get("content") or "")
+    assert system_payload and "你是日志专家" in str(system_payload.get("content") or "")
+    assert response_payload and "日志证据确认完毕" in str(response_payload.get("content") or "")
+
+
+@pytest.mark.asyncio
+async def test_call_agent_writes_full_prompt_and_response_to_logger(monkeypatch):
+    """验证 runtime logger 会额外写出完整 prompt/response。"""
+
+    monkeypatch.setattr(settings, "LLM_LOG_FULL_PROMPT", True)
+    monkeypatch.setattr(settings, "LLM_LOG_FULL_RESPONSE", True)
+
+    captured_logs: List[tuple[str, Dict[str, Any]]] = []
+
+    def _fake_info(event: str, **kwargs: Any) -> None:
+        captured_logs.append((event, kwargs))
+
+    monkeypatch.setattr(execution_module.logger, "info", _fake_info)
+
+    class _StubOrchestrator:
+        """为 call_agent 提供最小化 orchestrator 依赖。"""
+
+        STREAM_CHUNK_SIZE = 120
+        STREAM_MAX_CHUNKS = 24
+        JUDGE_FALLBACK_SUMMARY = "结论待补证"
+
+        def __init__(self) -> None:
+            self.session_id = "ags_test_runtime_inline"
+            self.events: List[Dict[str, Any]] = []
+            self._sem = asyncio.Semaphore(1)
+
+        async def _emit_event(self, event: Dict[str, Any]) -> None:
+            self.events.append(event)
+
+        def _prompt_template_version(self) -> str:
+            return "test"
+
+        def _chat_endpoint(self) -> str:
+            return "/v1/chat/completions"
+
+        def _agent_max_tokens(self, agent_name: str) -> int:
+            _ = agent_name
+            return 256
+
+        def _agent_timeout_plan(self, agent_name: str) -> List[float]:
+            _ = agent_name
+            return [5.0]
+
+        def _remaining_session_budget_seconds(self) -> float:
+            return 60.0
+
+        def _agent_queue_timeout(self, agent_name: str) -> float:
+            _ = agent_name
+            return 5.0
+
+        def _get_llm_semaphore(self) -> asyncio.Semaphore:
+            return self._sem
+
+        def _is_rate_limited_error(self, error_text: str) -> bool:
+            _ = error_text
+            return False
+
+        def _prepare_timeout_retry_input(self, *, spec, prompt: str, max_tokens: int):  # noqa: ANN001
+            _ = spec
+            return prompt, max_tokens, False
+
+        def _history_cards_snapshot(self):
+            return []
+
+        def _infer_reply_target(self, **kwargs):  # noqa: ANN003
+            _ = kwargs
+            return "ProblemAnalysisAgent"
+
+    monkeypatch.setattr(
+        execution_module,
+        "run_agent_once",
+        lambda orchestrator, spec, prompt, max_tokens: AgentInvokeResult(
+            content='{"chat_message":"日志确认完成","analysis":"已定位到连接池耗尽","conclusion":"连接池耗尽由库存锁等待放大","confidence":0.62}',
+            invoke_mode="direct",
+        ),
+    )
+
+    orchestrator = _StubOrchestrator()
+    prompt_text = "请结合日志定位连接池耗尽与库存锁等待的关系"
+    await call_agent(
+        orchestrator,
+        spec=AgentSpec(name="LogAgent", role="日志分析专家", phase="analysis", system_prompt="你是日志专家"),
+        prompt=prompt_text,
+        round_number=1,
+        loop_round=1,
+        history_cards_context=[],
+    )
+
+    prompt_log = next(item for item in captured_logs if item[0] == "runtime_agent_llm_prompt_full")
+    response_log = next(item for item in captured_logs if item[0] == "runtime_agent_llm_response_full")
+
+    assert prompt_text in str(prompt_log[1].get("prompt_full") or "")
+    assert "你是日志专家" in str(prompt_log[1].get("system_prompt_full") or "")
+    assert "连接池耗尽由库存锁等待放大" in str(response_log[1].get("response_full") or "")

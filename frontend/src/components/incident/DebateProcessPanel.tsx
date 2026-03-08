@@ -10,7 +10,7 @@ type Props = {
   loading: boolean;
   sessionStatus?: string;
   debateMaxRounds: number;
-  onStartRealtimeDebate: () => Promise<void>;
+  onStartAnalysis: () => Promise<void>;
   onCancel: () => Promise<void>;
   onResume: () => Promise<void>;
   onApproveReview?: () => Promise<void>;
@@ -46,7 +46,7 @@ const DebateProcessPanel: React.FC<Props> = ({
   loading,
   sessionStatus,
   debateMaxRounds,
-  onStartRealtimeDebate,
+  onStartAnalysis,
   onCancel,
   onResume,
   onApproveReview,
@@ -113,9 +113,9 @@ const DebateProcessPanel: React.FC<Props> = ({
             icon={<PlayCircleOutlined />}
             loading={running}
             disabled={loading || reviewStatus === 'pending'}
-            onClick={() => void onStartRealtimeDebate()}
+            onClick={() => void onStartAnalysis()}
           >
-            启动实时辩论
+            启动分析
           </Button>
           <Button danger onClick={() => void onCancel()}>
             取消分析

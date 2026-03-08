@@ -164,6 +164,12 @@ class EventDispatcher:
                 "prompt_length": int(payload.get("prompt_length") or 0),
                 "prompt_preview": str(payload.get("prompt_preview") or "")[:320],
             }
+            if payload.get("prompt_ref"):
+                input_summary["prompt_ref"] = str(payload.get("prompt_ref") or "")
+            if payload.get("system_prompt_ref"):
+                input_summary["system_prompt_ref"] = str(payload.get("system_prompt_ref") or "")
+        if payload.get("response_ref"):
+            output_summary["response_ref"] = str(payload.get("response_ref") or "")
 
         # 确定事件类型
         kind = "event"

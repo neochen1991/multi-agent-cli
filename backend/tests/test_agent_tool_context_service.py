@@ -68,6 +68,20 @@ def test_extract_keywords_uses_investigation_leads():
     assert "inventory-service" in keywords
 
 
+def test_collect_metrics_signals_preserves_db_connection_ratio():
+    """验证指标提取会保留数据库连接比值。"""
+
+    service = AgentToolContextService()
+
+    signals = service._collect_metrics_signals(  # noqa: SLF001 - validating metric parsing logic
+        {"log_excerpt": "order.error.rate=18.7% hikari_pending=87 db_conn=20/20"},
+        {},
+    )
+
+    db_signal = next(item for item in signals if item.get("metric") == "db_conn")
+    assert db_signal["value"] == "20/20"
+
+
 @pytest.mark.asyncio
 async def test_database_agent_context_reads_sqlite_snapshot(tmp_path, monkeypatch):
     """验证databaseAgent上下文读取SQLite快照。"""
