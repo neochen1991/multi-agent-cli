@@ -265,6 +265,7 @@ const HomePage: React.FC = () => {
             <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => navigate('/incident')}>
               故障分析
             </Button>
+            <Button onClick={() => navigate('/v2')}>切换到新版工作台</Button>
             <Button onClick={() => navigate('/history')}>历史记录</Button>
             <Button onClick={() => navigate('/assets')}>维护责任田</Button>
             <Button onClick={() => void loadDashboard()} loading={statsLoading}>

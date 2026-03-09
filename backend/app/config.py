@@ -121,10 +121,10 @@ class Settings(BaseSettings):
     # LLM 提供商标识
     LLM_PROVIDER_ID: Optional[str] = None
     # OpenAI-compatible endpoint (LangGraph config_list)
-    # LLM API 基础 URL，默认使用火山引擎 API
-    LLM_BASE_URL: str = Field(default="https://ark.cn-beijing.volces.com/api/coding")
+    # LLM API 基础 URL，默认使用 DashScope Coding OpenAI 兼容接口
+    LLM_BASE_URL: str = Field(default="https://coding.dashscope.aliyuncs.com/v1")
     # LLM API 密钥
-    LLM_API_KEY: str = Field(default="7b446c97-7172-4c90-a4ef-3f3ff5a8f894")
+    LLM_API_KEY: str = Field(default="sk-sp-5abc4c1d85414988979e90771e112f2f")
     # 调试开关：是否记录完整 prompt 到 output_refs，并在事件中保留 ref
     LLM_LOG_FULL_PROMPT: bool = False
     # 调试开关：是否记录完整 response 到 output_refs，并在事件中保留 ref

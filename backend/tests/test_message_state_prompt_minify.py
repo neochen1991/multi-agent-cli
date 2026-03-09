@@ -88,6 +88,32 @@ def test_agent_prompt_includes_tool_limited_instruction() -> None:
     assert "不要假装已经完成实时取证" in prompt
 
 
+def test_agent_prompt_includes_focused_context_block() -> None:
+    """验证 Agent Prompt 会显式包含 focused_context。"""
+
+    spec = AgentSpec(name="CodeAgent", role="代码分析专家", phase="analysis", system_prompt="你是代码分析专家")
+    prompt = build_agent_prompt(
+        spec=spec,
+        loop_round=1,
+        max_rounds=2,
+        max_history_items=8,
+        context={
+            "service_name": "order-service",
+            "focused_context": {
+                "problem_entrypoint": {"method": "POST", "path": "/api/v1/orders"},
+                "mapped_code_scope": {"code_artifacts": ["order/OrderController.java"]},
+            },
+        },
+        history_cards=[],
+        assigned_command={"task": "分析接口调用链"},
+        dialogue_items=[],
+        inbox_items=[],
+        to_json=_to_json,
+    )
+    assert "Agent 专属分析上下文" in prompt
+    assert "/api/v1/orders" in prompt
+
+
 def test_commander_prompt_forbids_markdown_tables_and_requires_minimal_commands() -> None:
     """验证 commander Prompt 会明确禁止 Markdown 漂移并要求最小可执行命令。"""
 

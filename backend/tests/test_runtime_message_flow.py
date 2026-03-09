@@ -645,6 +645,21 @@ def test_investigation_full_first_round_commander_gets_extra_queue_time_and_lowe
     assert later_round_tokens >= 520
 
 
+def test_fast_mode_first_round_commander_uses_compact_budget():
+    """验证 quick/background 首轮主Agent使用更紧凑的初始预算。"""
+
+    orchestrator = _orchestrator()
+    orchestrator._execution_mode_name = "background"
+    orchestrator._require_verification_plan = False
+    orchestrator.turns = []
+
+    first_round_tokens = orchestrator._agent_max_tokens("ProblemAnalysisAgent")
+    first_round_timeout_plan = orchestrator._agent_timeout_plan("ProblemAnalysisAgent")
+
+    assert first_round_tokens <= 480
+    assert first_round_timeout_plan == [45.0]
+
+
 def test_investigation_full_key_evidence_agents_get_extra_queue_time():
     """验证完整调查模式会提高关键证据 Agent 的排队等待预算。"""
 
@@ -995,3 +1010,89 @@ async def test_call_agent_writes_full_prompt_and_response_to_logger(monkeypatch)
     assert prompt_text in str(prompt_log[1].get("prompt_full") or "")
     assert "你是日志专家" in str(prompt_log[1].get("system_prompt_full") or "")
     assert "连接池耗尽由库存锁等待放大" in str(response_log[1].get("response_full") or "")
+
+
+@pytest.mark.asyncio
+async def test_call_agent_invoke_timeout_is_not_misclassified_as_queue_timeout(monkeypatch):
+    """验证模型推理超时不会被错误记成队列超时。"""
+
+    import time
+
+    def _slow_run_agent_once(orchestrator, spec, prompt, max_tokens):  # noqa: ANN001, ANN202
+        _ = orchestrator, spec, prompt, max_tokens
+        time.sleep(0.05)
+        return AgentInvokeResult(
+            content='{"chat_message":"slow","conclusion":"slow","confidence":0.1}',
+            invoke_mode="direct",
+        )
+
+    monkeypatch.setattr("app.runtime.langgraph.execution.run_agent_once", _slow_run_agent_once)
+
+    class _StubOrchestrator:
+        session_id = "deb_invoke_timeout"
+        STREAM_CHUNK_SIZE = 120
+        STREAM_MAX_CHUNKS = 12
+        JUDGE_FALLBACK_SUMMARY = "需要进一步分析"
+
+        def __init__(self):
+            self.events: List[Dict[str, Any]] = []
+            self._sem = asyncio.Semaphore(1)
+            self._execution_mode_name = "background"
+
+        async def _emit_event(self, event: Dict[str, Any]) -> None:
+            self.events.append(event)
+
+        def _prompt_template_version(self) -> str:
+            return "test"
+
+        def _chat_endpoint(self) -> str:
+            return "/v1/chat/completions"
+
+        def _agent_max_tokens(self, agent_name: str) -> int:
+            _ = agent_name
+            return 128
+
+        def _agent_timeout_plan(self, agent_name: str) -> List[float]:
+            _ = agent_name
+            return [0.01]
+
+        def _remaining_session_budget_seconds(self) -> float:
+            return 60.0
+
+        def _agent_queue_timeout(self, agent_name: str) -> float:
+            _ = agent_name
+            return 0.5
+
+        def _get_llm_semaphore(self) -> asyncio.Semaphore:
+            return self._sem
+
+        def _is_rate_limited_error(self, error_text: str) -> bool:
+            _ = error_text
+            return False
+
+        def _prepare_timeout_retry_input(self, *, spec, prompt: str, max_tokens: int):  # noqa: ANN001
+            _ = spec
+            return prompt, max_tokens, False
+
+        def _history_cards_snapshot(self):
+            return []
+
+        def _infer_reply_target(self, **kwargs):  # noqa: ANN003
+            _ = kwargs
+            return "ProblemAnalysisAgent"
+
+    orchestrator = _StubOrchestrator()
+
+    with pytest.raises(RuntimeError, match="LogAgent 调用失败"):
+        await call_agent(
+            orchestrator,
+            spec=AgentSpec(name="LogAgent", role="日志分析专家", phase="analysis", system_prompt="你是日志专家"),
+            prompt="请分析",
+            round_number=1,
+            loop_round=1,
+            history_cards_context=[],
+        )
+
+    event_types = [str(item.get("type") or "") for item in orchestrator.events]
+    assert "llm_call_timeout" in event_types
+    assert "llm_queue_timeout" not in event_types

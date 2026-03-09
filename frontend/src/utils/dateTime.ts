@@ -49,6 +49,8 @@ const parseInput = (input: DateInput): Date | null => {
   return date;
 };
 
+export const parseDateTime = (input: DateInput): Date | null => parseInput(input);
+
 const formatByParts = (date: Date, formatter: Intl.DateTimeFormat): string => {
   const parts = formatter.formatToParts(date);
   const map: Record<string, string> = {};
@@ -77,4 +79,26 @@ export const formatBeijingTime = (input: DateInput, fallback = '--'): string => 
     }
   });
   return `${map.hour}:${map.minute}:${map.second}`;
+};
+
+export const formatElapsedDuration = (
+  start: DateInput,
+  end?: DateInput,
+  running = false,
+  fallback = '--',
+): string => {
+  const startDate = parseInput(start);
+  if (!startDate) return fallback;
+  const endDate = end === undefined || end === null || end === '' ? new Date() : parseInput(end);
+  const diffMs = Math.max(0, (endDate?.getTime() ?? Date.now()) - startDate.getTime());
+  const totalSeconds = Math.floor(diffMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const formatted = hours > 0
+    ? `${hours}小时${minutes}分${seconds}秒`
+    : minutes > 0
+      ? `${minutes}分${seconds}秒`
+      : `${seconds}秒`;
+  return running ? `进行中 · ${formatted}` : formatted;
 };

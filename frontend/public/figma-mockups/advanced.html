@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Advanced Mock</title><link rel="stylesheet" href="/figma-mockups/mockups.css" /><script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script></head>
+  <body>
+    <div class="shell">
+      <header class="topbar"><div class="topbar-brand"><div class="logo">RC</div><div class="brand-copy"><h1>Advanced Control Center</h1><p>Audit / governance / benchmark / tools</p></div></div><div class="topbar-status"><div class="status-chip">operator mode</div><div>2026-03-08 22:58 CST</div></div></header>
+      <div class="workspace">
+        <aside class="sidebar"><div class="sidebar-section"><div class="sidebar-label">Navigation</div><div class="nav-list"><div class="nav-item">首页总控台</div><div class="nav-item">故障分析</div><div class="nav-item">历史会话</div><div class="nav-item">责任田资产</div><div class="nav-item">设置</div><div class="nav-item active">高级能力</div></div></div><div class="sidebar-section sidebar-card"><h3>页面原则</h3><p>高级页是“模块判定入口”，先让用户知道该去哪一个中心，而不是塞满所有配置。</p></div></aside>
+        <main class="main">
+          <section class="page-header"><div><h2>高级控制中心</h2><p>将审计、治理、评测、工具中心收束为统一入口。重点是“先判定模块，再进入处理”，不是在这里直接做完所有事情。</p></div><div class="header-actions"><button class="btn">查看运行摘要</button><button class="btn primary">进入治理中心</button></div></section>
+          <section class="three-col">
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">调查复盘台</h3><div class="panel-subtitle">当你想知道某个 session 为何得出当前结论。</div></div><span class="badge brand">Replay</span></div><p class="muted">先看关键决策和证据引用，再下钻原始轨迹与工具审计。</p></div>
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">运行治理</h3><div class="panel-subtitle">当你怀疑平台最近不稳定或策略过激。</div></div><span class="badge amber">Control</span></div><p class="muted">优先查看可信度、超时、人工审核和风险动作，再决定是否调整策略。</p></div>
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">质量评估</h3><div class="panel-subtitle">当你准备改模型、prompt 或规则。</div></div><span class="badge teal">Benchmark</span></div><p class="muted">优先看 Top1、timeout、empty conclusion，再决定是否运行 benchmark。</p></div>
+          </section>
+          <section class="split-main">
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">场景指引</h3><div class="panel-subtitle">比单纯卡片更明确，告诉用户“问题来了先去哪”。</div></div></div><div class="kv-list"><div class="kv-item"><h5>“某个 session 为什么这样下结论？”</h5><p>进入调查复盘台。</p></div><div class="kv-item"><h5>“最近 TimeoutError 变多，是模型还是系统问题？”</h5><p>进入治理中心。</p></div><div class="kv-item"><h5>“改了 prompt 后命中率有没有回退？”</h5><p>进入质量评估。</p></div><div class="kv-item"><h5>“工具结果不可信，想确认连接状态”</h5><p>进入工具中心。</p></div></div></div>
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">运行摘要</h3><div class="panel-subtitle">让高级页像指挥入口，而不是信息黑洞。</div></div></div><div class="status-grid"><div class="status-row"><div><div class="status-name">治理状态</div><div class="status-meta">1 个待审批修复动作，timeout rate 0.09</div></div><span class="badge amber">watch</span></div><div class="status-row"><div><div class="status-name">评测状态</div><div class="status-meta">Top1 0.74，较上周持平</div></div><span class="badge teal">healthy</span></div><div class="status-row"><div><div class="status-name">工具状态</div><div class="status-meta">7 connectors healthy / 1 retrying</div></div><span class="badge amber">watch</span></div></div></div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

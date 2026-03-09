@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 
+from app.models.knowledge import KnowledgeEntry, KnowledgeEntryType, RunbookFields
 from app.models.tooling import AgentToolingConfig, DatabaseToolConfig
 from app.services.agent_tool_context_service import AgentToolContextService
 
@@ -66,6 +67,670 @@ def test_extract_keywords_uses_investigation_leads():
     assert "ordercontroller" in keywords
     assert "t_order" in keywords
     assert "inventory-service" in keywords
+
+
+def test_build_code_focused_context_includes_entrypoint_and_hits(tmp_path):
+    """验证 CodeAgent focused context 会包含入口与代码窗口。"""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = repo / "src" / "order"
+    target.mkdir(parents=True)
+    source = target / "OrderController.java"
+    source.write_text(
+        "@PostMapping(\"/api/v1/orders\")\npublic class OrderController {\n  void createOrder() {}\n}\n",
+        encoding="utf-8",
+    )
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="CodeAgent",
+        compact_context={
+            "interface_mapping": {
+                "endpoint": {"method": "POST", "path": "/api/v1/orders", "service": "order-service"},
+                "code_artifacts": ["src/order/OrderController.java"],
+            },
+            "investigation_leads": {
+                "class_names": ["OrderController"],
+                "code_artifacts": ["src/order/OrderController.java"],
+            },
+        },
+        incident_context={"description": "/orders 502"},
+        tool_context={
+            "data": {
+                "repo_path": str(repo),
+                "hits": [
+                    {
+                        "file": "src/order/OrderController.java",
+                        "line": 1,
+                        "keyword": "orders",
+                        "snippet": "@PostMapping(\"/api/v1/orders\")",
+                    }
+                ]
+            }
+        },
+        assigned_command={"task": "分析接口调用链", "focus": "controller -> service"},
+    )
+
+    assert focused["problem_entrypoint"]["path"] == "/api/v1/orders"
+    assert focused["repo_hits"]["match_count"] == 1
+    assert focused["code_windows"][0]["file"] == "src/order/OrderController.java"
+
+
+def test_build_code_focused_context_expands_to_related_call_chain_files(tmp_path):
+    """验证 CodeAgent focused context 会从接口入口继续展开关联调用文件。"""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "src" / "order"
+    src.mkdir(parents=True)
+    (src / "OrderController.java").write_text(
+        (
+            "@RestController\n"
+            "public class OrderController {\n"
+            "  private final OrderService orderService;\n"
+            "  public void create() { orderService.createOrder(); }\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    (src / "OrderService.java").write_text(
+        (
+            "public class OrderService {\n"
+            "  private final OrderRepository orderRepository;\n"
+            "  public void createOrder() { orderRepository.save(); }\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    (src / "OrderRepository.java").write_text(
+        "public class OrderRepository { public void save() {} }\n",
+        encoding="utf-8",
+    )
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="CodeAgent",
+        compact_context={
+            "interface_mapping": {
+                "endpoint": {"method": "POST", "path": "/api/v1/orders", "service": "order-service"},
+                "code_artifacts": ["src/order/OrderController.java"],
+            },
+            "investigation_leads": {
+                "class_names": ["OrderController", "OrderService"],
+                "code_artifacts": ["src/order/OrderController.java"],
+            },
+        },
+        incident_context={"description": "/orders 502"},
+        tool_context={
+            "data": {
+                "repo_path": str(repo),
+                "hits": [
+                    {
+                        "file": "src/order/OrderController.java",
+                        "line": 3,
+                        "keyword": "orders",
+                        "snippet": "private final OrderService orderService;",
+                    }
+                ]
+            }
+        },
+        assigned_command={"task": "分析接口调用链", "focus": "controller -> service -> repository"},
+    )
+
+    files = [item["file"] for item in focused["code_windows"]]
+    assert "src/order/OrderController.java" in files
+    assert "src/order/OrderService.java" in files
+
+
+def test_build_code_focused_context_includes_method_level_call_chain(tmp_path):
+    """验证 CodeAgent focused context 会输出方法级调用链摘要。"""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "src" / "order"
+    src.mkdir(parents=True)
+    (src / "OrderController.java").write_text(
+        (
+            "@PostMapping(\"/api/v1/orders\")\n"
+            "public class OrderController {\n"
+            "  private final OrderService orderService;\n"
+            "  public void createOrder() {\n"
+            "    orderService.createOrder();\n"
+            "  }\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    (src / "OrderService.java").write_text(
+        (
+            "public class OrderService {\n"
+            "  private final OrderRepository orderRepository;\n"
+            "  public void createOrder() {\n"
+            "    orderRepository.saveOrder();\n"
+            "  }\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    (src / "OrderRepository.java").write_text(
+        (
+            "public class OrderRepository {\n"
+            "  public void saveOrder() {}\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="CodeAgent",
+        compact_context={
+            "interface_mapping": {
+                "endpoint": {
+                    "method": "POST",
+                    "path": "/api/v1/orders",
+                    "service": "order-service",
+                    "interface": "OrderController#createOrder",
+                },
+                "code_artifacts": ["src/order/OrderController.java"],
+            },
+            "investigation_leads": {
+                "class_names": ["OrderController", "OrderService", "OrderRepository"],
+                "code_artifacts": ["src/order/OrderController.java"],
+            },
+        },
+        incident_context={"description": "/orders 502"},
+        tool_context={
+            "data": {
+                "repo_path": str(repo),
+                "hits": [
+                    {
+                        "file": "src/order/OrderController.java",
+                        "line": 4,
+                        "keyword": "createorder",
+                        "snippet": "orderService.createOrder();",
+                    }
+                ]
+            }
+        },
+        assigned_command={"task": "分析方法调用链", "focus": "createOrder -> saveOrder"},
+    )
+
+    chain = focused["method_call_chain"]
+    assert len(chain) >= 2
+    assert chain[0]["method"] == "createOrder"
+    assert "OrderController" in chain[0]["symbol"]
+    assert any(item["method"] == "saveOrder" for item in chain)
+
+
+def test_build_database_focused_context_includes_sql_and_tables():
+    """验证 DatabaseAgent focused context 会包含目标表和 SQL 摘要。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="DatabaseAgent",
+        compact_context={
+            "interface_mapping": {"database_tables": ["public.t_order"]},
+        },
+        incident_context={"description": "/orders 502"},
+        tool_context={
+            "data": {
+                "engine": "postgresql",
+                "schema": "public",
+                "tables": ["t_order"],
+                "table_structures": [{"table": "t_order", "columns": [{"name": "id"}]}],
+                "indexes": {"t_order": [{"index": "idx_order_status"}]},
+                "slow_sql": [{"query": "select * from t_order", "mean_exec_time": 30}],
+                "session_status": [{"state": "active", "sessions": 10}],
+            }
+        },
+        assigned_command={"task": "分析锁等待", "database_tables": ["public.t_order"]},
+    )
+
+    assert focused["target_tables"] == ["public.t_order"]
+    assert focused["schema_summary"]["engine"] == "postgresql"
+    assert len(focused["sql_signals"]["slow_sql"]) == 1
+
+
+def test_build_domain_focused_context_includes_causal_summary():
+    """验证 DomainAgent focused context 会输出责任归属与影响边界摘要。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="DomainAgent",
+        compact_context={
+            "interface_mapping": {
+                "matched": True,
+                "confidence": 0.92,
+                "domain": "交易域",
+                "aggregate": "订单聚合",
+                "owner_team": "order-domain-team",
+                "owner": "alice",
+                "feature": "订单创建",
+                "database_tables": ["public.t_order", "public.t_order_item"],
+                "dependency_services": ["inventory-service", "gateway-service"],
+                "monitor_items": ["order.5xx", "db.pool.pending"],
+                "endpoint": {
+                    "method": "POST",
+                    "path": "/api/v1/orders",
+                    "service": "order-service",
+                },
+            }
+        },
+        incident_context={"description": "/orders 502"},
+        tool_context={
+            "data": {
+                "matches": [
+                    {
+                        "feature": "订单创建",
+                        "domain": "交易域",
+                        "aggregate": "订单聚合",
+                        "owner_team": "order-domain-team",
+                    }
+                ]
+            }
+        },
+        assigned_command={"task": "确认责任归属与影响边界", "focus": "下游依赖与数据库表"},
+    )
+
+    summary = focused["causal_summary"]
+    assert summary["dominant_pattern"] in {"owner_confirmed", "mapping_gap"}
+    assert summary["owner_team"] == "order-domain-team"
+    assert "public.t_order" in summary["impact_scope"]["database_tables"]
+    assert len(summary["impact_scope"]["dependency_services"]) >= 1
+    assert len(summary["evidence_points"]) >= 2
+
+
+def test_build_problem_analysis_focused_context_includes_coordination_summary():
+    """验证 ProblemAnalysisAgent focused context 会输出主控调度摘要。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="ProblemAnalysisAgent",
+        compact_context={
+            "incident_summary": {
+                "title": "/api/v1/orders 接口 502 + CPU 飙高",
+                "description": "订单接口 502，数据库连接池 pending 高，CPU 持续飙升",
+                "severity": "high",
+                "service_name": "order-service",
+            },
+            "investigation_leads": {
+                "api_endpoints": ["POST /api/v1/orders"],
+                "service_names": ["order-service"],
+                "database_tables": ["public.t_order", "public.t_order_item"],
+                "error_keywords": ["502", "timeout", "db lock"],
+                "trace_ids": ["trc-001"],
+            },
+        },
+        incident_context={"description": "/orders 502 cpu high db lock"},
+        tool_context={"name": "rule_suggestion_bundle", "status": "ok", "summary": "已汇总规则建议与案例线索。"},
+        assigned_command={"task": "先拆解问题再分发专家调查", "focus": "接口、数据库、日志三线并行"},
+    )
+
+    summary = focused["coordination_summary"]
+    assert summary["dominant_pattern"] in {"multi_signal_incident", "generic_investigation"}
+    assert len(summary["priority_tracks"]) >= 2
+    assert len(summary["dispatch_targets"]) >= 3
+    assert len(summary["evidence_points"]) >= 2
+
+
+def test_build_judge_focused_context_includes_verdict_summary():
+    """验证 JudgeAgent focused context 会输出裁决摘要。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="JudgeAgent",
+        compact_context={
+            "incident_summary": {
+                "title": "/api/v1/orders 接口 502 + CPU 飙高",
+                "description": "订单接口 502，数据库连接池 pending 高，CPU 持续飙升",
+                "severity": "high",
+                "service_name": "order-service",
+            },
+            "investigation_leads": {
+                "api_endpoints": ["POST /api/v1/orders"],
+                "service_names": ["order-service"],
+                "database_tables": ["public.t_order"],
+                "error_keywords": ["502", "timeout", "db lock"],
+            },
+        },
+        incident_context={"description": "/orders 502 cpu high db lock"},
+        tool_context={"name": "rule_suggestion_bundle", "status": "ok", "summary": "专家证据已汇总。"},
+        assigned_command={"task": "裁决当前根因候选", "focus": "收敛证据并给出最终判断"},
+    )
+
+    summary = focused["verdict_summary"]
+    assert summary["dominant_pattern"] in {"ready_for_verdict", "needs_more_evidence"}
+    assert len(summary["decision_axes"]) >= 2
+    assert len(summary["evidence_points"]) >= 2
+
+
+def test_build_verification_focused_context_includes_verification_summary():
+    """验证 VerificationAgent focused context 会输出验证摘要。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="VerificationAgent",
+        compact_context={
+            "incident_summary": {
+                "title": "/api/v1/orders 接口 502 + CPU 飙高",
+                "description": "订单接口 502，数据库连接池 pending 高，CPU 持续飙升",
+                "severity": "high",
+                "service_name": "order-service",
+            },
+            "investigation_leads": {
+                "api_endpoints": ["POST /api/v1/orders"],
+                "service_names": ["order-service"],
+                "database_tables": ["public.t_order"],
+                "error_keywords": ["502", "timeout"],
+            },
+        },
+        incident_context={"description": "/orders 502 cpu high"},
+        tool_context={"name": "metrics_bundle", "status": "ok", "summary": "指标与日志验证入口已具备。"},
+        assigned_command={"task": "验证修复是否生效", "focus": "错误率、延迟、连接池三项回落"},
+    )
+
+    summary = focused["verification_summary"]
+    assert summary["dominant_pattern"] in {"verification_ready", "verification_generic"}
+    assert len(summary["checkpoints"]) >= 2
+    assert len(summary["evidence_points"]) >= 2
+
+
+def test_build_critic_focused_context_includes_critique_summary():
+    """验证 CriticAgent focused context 会输出质疑摘要。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="CriticAgent",
+        compact_context={
+            "incident_summary": {"service_name": "order-service", "title": "/orders 502"},
+            "investigation_leads": {
+                "api_endpoints": ["POST /api/v1/orders"],
+                "database_tables": ["public.t_order"],
+                "error_keywords": ["502", "timeout"],
+            },
+        },
+        incident_context={"description": "/orders 502"},
+        tool_context={"name": "metrics_bundle", "status": "ok", "summary": "当前证据集中在日志和数据库。"},
+        assigned_command={"task": "质疑现有结论", "focus": "指出证据缺口和替代解释"},
+    )
+
+    summary = focused["critique_summary"]
+    assert summary["dominant_pattern"] in {"evidence_challenge", "generic_challenge"}
+    assert len(summary["challenge_axes"]) >= 2
+    assert len(summary["evidence_points"]) >= 2
+
+
+def test_build_rebuttal_focused_context_includes_rebuttal_summary():
+    """验证 RebuttalAgent focused context 会输出反驳摘要。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="RebuttalAgent",
+        compact_context={
+            "incident_summary": {"service_name": "order-service", "title": "/orders 502"},
+            "investigation_leads": {
+                "api_endpoints": ["POST /api/v1/orders"],
+                "database_tables": ["public.t_order"],
+                "error_keywords": ["502", "timeout", "lock"],
+            },
+        },
+        incident_context={"description": "/orders 502 db lock"},
+        tool_context={"name": "log_bundle", "status": "ok", "summary": "日志时间线已补齐。"},
+        assigned_command={"task": "反驳质疑并补强结论", "focus": "补充闭环证据"},
+    )
+
+    summary = focused["rebuttal_summary"]
+    assert summary["dominant_pattern"] in {"evidence_reinforcement", "generic_rebuttal"}
+    assert len(summary["reinforcement_axes"]) >= 2
+    assert len(summary["evidence_points"]) >= 2
+
+
+def test_build_rule_suggestion_focused_context_includes_rule_summary():
+    """验证 RuleSuggestionAgent focused context 会输出规则建议摘要。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="RuleSuggestionAgent",
+        compact_context={
+            "incident_summary": {"service_name": "order-service", "title": "/orders 502"},
+            "investigation_leads": {
+                "api_endpoints": ["POST /api/v1/orders"],
+                "database_tables": ["public.t_order"],
+                "error_keywords": ["502", "timeout", "pool"],
+            },
+        },
+        incident_context={"description": "/orders 502 pool high"},
+        tool_context={"name": "rule_suggestion_bundle", "status": "ok", "summary": "已命中案例与规则建议。"},
+        assigned_command={"task": "给出规则化建议", "focus": "止血、告警与守护策略"},
+    )
+
+    summary = focused["rule_summary"]
+    assert summary["dominant_pattern"] in {"rule_ready", "generic_rule"}
+    assert len(summary["recommendation_axes"]) >= 2
+    assert len(summary["evidence_points"]) >= 2
+
+
+def test_build_database_focused_context_includes_causal_summary():
+    """验证 DatabaseAgent focused context 会输出表-SQL-session 的因果摘要。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="DatabaseAgent",
+        compact_context={
+            "interface_mapping": {"database_tables": ["public.t_order", "public.t_order_item"]},
+        },
+        incident_context={"description": "/orders 502 with db lock"},
+        tool_context={
+            "data": {
+                "engine": "postgresql",
+                "schema": "public",
+                "tables": ["t_order", "t_order_item"],
+                "slow_sql": [
+                    {
+                        "query": "UPDATE t_inventory SET available=available-1 WHERE sku_id='SPU-7712'",
+                        "mean_exec_time": 30000,
+                    }
+                ],
+                "top_sql": [
+                    {
+                        "query": "SELECT * FROM t_order WHERE id=$1",
+                        "calls": 880,
+                    }
+                ],
+                "session_status": [
+                    {
+                        "state": "active",
+                        "wait_event_type": "Lock",
+                        "wait_event": "transactionid",
+                        "sessions": 14,
+                    }
+                ],
+                "keyword_hits": [
+                    {
+                        "query": "UPDATE t_inventory SET available=available-1 WHERE sku_id='SPU-7712'",
+                        "mean_exec_time": 30000,
+                    }
+                ],
+            }
+        },
+        assigned_command={"task": "分析锁等待与连接耗尽", "database_tables": ["public.t_order", "public.t_order_item"]},
+    )
+
+    summary = focused["causal_summary"]
+    assert summary["dominant_pattern"] in {"lock_contention", "db_pressure"}
+    assert "public.t_order" in summary["target_tables"]
+    assert len(summary["likely_causes"]) >= 1
+    assert len(summary["evidence_points"]) >= 2
+
+
+def test_build_log_focused_context_includes_causal_timeline():
+    """验证 LogAgent focused context 会输出首错到用户故障的时间线归因链。"""
+
+    service = AgentToolContextService()
+    excerpt = "\n".join(
+        [
+            "2026-02-20T14:01:07.911+08:00 INFO gateway TraceIdFilter traceId=trc-1 uri=POST /api/v1/orders",
+            "2026-02-20T14:01:38.089+08:00 ERROR order-service OrderAppService createOrder failed, error=CannotCreateTransactionException, costMs=30058",
+            "2026-02-20T14:01:38.095+08:00 ERROR order-service HikariPool-1 - Connection is not available, request timed out after 30000ms.",
+            "2026-02-20T14:01:38.124+08:00 ERROR gateway ErrorLogFilter upstream timeout, status=502, upstream=order-service:8080, costMs=30211",
+        ]
+    )
+
+    focused = service.build_focused_context(
+        agent_name="LogAgent",
+        compact_context={
+            "log_excerpt": excerpt,
+            "investigation_leads": {
+                "service_names": ["order-service"],
+                "trace_ids": ["trc-1"],
+            },
+        },
+        incident_context={"description": "/orders 502"},
+        tool_context={"data": {"excerpt": excerpt, "keywords": ["orders", "timeout"]}},
+        assigned_command={"task": "重建时间线", "focus": "首错与放大链路"},
+    )
+
+    timeline = focused["causal_timeline"]
+    assert len(timeline) >= 3
+    assert timeline[0]["stage"] == "request_entry"
+    assert any(item["stage"] == "first_error" for item in timeline)
+    assert any(item["stage"] == "resource_exhaustion" for item in timeline)
+    assert timeline[-1]["stage"] == "user_visible_failure"
+
+
+def test_build_metrics_focused_context_includes_causal_metric_chain():
+    """验证 MetricsAgent focused context 会输出指标时序因果链。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="MetricsAgent",
+        compact_context={
+            "incident_summary": {"service_name": "order-service"},
+        },
+        incident_context={"description": "/orders 502 cpu 380% db_conn 100/100"},
+        tool_context={
+            "data": {
+                "signals": [
+                    {"metric": "cpu", "label": "CPU", "value": "380%", "snippet": "order-service CPU: 320%~380%"},
+                    {"metric": "threads", "label": "线程", "value": "920", "snippet": "JVM 活跃线程: 920"},
+                    {"metric": "db_conn", "label": "DB连接", "value": "100/100", "snippet": "DB 活跃连接: 100/100（打满）"},
+                    {"metric": "error_rate", "label": "错误率", "value": "37%", "snippet": "网关 /api/v1/orders 5xx: 37%"},
+                ],
+                "remote_telemetry": {"enabled": True, "status": "ok", "payload": {"window": "5m"}},
+                "remote_prometheus": {"enabled": True, "status": "ok", "payload": {"queries": 3}},
+            }
+        },
+        assigned_command={"task": "分析指标异常链路", "focus": "前置指标与用户故障指标"},
+    )
+
+    chain = focused["causal_metric_chain"]
+    assert len(chain) >= 3
+    assert any(item["stage"] == "resource_pressure" for item in chain)
+    assert any(item["stage"] == "capacity_saturation" for item in chain)
+    assert chain[-1]["stage"] == "user_visible_failure"
+
+
+def test_build_change_focused_context_includes_causal_summary():
+    """验证 ChangeAgent focused context 会输出变更因果摘要。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="ChangeAgent",
+        compact_context={
+            "interface_mapping": {
+                "endpoint": {
+                    "method": "POST",
+                    "path": "/api/v1/orders",
+                    "service": "order-service",
+                },
+                "code_artifacts": ["src/order/OrderController.java", "src/order/OrderService.java"],
+            },
+            "investigation_leads": {
+                "api_endpoints": ["POST /api/v1/orders"],
+                "service_names": ["order-service"],
+                "code_artifacts": ["src/order/OrderController.java", "src/order/OrderService.java"],
+            },
+        },
+        incident_context={"description": "/orders 502 after release"},
+        tool_context={
+            "data": {
+                "changes": [
+                    {
+                        "commit": "a1b2c3d4e5f6",
+                        "time": "2026-03-09 10:15:00 +0800",
+                        "author": "alice",
+                        "subject": "order-service: adjust OrderController route and add retry around createOrder",
+                    },
+                    {
+                        "commit": "b2c3d4e5f6a7",
+                        "time": "2026-03-09 10:22:00 +0800",
+                        "author": "bob",
+                        "subject": "inventory client timeout threshold updated for order flow",
+                    },
+                ]
+            }
+        },
+        assigned_command={"task": "分析近期变更风险", "focus": "接口路由与重试逻辑"},
+    )
+
+    summary = focused["causal_summary"]
+    assert summary["dominant_pattern"] in {"recent_release_regression", "change_window_noise"}
+    assert any(item.get("commit") == "a1b2c3d4e5f6" for item in summary["suspect_changes"])
+    assert len(summary["mechanism_links"]) >= 1
+    assert len(summary["evidence_points"]) >= 2
+
+
+def test_build_runbook_focused_context_includes_action_summary():
+    """验证 RunbookAgent focused context 会输出处置与验证摘要。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="RunbookAgent",
+        compact_context={
+            "incident_summary": {"service_name": "order-service"},
+            "investigation_leads": {
+                "api_endpoints": ["POST /api/v1/orders"],
+                "service_names": ["order-service"],
+            },
+        },
+        incident_context={"description": "/orders 502 with db lock"},
+        tool_context={
+            "data": {
+                "source": "knowledge_base",
+                "items": [
+                    {
+                        "title": "订单服务 502 连接池耗尽处置手册",
+                        "entry_type": "runbook",
+                        "runbook_fields": {
+                            "steps": [
+                                "检查 Hikari pending threads 与 active 连接数",
+                                "查看 pg_stat_activity 中锁等待会话",
+                                "必要时限制重试流量并扩容连接池",
+                            ],
+                            "verification_steps": [
+                                "确认 /api/v1/orders 5xx 回落",
+                                "确认数据库连接池 pending 降到 0",
+                            ],
+                        },
+                    },
+                    {
+                        "title": "订单创建锁等待复盘案例",
+                        "entry_type": "case",
+                        "summary": "库存扣减 SQL 锁等待导致事务堆积，最终引发连接池耗尽。",
+                    },
+                ],
+            }
+        },
+        assigned_command={"task": "给出处置建议", "focus": "止血动作与验证步骤"},
+    )
+
+    summary = focused["action_summary"]
+    assert summary["dominant_pattern"] in {"matched_runbook", "knowledge_gap"}
+    assert len(summary["recommended_steps"]) >= 2
+    assert len(summary["verification_steps"]) >= 1
+    assert len(summary["evidence_points"]) >= 1
 
 
 def test_collect_metrics_signals_preserves_db_connection_ratio():
@@ -224,5 +889,104 @@ async def test_database_agent_context_reads_postgres_snapshot(monkeypatch):
     assert len(payload["data"]["session_status"]) == 1
     assert any(
         str(item.get("action") or "") == "postgres_query" and str(item.get("status") or "") == "ok"
+        for item in list(payload.get("audit_log") or [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_runbook_agent_context_prefers_knowledge_base(monkeypatch):
+    """验证 RunbookAgent 优先命中新知识库。"""
+
+    async def _fake_search_reference_entries(*, query, limit=5, entry_types=None):  # noqa: ANN001
+        return [
+            {
+                "id": "kb_runbook_1",
+                "entry_type": "runbook",
+                "title": "订单 5xx 排查 SOP",
+                "summary": "优先检查网关、下游和数据库。",
+                "content": "SOP 正文",
+                "tags": ["orders", "5xx"],
+                "service_names": ["order-service"],
+                "domain": "order",
+                "aggregate": "OrderAggregate",
+                "updated_at": "2026-03-09T08:00:00Z",
+                "runbook_fields": {
+                    "steps": ["检查网关日志", "检查 DB 连接池"],
+                    "verification_steps": ["确认 5xx 回落"],
+                },
+            }
+        ]
+
+    async def _fake_execute(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("knowledge base hit should skip legacy case library fallback")
+
+    monkeypatch.setattr(
+        "app.services.agent_tool_context_service.knowledge_service.search_reference_entries",
+        _fake_search_reference_entries,
+    )
+
+    service = AgentToolContextService()
+    monkeypatch.setattr(service._case_library, "execute", _fake_execute)  # noqa: SLF001
+
+    payload = await service.build_context(
+        agent_name="RunbookAgent",
+        compact_context={"log_excerpt": "orders 502 hikari pending"},
+        incident_context={"description": "/orders 502"},
+        assigned_command={
+            "task": "检索相似案例和 SOP",
+            "focus": "runbook",
+            "use_tool": True,
+        },
+    )
+
+    assert payload["used"] is True
+    assert payload["status"] == "ok"
+    assert len(list(payload["data"].get("items") or [])) == 1
+    assert payload["data"]["source"] == "knowledge_base"
+    assert any(
+        str(item.get("action") or "") == "knowledge_search" and str(item.get("status") or "") == "ok"
+        for item in list(payload.get("audit_log") or [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_runbook_agent_context_falls_back_to_legacy_case_library(monkeypatch):
+    """验证新知识库未命中时回退旧案例库。"""
+
+    async def _fake_search_reference_entries(*, query, limit=5, entry_types=None):  # noqa: ANN001
+        return []
+
+    class _LegacyResult:
+        success = True
+        error = None
+        data = {"items": [{"id": "case_1", "title": "旧案例", "solution": "回退方案"}]}
+
+    async def _fake_execute(*args, **kwargs):  # noqa: ANN002, ANN003
+        return _LegacyResult()
+
+    monkeypatch.setattr(
+        "app.services.agent_tool_context_service.knowledge_service.search_reference_entries",
+        _fake_search_reference_entries,
+    )
+
+    service = AgentToolContextService()
+    monkeypatch.setattr(service._case_library, "execute", _fake_execute)  # noqa: SLF001
+
+    payload = await service.build_context(
+        agent_name="RunbookAgent",
+        compact_context={"log_excerpt": "inventory timeout"},
+        incident_context={"description": "/orders 502"},
+        assigned_command={
+            "task": "检索相似案例和 SOP",
+            "focus": "runbook",
+            "use_tool": True,
+        },
+    )
+
+    assert payload["used"] is True
+    assert payload["status"] == "ok"
+    assert payload["data"]["source"] == "legacy_case_library"
+    assert any(
+        str(item.get("action") or "") == "knowledge_search" and str(item.get("status") or "") == "unavailable"
         for item in list(payload.get("audit_log") or [])
     )

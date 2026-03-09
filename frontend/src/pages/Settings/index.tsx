@@ -241,11 +241,11 @@ const SettingsPage: React.FC = () => {
                 系统设置
               </Title>
               <Paragraph style={{ marginBottom: 8 }}>
-                当前前后端统一使用火山引擎 OpenAI 兼容接口，模型为 <Text code>kimi-k2.5</Text>。
+                当前前后端统一使用 DashScope Coding OpenAI 兼容接口，模型为 <Text code>kimi-k2.5</Text>。
               </Paragraph>
               <Text>LLM Runtime：LangGraph Multi-Agent</Text>
               <br />
-              <Text>LLM Base URL：https://ark.cn-beijing.volces.com/api/coding</Text>
+              <Text>LLM Base URL：https://coding.dashscope.aliyuncs.com/v1</Text>
             </Panel>
             <Panel key="auth" header={renderPanelHeader('登录凭证', token ? '已保存 Token' : '未登录')}>
               <Form layout="inline" onFinish={login}>

@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Button,
   Card,
@@ -145,11 +145,6 @@ const IncidentPage: React.FC = () => {
   const [selectedQualityFocus, setSelectedQualityFocus] = useState<QualityFocus>(null);
   const [selectedNetworkStep, setSelectedNetworkStep] = useState<AgentNetworkStep | null>(null);
   const [activeProcessTab, setActiveProcessTab] = useState('dialogue');
-  const [navLayout, setNavLayout] = useState<{ left: number; width: number; height: number }>({
-    left: 0,
-    width: 0,
-    height: 0,
-  });
   const [running, setRunning] = useState(false);
   const [debateMaxRounds, setDebateMaxRounds] = useState<number>(1);
   const [executionMode, setExecutionMode] = useState<'standard' | 'quick' | 'background' | 'async'>('standard');
@@ -157,7 +152,6 @@ const IncidentPage: React.FC = () => {
   const [bootstrapping, setBootstrapping] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const navShellRef = useRef<HTMLDivElement | null>(null);
-  const navRef = useRef<HTMLDivElement | null>(null);
   const pollingRef = useRef(false);
   const runningRef = useRef(false);
   const assetMappingReadyRef = useRef(false);
@@ -442,6 +436,148 @@ const IncidentPage: React.FC = () => {
         }\n${requestSummary ? `request=${requestSummary}\n` : ''}${responseSummary ? `response=${responseSummary}\n` : ''}${detail}`;
       })
       .join('\n');
+  };
+
+  const formatFocusedContextPreview = (
+    agentName: string,
+    preview: Record<string, unknown>,
+    detail: Record<string, unknown>,
+  ): string => {
+    const source = Object.keys(detail).length > 0 ? detail : preview;
+    if (!source || Object.keys(source).length === 0) return '';
+    const pickList = (value: unknown, limit = 6) =>
+      Array.isArray(value) ? value.map((item) => String(item || '').trim()).filter(Boolean).slice(0, limit) : [];
+    if (agentName === 'CodeAgent') {
+      const entry = asRecord(source.problem_entrypoint);
+      const scope = asRecord(source.mapped_code_scope);
+      const methodChain = Array.isArray(source.method_call_chain) ? source.method_call_chain.map((item) => asRecord(item)) : [];
+      const windows = Array.isArray(source.code_windows) ? source.code_windows.map((item) => asRecord(item)) : [];
+      return [
+        `问题入口：${String(entry.method || '-') || '-'} ${String(entry.path || '-')}`.trim(),
+        `服务：${String(entry.service || '-')}`,
+        pickList(scope.code_artifacts, 5).length ? `责任田代码：${pickList(scope.code_artifacts, 5).join('；')}` : '',
+        methodChain.length
+          ? `方法链：${methodChain.map((item) => `${String(item.symbol || '-')}.${String(item.method || '-')}`).slice(0, 4).join(' -> ')}`
+          : '',
+        windows.length ? `代码窗口：${windows.map((item) => String(item.file || '-')).slice(0, 4).join('；')}` : '',
+      ].filter(Boolean).join('\n');
+    }
+    if (agentName === 'ProblemAnalysisAgent') {
+      const summary = asRecord(source.coordination_summary);
+      return [
+        `主模式：${String(summary.dominant_pattern || '-')}`,
+        pickList(summary.priority_tracks, 4).length ? `优先调查线：${pickList(summary.priority_tracks, 4).join('；')}` : '',
+        pickList(summary.dispatch_targets, 5).length ? `建议分发：${pickList(summary.dispatch_targets, 5).join(' -> ')}` : '',
+        pickList(summary.evidence_points, 4).length ? `初始依据：${pickList(summary.evidence_points, 4).join('；')}` : '',
+      ].filter(Boolean).join('\n');
+    }
+    if (agentName === 'JudgeAgent') {
+      const summary = asRecord(source.verdict_summary);
+      return [
+        `主模式：${String(summary.dominant_pattern || '-')}`,
+        pickList(summary.decision_axes, 4).length ? `裁决维度：${pickList(summary.decision_axes, 4).join('；')}` : '',
+        pickList(summary.evidence_points, 4).length ? `裁决依据：${pickList(summary.evidence_points, 4).join('；')}` : '',
+      ].filter(Boolean).join('\n');
+    }
+    if (agentName === 'VerificationAgent') {
+      const summary = asRecord(source.verification_summary);
+      return [
+        `主模式：${String(summary.dominant_pattern || '-')}`,
+        pickList(summary.checkpoints, 4).length ? `验证检查点：${pickList(summary.checkpoints, 4).join('；')}` : '',
+        pickList(summary.evidence_points, 4).length ? `验证依据：${pickList(summary.evidence_points, 4).join('；')}` : '',
+      ].filter(Boolean).join('\n');
+    }
+    if (agentName === 'CriticAgent') {
+      const summary = asRecord(source.critique_summary);
+      return [
+        `主模式：${String(summary.dominant_pattern || '-')}`,
+        pickList(summary.challenge_axes, 4).length ? `质疑维度：${pickList(summary.challenge_axes, 4).join('；')}` : '',
+        pickList(summary.evidence_points, 4).length ? `质疑依据：${pickList(summary.evidence_points, 4).join('；')}` : '',
+      ].filter(Boolean).join('\n');
+    }
+    if (agentName === 'RebuttalAgent') {
+      const summary = asRecord(source.rebuttal_summary);
+      return [
+        `主模式：${String(summary.dominant_pattern || '-')}`,
+        pickList(summary.reinforcement_axes, 4).length ? `补强维度：${pickList(summary.reinforcement_axes, 4).join('；')}` : '',
+        pickList(summary.evidence_points, 4).length ? `补强依据：${pickList(summary.evidence_points, 4).join('；')}` : '',
+      ].filter(Boolean).join('\n');
+    }
+    if (agentName === 'RuleSuggestionAgent') {
+      const summary = asRecord(source.rule_summary);
+      return [
+        `主模式：${String(summary.dominant_pattern || '-')}`,
+        pickList(summary.recommendation_axes, 4).length ? `规则建议：${pickList(summary.recommendation_axes, 4).join('；')}` : '',
+        pickList(summary.evidence_points, 4).length ? `建议依据：${pickList(summary.evidence_points, 4).join('；')}` : '',
+      ].filter(Boolean).join('\n');
+    }
+    if (agentName === 'LogAgent') {
+      const causal = Array.isArray(source.causal_timeline) ? source.causal_timeline.map((item) => asRecord(item)) : [];
+      return causal
+        .slice(0, 5)
+        .map((item) => `${String(item.stage || '-')}: ${String(item.message || '-')}`)
+        .join('\n');
+    }
+    if (agentName === 'DatabaseAgent') {
+      const causal = asRecord(source.causal_summary);
+      return [
+        `主模式：${String(causal.dominant_pattern || '-')}`,
+        pickList(causal.target_tables, 6).length ? `目标表：${pickList(causal.target_tables, 6).join('；')}` : '',
+        pickList(causal.likely_causes, 4).length ? `可能原因：${pickList(causal.likely_causes, 4).join('；')}` : '',
+        pickList(causal.evidence_points, 4).length ? `关键证据：${pickList(causal.evidence_points, 4).join('；')}` : '',
+      ].filter(Boolean).join('\n');
+    }
+    if (agentName === 'MetricsAgent') {
+      const chain = Array.isArray(source.causal_metric_chain) ? source.causal_metric_chain.map((item) => asRecord(item)) : [];
+      return chain
+        .slice(0, 5)
+        .map((item) => `${String(item.stage || '-')}: ${String(item.label || item.metric || '-')}=${String(item.value || '-')}`)
+        .join('\n');
+    }
+    if (agentName === 'DomainAgent') {
+      const causal = asRecord(source.causal_summary);
+      const scope = asRecord(causal.impact_scope);
+      return [
+        `主模式：${String(causal.dominant_pattern || '-')}`,
+        `责任田：${String(causal.domain || '-')}/${String(causal.aggregate || '-')}`,
+        `责任团队：${String(causal.owner_team || '-')}/${String(causal.owner || '-')}`,
+        pickList(scope.database_tables, 6).length ? `关联表：${pickList(scope.database_tables, 6).join('；')}` : '',
+        pickList(scope.dependency_services, 6).length ? `依赖：${pickList(scope.dependency_services, 6).join('；')}` : '',
+        pickList(causal.evidence_points, 3).length ? `依据：${pickList(causal.evidence_points, 3).join('；')}` : '',
+      ].filter(Boolean).join('\n');
+    }
+    if (agentName === 'RunbookAgent') {
+      const summary = asRecord(source.action_summary);
+      return [
+        `主模式：${String(summary.dominant_pattern || '-')}`,
+        pickList(summary.recommended_steps, 4).length ? `推荐动作：${pickList(summary.recommended_steps, 4).join('；')}` : '',
+        pickList(summary.verification_steps, 3).length ? `验证动作：${pickList(summary.verification_steps, 3).join('；')}` : '',
+        pickList(summary.evidence_points, 3).length ? `依据：${pickList(summary.evidence_points, 3).join('；')}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    }
+    if (agentName === 'ChangeAgent') {
+      const causal = asRecord(source.causal_summary);
+      const suspects = Array.isArray(causal.suspect_changes) ? causal.suspect_changes.map((item) => asRecord(item)) : [];
+      return [
+        `主模式：${String(causal.dominant_pattern || '-')}`,
+        suspects.length
+          ? `可疑变更：${suspects
+              .slice(0, 3)
+              .map((item) => `${String(item.commit || '-')}: ${String(item.subject || '-')}`)
+              .join('；')}`
+          : '',
+        pickList(causal.mechanism_links, 4).length ? `机制关联：${pickList(causal.mechanism_links, 4).join('；')}` : '',
+        pickList(causal.evidence_points, 4).length ? `关键证据：${pickList(causal.evidence_points, 4).join('；')}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    }
+    const lines = Object.entries(source)
+      .slice(0, 5)
+      .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : toDisplayText(value)}`);
+    return lines.join('\n');
   };
 
   const extractSessionError = (detail: DebateDetail | null): string => {
@@ -929,6 +1065,8 @@ const IncidentPage: React.FC = () => {
       const toolSummary = firstTextValue(data, ['summary']) || '无摘要';
       const dataPreview = asRecord(data.data_preview);
       const dataDetail = asRecord(data.data_detail);
+      const focusedPreview = asRecord(data.focused_preview);
+      const focusedDetail = asRecord(data.focused_detail);
       const commandGate = asRecord(data.command_gate);
       const auditLog = Array.isArray(data.audit_log) ? data.audit_log : [];
       const toolLabelMap: Record<string, string> = {
@@ -956,6 +1094,7 @@ const IncidentPage: React.FC = () => {
         Object.keys(dataDetail).length > 0 ? dataDetail : dataPreview,
         false,
       );
+      const focusedText = formatFocusedContextPreview(agentName, focusedPreview, focusedDetail);
       const commandGateReason = firstTextValue(commandGate, ['reason']) || '-';
       const commandGateSource = firstTextValue(commandGate, ['decision_source']) || '-';
       const commandGateAllow = typeof commandGate.allow_tool === 'boolean' ? (commandGate.allow_tool ? '是' : '否') : '-';
@@ -984,6 +1123,7 @@ const IncidentPage: React.FC = () => {
           .filter(Boolean)
           .join('\n\n'),
         auditText,
+        focusedText,
       };
       detail = normalizeMarkdownText(
         [
@@ -995,6 +1135,7 @@ const IncidentPage: React.FC = () => {
           `命令门禁：允许调用=${commandGateAllow}，原因=${commandGateReason}，来源=${commandGateSource}`,
           `工具反馈：${toolSummary}`,
           `获取数据摘要：\n${dataSummaryText}`,
+          focusedText ? `聚焦分析上下文：\n${focusedText}` : '',
           `工具返回详情：\n${dataDetailText}`,
           `调用审计记录：\n${auditText}`,
         ]
@@ -2860,6 +3001,11 @@ const IncidentPage: React.FC = () => {
     setActiveProcessTab('dialogue');
     resetDialogueFilters();
     setEventFilterType('agent_command_feedback');
+    window.requestAnimationFrame(() => {
+      if (window.scrollY > 220) {
+        scrollToWorkspaceTop();
+      }
+    });
   };
 
   const switchToStep = async (nextStep: number) => {
@@ -2879,7 +3025,20 @@ const IncidentPage: React.FC = () => {
         setLoading(false);
       }
     }
+    window.requestAnimationFrame(() => {
+      if (window.scrollY > 220) {
+        scrollToWorkspaceTop();
+      }
+    });
   };
+
+  const scrollToWorkspaceTop = useCallback((smooth: boolean = true) => {
+    const shell = navShellRef.current;
+    if (!shell) return;
+    const stickyOffset = 84;
+    const top = Math.max(0, window.scrollY + shell.getBoundingClientRect().top - stickyOffset);
+    window.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
+  }, []);
 
   useEffect(() => {
     if (activeStep !== 2 && selectedNetworkStep) {
@@ -3222,56 +3381,10 @@ const IncidentPage: React.FC = () => {
     return Upload.LIST_IGNORE;
   };
 
-  useLayoutEffect(() => {
-    const updateNavLayout = () => {
-      const shell = navShellRef.current;
-      const nav = navRef.current;
-      if (!shell || !nav) return;
-      const rect = shell.getBoundingClientRect();
-      const next = {
-        left: rect.left,
-        width: rect.width,
-        height: nav.offsetHeight,
-      };
-      setNavLayout((prev) =>
-        prev.left === next.left && prev.width === next.width && prev.height === next.height ? prev : next,
-      );
-    };
-
-    updateNavLayout();
-    const resizeObserver = typeof ResizeObserver !== 'undefined'
-      ? new ResizeObserver(() => updateNavLayout())
-      : null;
-    if (resizeObserver) {
-      if (navShellRef.current) resizeObserver.observe(navShellRef.current);
-      if (navRef.current) resizeObserver.observe(navRef.current);
-    }
-    window.addEventListener('resize', updateNavLayout);
-    return () => {
-      resizeObserver?.disconnect();
-      window.removeEventListener('resize', updateNavLayout);
-    };
-  }, []);
-
   return (
     <div className="incident-page">
-      <div
-        ref={navShellRef}
-        className="incident-section-nav-shell"
-        style={{ height: navLayout.height ? navLayout.height + 18 : undefined }}
-      >
-        <div
-          ref={navRef}
-          className="incident-section-nav"
-          style={
-            navLayout.width > 0
-              ? {
-                  left: navLayout.left,
-                  width: navLayout.width,
-                }
-              : undefined
-          }
-        >
+      <div ref={navShellRef} className="incident-section-nav-shell">
+        <div className="incident-section-nav">
           <Tabs
             className="incident-workspace-tabs"
             activeKey={workspaceActiveKey}
@@ -3349,6 +3462,11 @@ const IncidentPage: React.FC = () => {
                 setActiveStep(2);
                 setActiveProcessTab('network');
                 setSelectedNetworkStep(null);
+                window.requestAnimationFrame(() => {
+                  if (window.scrollY > 220) {
+                    scrollToWorkspaceTop();
+                  }
+                });
               }
             }}
           />
@@ -3395,6 +3513,8 @@ const IncidentPage: React.FC = () => {
             reportLoading={reportLoading}
             incidentId={incidentId}
             sessionId={sessionId}
+            incidentTitle={incidentForm.title}
+            serviceName={incidentForm.service_name}
             debateConfidence={debateResult?.confidence}
             sessionQualitySummary={sessionQualitySummary}
             onFocusLimitedAnalysis={() => focusSessionQuality('limited')}

@@ -45,6 +45,7 @@ from app.runtime.connectors import (
 )
 from app.services.tooling_service import tooling_service
 from app.services.agent_skill_service import agent_skill_service
+from app.services.knowledge_service import knowledge_service
 from app.tools.case_library import CaseLibraryTool
 
 logger = structlog.get_logger()
@@ -274,6 +275,34 @@ class AgentToolContextService:
                 result.execution_path = "none"
         return result.to_dict()
 
+    def build_focused_context(
+        self,
+        *,
+        agent_name: str,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        tool_context: Optional[Dict[str, Any]] = None,
+        assigned_command: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """为指定 Agent 生成更贴近问题闭包的专属上下文。"""
+        if agent_name == "CodeAgent":
+            return self._build_code_focused_context(compact_context, incident_context, tool_context, assigned_command)
+        if agent_name == "LogAgent":
+            return self._build_log_focused_context(compact_context, incident_context, tool_context, assigned_command)
+        if agent_name == "DomainAgent":
+            return self._build_domain_focused_context(compact_context, incident_context, tool_context, assigned_command)
+        if agent_name == "DatabaseAgent":
+            return self._build_database_focused_context(compact_context, incident_context, tool_context, assigned_command)
+        if agent_name == "MetricsAgent":
+            return self._build_metrics_focused_context(compact_context, incident_context, tool_context, assigned_command)
+        if agent_name == "ChangeAgent":
+            return self._build_change_focused_context(compact_context, incident_context, tool_context, assigned_command)
+        if agent_name == "RunbookAgent":
+            return self._build_runbook_focused_context(compact_context, incident_context, tool_context, assigned_command)
+        if agent_name in {"ProblemAnalysisAgent", "CriticAgent", "RebuttalAgent", "JudgeAgent", "VerificationAgent", "RuleSuggestionAgent"}:
+            return self._build_cross_agent_focused_context(compact_context, incident_context, tool_context, assigned_command)
+        return {}
+
     def _merge_skill_context(
         self,
         *,
@@ -369,6 +398,559 @@ class AgentToolContextService:
         if not result.execution_path:
             result.execution_path = "local"
         return result
+
+    def _build_cross_agent_focused_context(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        tool_context: Optional[Dict[str, Any]],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        leads = self._extract_investigation_leads(compact_context, incident_context, assigned_command)
+        payload = {
+            "problem_frame": {
+                "title": str(((compact_context.get("incident_summary") or {}).get("title") or incident_context.get("title") or ""))[:200],
+                "description": str(((compact_context.get("incident_summary") or {}).get("description") or incident_context.get("description") or ""))[:600],
+                "service_name": self._primary_service_name(compact_context, incident_context, assigned_command),
+                "severity": str(((compact_context.get("incident_summary") or {}).get("severity") or incident_context.get("severity") or ""))[:40],
+            },
+            "investigation_focus": {
+                "api_endpoints": list(leads.get("api_endpoints") or [])[:8],
+                "service_names": list(leads.get("service_names") or [])[:8],
+                "database_tables": self._extract_database_tables(compact_context, incident_context, assigned_command)[:12],
+                "error_keywords": list(leads.get("error_keywords") or [])[:10],
+                "trace_ids": list(leads.get("trace_ids") or [])[:6],
+            },
+            "tool_summary": {
+                "name": str((tool_context or {}).get("name") or ""),
+                "status": str((tool_context or {}).get("status") or ""),
+                "summary": str((tool_context or {}).get("summary") or "")[:320],
+            },
+        }
+        role_hint = str((assigned_command or {}).get("target_role") or "").strip().lower()
+        task_text = " ".join(
+            filter(
+                None,
+                [
+                    str((assigned_command or {}).get("task") or "").strip(),
+                    str((assigned_command or {}).get("focus") or "").strip(),
+                ],
+            )
+        ).lower()
+        if role_hint in {"commander", "main", "problem_analysis"} or "分发" in task_text or "拆解" in task_text:
+            payload["coordination_summary"] = self._build_problem_coordination_summary(
+                problem_frame=payload["problem_frame"],
+                investigation_focus=payload["investigation_focus"],
+                tool_summary=payload["tool_summary"],
+            )
+        if "裁决" in task_text or "最终判断" in task_text or "收敛证据" in task_text:
+            payload["verdict_summary"] = self._build_judge_verdict_summary(
+                problem_frame=payload["problem_frame"],
+                investigation_focus=payload["investigation_focus"],
+                tool_summary=payload["tool_summary"],
+            )
+        if "验证" in task_text or "回落" in task_text or "修复是否生效" in task_text:
+            payload["verification_summary"] = self._build_verification_summary(
+                problem_frame=payload["problem_frame"],
+                investigation_focus=payload["investigation_focus"],
+                tool_summary=payload["tool_summary"],
+            )
+        if "质疑" in task_text or "证据缺口" in task_text or "替代解释" in task_text:
+            payload["critique_summary"] = self._build_critique_summary(
+                problem_frame=payload["problem_frame"],
+                investigation_focus=payload["investigation_focus"],
+                tool_summary=payload["tool_summary"],
+            )
+        if "反驳" in task_text or "补强" in task_text or "闭环证据" in task_text:
+            payload["rebuttal_summary"] = self._build_rebuttal_summary(
+                problem_frame=payload["problem_frame"],
+                investigation_focus=payload["investigation_focus"],
+                tool_summary=payload["tool_summary"],
+            )
+        if "规则化建议" in task_text or "守护策略" in task_text or "告警" in task_text:
+            payload["rule_summary"] = self._build_rule_summary(
+                problem_frame=payload["problem_frame"],
+                investigation_focus=payload["investigation_focus"],
+                tool_summary=payload["tool_summary"],
+            )
+        return payload
+
+    def _build_problem_coordination_summary(
+        self,
+        *,
+        problem_frame: Dict[str, Any],
+        investigation_focus: Dict[str, Any],
+        tool_summary: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        database_tables = list(investigation_focus.get("database_tables") or [])[:12]
+        error_keywords = [str(item or "").strip().lower() for item in list(investigation_focus.get("error_keywords") or [])]
+        api_endpoints = list(investigation_focus.get("api_endpoints") or [])[:8]
+
+        priority_tracks: List[str] = []
+        dispatch_targets: List[str] = []
+        evidence_points: List[str] = []
+        dominant_pattern = "generic_investigation"
+
+        if api_endpoints:
+            priority_tracks.append("接口入口与故障表象确认")
+            dispatch_targets.extend(["LogAgent", "CodeAgent"])
+            evidence_points.append(f"问题接口：{api_endpoints[0]}")
+        if database_tables or any(token in " ".join(error_keywords) for token in ("db", "lock", "transaction", "pool")):
+            priority_tracks.append("数据库与连接池压力链")
+            dispatch_targets.append("DatabaseAgent")
+            evidence_points.append(f"数据库线索：{';'.join(database_tables[:3]) or 'db/pool/lock keyword'}")
+        if any(token in " ".join(error_keywords) for token in ("502", "timeout", "error")):
+            priority_tracks.append("日志时间线与用户可见故障闭环")
+            dispatch_targets.append("LogAgent")
+            evidence_points.append("错误关键词显示用户侧故障已暴露，需要先重建时间线。")
+        if tool_summary.get("status"):
+            evidence_points.append(f"主控预加载：{str(tool_summary.get('name') or '-')}/{str(tool_summary.get('status') or '-')}")
+
+        if len(priority_tracks) >= 2:
+            dominant_pattern = "multi_signal_incident"
+        if not dispatch_targets:
+            dispatch_targets = ["LogAgent", "DomainAgent", "CodeAgent"]
+
+        return {
+            "dominant_pattern": dominant_pattern,
+            "service_name": str(problem_frame.get("service_name") or "")[:160],
+            "priority_tracks": list(dict.fromkeys(priority_tracks))[:4],
+            "dispatch_targets": list(dict.fromkeys(dispatch_targets))[:5],
+            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
+        }
+
+    def _build_judge_verdict_summary(
+        self,
+        *,
+        problem_frame: Dict[str, Any],
+        investigation_focus: Dict[str, Any],
+        tool_summary: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        api_endpoints = list(investigation_focus.get("api_endpoints") or [])[:8]
+        database_tables = list(investigation_focus.get("database_tables") or [])[:12]
+        error_keywords = [str(item or "").strip().lower() for item in list(investigation_focus.get("error_keywords") or [])]
+
+        decision_axes: List[str] = []
+        evidence_points: List[str] = []
+        dominant_pattern = "needs_more_evidence"
+
+        if api_endpoints:
+            decision_axes.append("接口级故障是否可与日志和代码入口闭环")
+            evidence_points.append(f"问题接口：{api_endpoints[0]}")
+        if database_tables:
+            decision_axes.append("数据库线索是否足以支撑根因归属")
+            evidence_points.append(f"关键表：{';'.join(database_tables[:3])}")
+        if any(token in " ".join(error_keywords) for token in ("502", "timeout", "lock", "db")):
+            decision_axes.append("用户故障表象与底层资源争用是否一致")
+            evidence_points.append(f"错误线索：{';'.join(error_keywords[:4])}")
+        if tool_summary.get("status"):
+            evidence_points.append(f"裁决输入：{str(tool_summary.get('name') or '-')}/{str(tool_summary.get('status') or '-')}")
+
+        if len(decision_axes) >= 2:
+            dominant_pattern = "ready_for_verdict"
+
+        return {
+            "dominant_pattern": dominant_pattern,
+            "service_name": str(problem_frame.get("service_name") or "")[:160],
+            "decision_axes": list(dict.fromkeys(decision_axes))[:4],
+            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
+        }
+
+    def _build_verification_summary(
+        self,
+        *,
+        problem_frame: Dict[str, Any],
+        investigation_focus: Dict[str, Any],
+        tool_summary: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        api_endpoints = list(investigation_focus.get("api_endpoints") or [])[:8]
+        database_tables = list(investigation_focus.get("database_tables") or [])[:12]
+        error_keywords = [str(item or "").strip().lower() for item in list(investigation_focus.get("error_keywords") or [])]
+
+        checkpoints: List[str] = []
+        evidence_points: List[str] = []
+        dominant_pattern = "verification_generic"
+
+        if api_endpoints:
+            checkpoints.append("确认接口错误率和超时率回落")
+            evidence_points.append(f"验证对象：{api_endpoints[0]}")
+        if database_tables or any(token in " ".join(error_keywords) for token in ("db", "lock", "pool")):
+            checkpoints.append("确认数据库连接池、锁等待和慢 SQL 指标回落")
+            evidence_points.append(f"数据面线索：{';'.join(database_tables[:3]) or 'db/lock/pool keyword'}")
+        checkpoints.append("确认关键服务 CPU/线程等资源指标恢复")
+        if tool_summary.get("status"):
+            evidence_points.append(f"验证输入：{str(tool_summary.get('name') or '-')}/{str(tool_summary.get('status') or '-')}")
+        if len(checkpoints) >= 2:
+            dominant_pattern = "verification_ready"
+
+        return {
+            "dominant_pattern": dominant_pattern,
+            "service_name": str(problem_frame.get("service_name") or "")[:160],
+            "checkpoints": list(dict.fromkeys(checkpoints))[:5],
+            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
+        }
+
+    def _build_critique_summary(
+        self,
+        *,
+        problem_frame: Dict[str, Any],
+        investigation_focus: Dict[str, Any],
+        tool_summary: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        api_endpoints = list(investigation_focus.get("api_endpoints") or [])[:8]
+        database_tables = list(investigation_focus.get("database_tables") or [])[:12]
+        error_keywords = [str(item or "").strip().lower() for item in list(investigation_focus.get("error_keywords") or [])]
+        challenge_axes: List[str] = []
+        evidence_points: List[str] = []
+        dominant_pattern = "generic_challenge"
+        if api_endpoints:
+            challenge_axes.append("接口现象是否存在其他解释路径")
+            evidence_points.append(f"问题接口：{api_endpoints[0]}")
+        if database_tables:
+            challenge_axes.append("数据库线索是否足以证明唯一根因")
+            evidence_points.append(f"涉及表：{';'.join(database_tables[:3])}")
+        if error_keywords:
+            challenge_axes.append("错误关键词是否可能来自级联症状而非根因")
+            evidence_points.append(f"现有线索：{';'.join(error_keywords[:4])}")
+        if tool_summary.get("status"):
+            evidence_points.append(f"质疑输入：{str(tool_summary.get('name') or '-')}/{str(tool_summary.get('status') or '-')}")
+        if len(challenge_axes) >= 2:
+            dominant_pattern = "evidence_challenge"
+        return {
+            "dominant_pattern": dominant_pattern,
+            "service_name": str(problem_frame.get("service_name") or "")[:160],
+            "challenge_axes": list(dict.fromkeys(challenge_axes))[:4],
+            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
+        }
+
+    def _build_rebuttal_summary(
+        self,
+        *,
+        problem_frame: Dict[str, Any],
+        investigation_focus: Dict[str, Any],
+        tool_summary: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        api_endpoints = list(investigation_focus.get("api_endpoints") or [])[:8]
+        database_tables = list(investigation_focus.get("database_tables") or [])[:12]
+        error_keywords = [str(item or "").strip().lower() for item in list(investigation_focus.get("error_keywords") or [])]
+        reinforcement_axes: List[str] = []
+        evidence_points: List[str] = []
+        dominant_pattern = "generic_rebuttal"
+        if api_endpoints:
+            reinforcement_axes.append("补强接口入口到用户故障的闭环")
+            evidence_points.append(f"问题接口：{api_endpoints[0]}")
+        if database_tables or any(token in " ".join(error_keywords) for token in ("lock", "db", "pool")):
+            reinforcement_axes.append("补强数据库/资源争用证据链")
+            evidence_points.append(f"数据面：{';'.join(database_tables[:3]) or 'db/lock/pool keyword'}")
+        if tool_summary.get("status"):
+            evidence_points.append(f"反驳输入：{str(tool_summary.get('name') or '-')}/{str(tool_summary.get('status') or '-')}")
+        if len(reinforcement_axes) >= 2:
+            dominant_pattern = "evidence_reinforcement"
+        return {
+            "dominant_pattern": dominant_pattern,
+            "service_name": str(problem_frame.get("service_name") or "")[:160],
+            "reinforcement_axes": list(dict.fromkeys(reinforcement_axes))[:4],
+            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
+        }
+
+    def _build_rule_summary(
+        self,
+        *,
+        problem_frame: Dict[str, Any],
+        investigation_focus: Dict[str, Any],
+        tool_summary: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        api_endpoints = list(investigation_focus.get("api_endpoints") or [])[:8]
+        database_tables = list(investigation_focus.get("database_tables") or [])[:12]
+        error_keywords = [str(item or "").strip().lower() for item in list(investigation_focus.get("error_keywords") or [])]
+        recommendation_axes: List[str] = []
+        evidence_points: List[str] = []
+        dominant_pattern = "generic_rule"
+        if api_endpoints:
+            recommendation_axes.append("沉淀接口级告警与守护规则")
+            evidence_points.append(f"问题接口：{api_endpoints[0]}")
+        if database_tables or any(token in " ".join(error_keywords) for token in ("pool", "db", "timeout")):
+            recommendation_axes.append("沉淀数据库/连接池容量守护策略")
+            evidence_points.append(f"数据面：{';'.join(database_tables[:3]) or 'db/pool keyword'}")
+        if tool_summary.get("status"):
+            evidence_points.append(f"规则输入：{str(tool_summary.get('name') or '-')}/{str(tool_summary.get('status') or '-')}")
+        if len(recommendation_axes) >= 2:
+            dominant_pattern = "rule_ready"
+        return {
+            "dominant_pattern": dominant_pattern,
+            "service_name": str(problem_frame.get("service_name") or "")[:160],
+            "recommendation_axes": list(dict.fromkeys(recommendation_axes))[:4],
+            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
+        }
+
+    def _build_code_focused_context(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        tool_context: Optional[Dict[str, Any]],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        mapping = compact_context.get("interface_mapping") if isinstance(compact_context.get("interface_mapping"), dict) else {}
+        endpoint = ((mapping.get("endpoint") or mapping.get("matched_endpoint") or {}) if isinstance(mapping, dict) else {})
+        leads = self._extract_investigation_leads(compact_context, incident_context, assigned_command)
+        tool_data = (tool_context or {}).get("data") if isinstance(tool_context, dict) else {}
+        if not isinstance(tool_data, dict):
+            tool_data = {}
+        hits = [item for item in list(tool_data.get("hits") or []) if isinstance(item, dict)]
+        repo_path = str(tool_data.get("repo_path") or "").strip()
+        artifact_hints = list(mapping.get("code_artifacts") or []) + list(leads.get("code_artifacts") or [])
+        hit_files = [str(item.get("file") or "").strip() for item in hits if str(item.get("file") or "").strip()]
+        related_files = self._expand_related_code_files(
+            repo_path=repo_path,
+            seed_files=[*artifact_hints, *hit_files],
+            class_hints=list(leads.get("class_names") or []),
+            depth=2,
+            per_hop_limit=6,
+        )
+        code_windows = self._load_repo_focus_windows(
+            repo_path=repo_path,
+            candidate_files=[*artifact_hints, *hit_files, *related_files],
+            max_files=8,
+            max_chars=1400,
+        )
+        method_call_chain = self._build_method_call_chain(
+            repo_path=repo_path,
+            endpoint_interface=str(endpoint.get("interface") or ""),
+            code_windows=code_windows,
+            hit_snippets=[str(item.get("snippet") or "") for item in hits[:8]],
+        )
+        return {
+            "analysis_objective": {
+                "task": str((assigned_command or {}).get("task") or "")[:240],
+                "focus": str((assigned_command or {}).get("focus") or "")[:300],
+                "expected_output": str((assigned_command or {}).get("expected_output") or "")[:240],
+            },
+            "problem_entrypoint": {
+                "method": str(endpoint.get("method") or "")[:24],
+                "path": str(endpoint.get("path") or "")[:240],
+                "service": str(endpoint.get("service") or self._primary_service_name(compact_context, incident_context, assigned_command))[:160],
+                "interface": str(endpoint.get("interface") or "")[:240],
+            },
+            "mapped_code_scope": {
+                "code_artifacts": list(dict.fromkeys([str(item) for item in artifact_hints if str(item).strip()]))[:12],
+                "class_names": list(leads.get("class_names") or [])[:12],
+                "dependency_services": list(leads.get("dependency_services") or [])[:10],
+                "database_tables": self._extract_database_tables(compact_context, incident_context, assigned_command)[:12],
+            },
+            "repo_hits": {
+                "keywords": list(tool_data.get("keywords") or [])[:12],
+                "match_count": len(hits),
+                "top_hits": hits[:12],
+                "candidate_files": list(dict.fromkeys([str(item) for item in hit_files if str(item).strip()]))[:12],
+                "related_files": related_files[:12],
+            },
+            "code_windows": code_windows,
+            "method_call_chain": method_call_chain,
+            "analysis_expectations": [
+                "优先定位接口入口与事务边界，再分析同步调用、锁竞争、连接占用和重试放大。",
+                "若无法形成完整调用链，至少给出入口方法、下游调用点和可疑资源占用点。",
+            ],
+        }
+
+    def _build_log_focused_context(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        tool_context: Optional[Dict[str, Any]],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        excerpt = self._resolve_log_excerpt(compact_context, incident_context, tool_context)
+        timeline = self._extract_log_timeline(excerpt, max_events=10)
+        trace_id = self._primary_trace_id(compact_context, incident_context, assigned_command)
+        causal_timeline = self._build_log_causal_timeline(timeline)
+        return {
+            "analysis_objective": {
+                "task": str((assigned_command or {}).get("task") or "")[:240],
+                "focus": str((assigned_command or {}).get("focus") or "")[:300],
+            },
+            "log_scope": {
+                "service_name": self._primary_service_name(compact_context, incident_context, assigned_command),
+                "trace_id": trace_id,
+                "keywords": list(((tool_context or {}).get("data") or {}).get("keywords") or [])[:10] if isinstance(tool_context, dict) else [],
+            },
+            "timeline_events": timeline,
+            "causal_timeline": causal_timeline,
+            "raw_excerpt": excerpt[:2200],
+        }
+
+    def _build_domain_focused_context(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        tool_context: Optional[Dict[str, Any]],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        mapping = compact_context.get("interface_mapping") if isinstance(compact_context.get("interface_mapping"), dict) else {}
+        tool_data = (tool_context or {}).get("data") if isinstance(tool_context, dict) else {}
+        if not isinstance(tool_data, dict):
+            tool_data = {}
+        matches = [item for item in list(tool_data.get("matches") or []) if isinstance(item, dict)]
+        endpoint = ((mapping.get("endpoint") or mapping.get("matched_endpoint") or {}) if isinstance(mapping, dict) else {})
+        causal_summary = self._build_domain_causal_summary(
+            mapping=mapping if isinstance(mapping, dict) else {},
+            endpoint=endpoint if isinstance(endpoint, dict) else {},
+            matches=matches[:8],
+        )
+        return {
+            "responsibility_mapping": {
+                "matched": bool(mapping.get("matched")),
+                "confidence": mapping.get("confidence"),
+                "domain": str(mapping.get("domain") or "")[:120],
+                "aggregate": str(mapping.get("aggregate") or "")[:120],
+                "owner_team": str(mapping.get("owner_team") or "")[:120],
+                "owner": str(mapping.get("owner") or "")[:120],
+                "feature": str(mapping.get("feature") or "")[:120],
+            },
+            "interface_scope": {
+                "method": str(endpoint.get("method") or "")[:24],
+                "path": str(endpoint.get("path") or "")[:240],
+                "service": str(endpoint.get("service") or self._primary_service_name(compact_context, incident_context, assigned_command))[:160],
+                "database_tables": list(mapping.get("database_tables") or mapping.get("db_tables") or [])[:12],
+                "dependency_services": list(mapping.get("dependency_services") or [])[:10],
+                "monitor_items": list(mapping.get("monitor_items") or [])[:10],
+            },
+            "knowledge_matches": matches[:8],
+            "cmdb_payload": (((tool_data.get("remote_cmdb") or {}).get("payload") or {}) if isinstance(tool_data.get("remote_cmdb"), dict) else {}),
+            "causal_summary": causal_summary,
+        }
+
+    def _build_database_focused_context(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        tool_context: Optional[Dict[str, Any]],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        tool_data = (tool_context or {}).get("data") if isinstance(tool_context, dict) else {}
+        if not isinstance(tool_data, dict):
+            tool_data = {}
+        target_tables = self._extract_database_tables(compact_context, incident_context, assigned_command)[:16]
+        causal_summary = self._build_database_causal_summary(
+            target_tables=target_tables,
+            tool_data=tool_data,
+        )
+        return {
+            "analysis_objective": {
+                "task": str((assigned_command or {}).get("task") or "")[:240],
+                "focus": str((assigned_command or {}).get("focus") or "")[:300],
+            },
+            "target_tables": target_tables,
+            "schema_summary": {
+                "engine": str(tool_data.get("engine") or "")[:40],
+                "schema": str(tool_data.get("schema") or "")[:80],
+                "tables": list(tool_data.get("tables") or [])[:16],
+                "table_structures": list(tool_data.get("table_structures") or [])[:8],
+                "indexes": self._trim_mapping(tool_data.get("indexes"), item_limit=8, value_limit=6),
+            },
+            "sql_signals": {
+                "slow_sql": list(tool_data.get("slow_sql") or [])[:8],
+                "top_sql": list(tool_data.get("top_sql") or [])[:8],
+                "keyword_hits": list(tool_data.get("keyword_hits") or [])[:8],
+            },
+            "runtime_signals": {
+                "session_status": list(tool_data.get("session_status") or [])[:8],
+                "used_target_tables": bool(tool_data.get("used_target_tables")),
+                "fallback_reason": str(tool_data.get("fallback_reason") or "")[:120],
+            },
+            "causal_summary": causal_summary,
+        }
+
+    def _build_metrics_focused_context(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        tool_context: Optional[Dict[str, Any]],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        tool_data = (tool_context or {}).get("data") if isinstance(tool_context, dict) else {}
+        if not isinstance(tool_data, dict):
+            tool_data = {}
+        signals = [item for item in list(tool_data.get("signals") or []) if isinstance(item, dict)]
+        causal_metric_chain = self._build_metric_causal_chain(signals[:16])
+        return {
+            "analysis_objective": {
+                "task": str((assigned_command or {}).get("task") or "")[:240],
+                "focus": str((assigned_command or {}).get("focus") or "")[:300],
+            },
+            "metric_signals": signals[:16],
+            "metric_timeline_summary": self._summarize_metric_signals(signals[:16]),
+            "causal_metric_chain": causal_metric_chain,
+            "remote_sources": {
+                "telemetry": self._remote_source_summary(tool_data.get("remote_telemetry")),
+                "prometheus": self._remote_source_summary(tool_data.get("remote_prometheus")),
+                "loki": self._remote_source_summary(tool_data.get("remote_loki")),
+                "grafana": self._remote_source_summary(tool_data.get("remote_grafana")),
+                "apm": self._remote_source_summary(tool_data.get("remote_apm")),
+            },
+        }
+
+    def _build_change_focused_context(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        tool_context: Optional[Dict[str, Any]],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        tool_data = (tool_context or {}).get("data") if isinstance(tool_context, dict) else {}
+        if not isinstance(tool_data, dict):
+            tool_data = {}
+        leads = self._extract_investigation_leads(compact_context, incident_context, assigned_command)
+        changes = [item for item in list(tool_data.get("changes") or []) if isinstance(item, dict)]
+        causal_summary = self._build_change_causal_summary(
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
+            changes=changes,
+        )
+        return {
+            "analysis_objective": {
+                "task": str((assigned_command or {}).get("task") or "")[:240],
+                "focus": str((assigned_command or {}).get("focus") or "")[:300],
+            },
+            "service_scope": {
+                "service_name": self._primary_service_name(compact_context, incident_context, assigned_command),
+                "api_endpoints": list(leads.get("api_endpoints") or [])[:8],
+                "code_artifacts": list(leads.get("code_artifacts") or [])[:10],
+            },
+            "change_window": changes[:12],
+            "causal_summary": causal_summary,
+        }
+
+    def _build_runbook_focused_context(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        tool_context: Optional[Dict[str, Any]],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        tool_data = (tool_context or {}).get("data") if isinstance(tool_context, dict) else {}
+        if not isinstance(tool_data, dict):
+            tool_data = {}
+        items = [item for item in list(tool_data.get("items") or []) if isinstance(item, dict)]
+        recommended_actions = self._extract_runbook_actions(items[:6])
+        action_summary = self._build_runbook_action_summary(
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
+            items=items[:6],
+            recommended_actions=recommended_actions,
+            source=str(tool_data.get("source") or "")[:80],
+        )
+        return {
+            "analysis_objective": {
+                "task": str((assigned_command or {}).get("task") or "")[:240],
+                "focus": str((assigned_command or {}).get("focus") or "")[:300],
+            },
+            "knowledge_source": str(tool_data.get("source") or "")[:80],
+            "matched_entries": items[:6],
+            "recommended_actions": recommended_actions,
+            "action_summary": action_summary,
+        }
 
     async def _build_code_context(
         self,
@@ -1437,6 +2019,29 @@ class AgentToolContextService:
             )
         keywords = self._extract_keywords(compact_context, incident_context, assigned_command)
         query = " ".join(keywords[:6]).strip()
+        knowledge_items = await knowledge_service.search_reference_entries(
+            query=query,
+            limit=8,
+        )
+        audit_log.append(
+            self._audit(
+                tool_name="runbook_case_library",
+                action="knowledge_search",
+                status="ok" if knowledge_items else "unavailable",
+                detail={"query": query, "match_count": len(knowledge_items), "source": "knowledge_base"},
+            )
+        )
+        if knowledge_items:
+            return ToolContextResult(
+                name="runbook_case_library",
+                enabled=True,
+                used=True,
+                status="ok",
+                summary=f"知识库命中 {len(knowledge_items)} 条案例 / SOP。",
+                data={"query": query, "items": knowledge_items[:8], "source": "knowledge_base"},
+                command_gate=command_gate,
+                audit_log=audit_log,
+            )
         result = await self._case_library.execute(action="search", query=query)
         if not result.success:
             error_text = str(result.error or "unknown error")
@@ -1488,7 +2093,7 @@ class AgentToolContextService:
             used=True,
             status="ok",
             summary=f"案例库命中 {len(items)} 条相似故障。",
-            data={"query": query, "items": items[:8]},
+            data={"query": query, "items": items[:8], "source": "legacy_case_library"},
             command_gate=command_gate,
             audit_log=audit_log,
         )
@@ -2894,6 +3499,798 @@ class AgentToolContextService:
                 break
         wb.close()
         return rows, str(ws.title or "")
+
+    def _resolve_log_excerpt(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        tool_context: Optional[Dict[str, Any]],
+    ) -> str:
+        tool_data = (tool_context or {}).get("data") if isinstance(tool_context, dict) else {}
+        if isinstance(tool_data, dict):
+            excerpt = str(tool_data.get("excerpt") or "").strip()
+            if excerpt:
+                return excerpt
+        for source in (
+            str(compact_context.get("log_excerpt") or "").strip(),
+            str(incident_context.get("log_content") or "").strip(),
+            str(incident_context.get("description") or "").strip(),
+        ):
+            if source:
+                return source
+        return ""
+
+    def _extract_log_timeline(self, excerpt: str, *, max_events: int) -> List[Dict[str, Any]]:
+        events: List[Dict[str, Any]] = []
+        if not excerpt:
+            return events
+        for raw_line in excerpt.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            timestamp_match = re.search(r"(\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)", line)
+            if not timestamp_match:
+                timestamp_match = re.search(r"(\d{2}:\d{2}:\d{2})", line)
+            level_match = re.search(r"\b(INFO|WARN|ERROR|DEBUG|TRACE)\b", line, flags=re.IGNORECASE)
+            component_match = re.search(r"\b([a-zA-Z_][\w.$-]{6,})\b", line)
+            events.append(
+                {
+                    "timestamp": str(timestamp_match.group(1) if timestamp_match else "")[:64],
+                    "level": str(level_match.group(1).upper() if level_match else "")[:12],
+                    "component": str(component_match.group(1) if component_match else "")[:120],
+                    "message": line[:320],
+                }
+            )
+            if len(events) >= max_events:
+                break
+        return events
+
+    def _build_log_causal_timeline(self, timeline: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        chain: List[Dict[str, Any]] = []
+        first_error_added = False
+        resource_added = False
+        user_visible_added = False
+        for item in timeline:
+            message = str(item.get("message") or "").lower()
+            level = str(item.get("level") or "").upper()
+            stage = ""
+            rationale = ""
+            if any(term in message for term in ("uri=", "post /api", "get /api", "request start", "createorder start")):
+                stage = "request_entry"
+                rationale = "请求进入系统，构成时间线起点。"
+            elif not first_error_added and level == "ERROR":
+                stage = "first_error"
+                rationale = "首个错误事件，通常是应用侧初始异常。"
+                first_error_added = True
+            if not resource_added and any(term in message for term in ("connection is not available", "lock wait", "timeout after", "pending", "pool")):
+                stage = "resource_exhaustion"
+                rationale = "资源耗尽或阻塞放大，可能是故障扩散关键节点。"
+                resource_added = True
+            if any(term in message for term in ("status=502", "5xx", "upstream timeout", "bad gateway")):
+                stage = "user_visible_failure"
+                rationale = "用户可见错误，代表故障已经暴露到入口层。"
+                user_visible_added = True
+            if not stage:
+                continue
+            chain.append(
+                {
+                    "stage": stage,
+                    "timestamp": str(item.get("timestamp") or ""),
+                    "component": str(item.get("component") or ""),
+                    "message": str(item.get("message") or "")[:280],
+                    "rationale": rationale,
+                }
+            )
+        deduped: List[Dict[str, Any]] = []
+        seen = set()
+        for item in chain:
+            key = f"{item.get('stage')}|{item.get('timestamp')}|{item.get('component')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped[:8]
+
+    def _load_repo_focus_windows(
+        self,
+        *,
+        repo_path: str,
+        candidate_files: List[str],
+        max_files: int,
+        max_chars: int,
+    ) -> List[Dict[str, Any]]:
+        root = Path(str(repo_path or "").strip())
+        if not root.exists() or not root.is_dir():
+            return []
+        windows: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw_name in candidate_files:
+            name = str(raw_name or "").strip()
+            if not name:
+                continue
+            normalized = name.lstrip("./")
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            direct = root / normalized
+            file_path: Optional[Path] = None
+            if direct.exists() and direct.is_file():
+                file_path = direct
+            else:
+                matches = list(root.rglob(Path(normalized).name))
+                for item in matches:
+                    if item.is_file():
+                        try:
+                            rel = str(item.relative_to(root))
+                        except Exception:
+                            rel = str(item)
+                        if rel.endswith(normalized) or item.name == Path(normalized).name:
+                            file_path = item
+                            break
+            if file_path is None:
+                continue
+            try:
+                text = file_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            windows.append(
+                {
+                    "file": str(file_path.relative_to(root)),
+                    "excerpt": text[:max_chars],
+                }
+            )
+            if len(windows) >= max_files:
+                break
+        return windows
+
+    def _expand_related_code_files(
+        self,
+        *,
+        repo_path: str,
+        seed_files: List[str],
+        class_hints: List[str],
+        depth: int,
+        per_hop_limit: int,
+    ) -> List[str]:
+        root = Path(str(repo_path or "").strip())
+        if not root.exists() or not root.is_dir():
+            return []
+        queue: List[str] = [str(item or "").strip() for item in seed_files if str(item or "").strip()]
+        related: List[str] = []
+        seen_files = set(queue)
+        seen_symbols: set[str] = set()
+        explicit_symbols = [str(item or "").strip() for item in class_hints if str(item or "").strip()]
+        for symbol in explicit_symbols:
+            symbol_file = self._find_symbol_file(root, symbol)
+            if symbol_file is None:
+                continue
+            try:
+                rel = str(symbol_file.relative_to(root))
+            except Exception:
+                rel = str(symbol_file)
+            seen_symbols.add(symbol)
+            if rel in seen_files:
+                continue
+            seen_files.add(rel)
+            related.append(rel)
+            queue.append(rel)
+        for _ in range(max(1, depth)):
+            if not queue:
+                break
+            next_queue: List[str] = []
+            hop_found = 0
+            for item in list(queue):
+                file_path = self._resolve_repo_file(root, item)
+                if file_path is None:
+                    continue
+                try:
+                    text = file_path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+                for symbol in self._extract_related_code_symbols(text):
+                    if symbol in seen_symbols:
+                        continue
+                    seen_symbols.add(symbol)
+                    symbol_file = self._find_symbol_file(root, symbol)
+                    if symbol_file is None:
+                        continue
+                    try:
+                        rel = str(symbol_file.relative_to(root))
+                    except Exception:
+                        rel = str(symbol_file)
+                    if rel in seen_files:
+                        continue
+                    seen_files.add(rel)
+                    related.append(rel)
+                    next_queue.append(rel)
+                    hop_found += 1
+                    if hop_found >= per_hop_limit:
+                        break
+                if hop_found >= per_hop_limit:
+                    break
+            queue = next_queue
+        return related
+
+    def _resolve_repo_file(self, root: Path, raw_name: str) -> Optional[Path]:
+        normalized = str(raw_name or "").strip().lstrip("./")
+        if not normalized:
+            return None
+        direct = root / normalized
+        if direct.exists() and direct.is_file():
+            return direct
+        for item in root.rglob(Path(normalized).name):
+            if item.is_file():
+                try:
+                    rel = str(item.relative_to(root))
+                except Exception:
+                    rel = str(item)
+                if rel.endswith(normalized) or item.name == Path(normalized).name:
+                    return item
+        return None
+
+    def _find_symbol_file(self, root: Path, symbol: str) -> Optional[Path]:
+        for suffix in SOURCE_SUFFIXES:
+            candidate = list(root.rglob(f"{symbol}{suffix}"))
+            for item in candidate:
+                if item.is_file():
+                    return item
+        return None
+
+    def _extract_related_code_symbols(self, text: str) -> List[str]:
+        symbols: List[str] = []
+        for match in re.finditer(
+            r"\b([A-Z][A-Za-z0-9_]{2,}(?:Controller|Service|AppService|Repository|Repo|Mapper|Dao|Client|Gateway|Manager))\b",
+            text,
+        ):
+            symbol = str(match.group(1) or "").strip()
+            if symbol:
+                symbols.append(symbol)
+        return list(dict.fromkeys(symbols))[:24]
+
+    def _build_method_call_chain(
+        self,
+        *,
+        repo_path: str,
+        endpoint_interface: str,
+        code_windows: List[Dict[str, Any]],
+        hit_snippets: List[str],
+    ) -> List[Dict[str, Any]]:
+        root = Path(str(repo_path or "").strip())
+        if not root.exists() or not root.is_dir():
+            return []
+        parsed = self._parse_interface_ref(endpoint_interface)
+        files = [str(item.get("file") or "").strip() for item in code_windows if str(item.get("file") or "").strip()]
+        source_units = self._load_source_units(root, files[:8])
+        if not source_units:
+            return []
+
+        entry_symbol = parsed.get("symbol") or source_units[0].get("symbol") or ""
+        entry_method = parsed.get("method") or self._guess_entry_method(source_units, hit_snippets)
+        if not entry_method:
+            return []
+        start_unit = self._find_source_unit(source_units, entry_symbol, preferred_file=files[0] if files else "")
+        if not start_unit:
+            start_unit = source_units[0]
+        chain: List[Dict[str, Any]] = []
+        visited: set[str] = set()
+        current_symbol = str(start_unit.get("symbol") or "")
+        current_method = entry_method
+        for _ in range(4):
+            unit = self._find_source_unit(source_units, current_symbol)
+            if not unit:
+                break
+            methods = unit.get("methods") if isinstance(unit.get("methods"), dict) else {}
+            method_meta = methods.get(current_method) if isinstance(methods, dict) else None
+            if not isinstance(method_meta, dict):
+                if not methods:
+                    break
+                fallback_name, fallback_meta = next(iter(methods.items()))
+                current_method = str(fallback_name)
+                method_meta = fallback_meta if isinstance(fallback_meta, dict) else {}
+            key = f"{current_symbol}#{current_method}"
+            if key in visited:
+                break
+            visited.add(key)
+            chain.append(
+                {
+                    "symbol": current_symbol,
+                    "method": current_method,
+                    "file": str(unit.get("file") or ""),
+                    "line": int(method_meta.get("line") or 0),
+                    "snippet": str(method_meta.get("snippet") or "")[:220],
+                }
+            )
+            next_call = self._resolve_next_method_call(
+                source_units=source_units,
+                current_unit=unit,
+                method_meta=method_meta,
+            )
+            if not next_call:
+                break
+            current_symbol = str(next_call.get("symbol") or "")
+            current_method = str(next_call.get("method") or "")
+            if not current_symbol or not current_method:
+                break
+        return chain
+
+    def _parse_interface_ref(self, raw: str) -> Dict[str, str]:
+        text = str(raw or "").strip()
+        if not text:
+            return {"symbol": "", "method": ""}
+        for sep in ("#", ".", "::"):
+            if sep in text:
+                left, right = text.split(sep, 1)
+                return {"symbol": left.strip(), "method": right.strip()}
+        return {"symbol": text.strip(), "method": ""}
+
+    def _load_source_units(self, root: Path, files: List[str]) -> List[Dict[str, Any]]:
+        units: List[Dict[str, Any]] = []
+        for raw_file in files:
+            file_path = self._resolve_repo_file(root, raw_file)
+            if file_path is None:
+                continue
+            try:
+                text = file_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            units.append(self._parse_source_unit(root=root, file_path=file_path, text=text))
+        return units
+
+    def _parse_source_unit(self, *, root: Path, file_path: Path, text: str) -> Dict[str, Any]:
+        symbol_match = re.search(r"\bclass\s+([A-Z][A-Za-z0-9_]*)\b", text)
+        symbol = str(symbol_match.group(1) if symbol_match else file_path.stem)
+        fields = self._extract_field_types(text)
+        methods = self._extract_methods(text)
+        try:
+            rel = str(file_path.relative_to(root))
+        except Exception:
+            rel = str(file_path)
+        return {
+            "symbol": symbol,
+            "file": rel,
+            "fields": fields,
+            "methods": methods,
+        }
+
+    def _extract_field_types(self, text: str) -> Dict[str, str]:
+        fields: Dict[str, str] = {}
+        for match in re.finditer(
+            r"\b(?:private|protected|public)?\s*(?:final\s+)?([A-Z][A-Za-z0-9_<>]*)\s+([a-z][A-Za-z0-9_]*)\s*(?:[;=])",
+            text,
+        ):
+            field_type = str(match.group(1) or "").split("<", 1)[0].strip()
+            field_name = str(match.group(2) or "").strip()
+            if field_name and field_type:
+                fields[field_name] = field_type
+        return fields
+
+    def _extract_methods(self, text: str) -> Dict[str, Dict[str, Any]]:
+        methods: Dict[str, Dict[str, Any]] = {}
+        lines = text.splitlines()
+        for idx, line in enumerate(lines, start=1):
+            match = re.search(
+                r"\b(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?(?:[\w<>\[\],?]+\s+)+([a-zA-Z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*\{?",
+                line,
+            )
+            if not match:
+                continue
+            method_name = str(match.group(1) or "").strip()
+            if method_name in {"if", "for", "while", "switch", "catch", "return", "new"}:
+                continue
+            body_lines = lines[idx - 1 : min(len(lines), idx + 8)]
+            methods[method_name] = {
+                "line": idx,
+                "snippet": "\n".join(body_lines),
+            }
+        return methods
+
+    def _guess_entry_method(self, source_units: List[Dict[str, Any]], hit_snippets: List[str]) -> str:
+        for snippet in hit_snippets:
+            match = re.search(r"\.\s*([a-zA-Z_][A-Za-z0-9_]*)\s*\(", str(snippet or ""))
+            if match:
+                return str(match.group(1) or "").strip()
+        for unit in source_units:
+            methods = unit.get("methods") if isinstance(unit.get("methods"), dict) else {}
+            for name in methods:
+                if name.lower().startswith(("create", "submit", "save", "update", "handle")):
+                    return str(name)
+        if source_units:
+            methods = source_units[0].get("methods") if isinstance(source_units[0].get("methods"), dict) else {}
+            if methods:
+                return str(next(iter(methods.keys())))
+        return ""
+
+    def _find_source_unit(
+        self,
+        source_units: List[Dict[str, Any]],
+        symbol: str,
+        *,
+        preferred_file: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        normalized_symbol = str(symbol or "").strip()
+        normalized_file = str(preferred_file or "").strip()
+        for unit in source_units:
+            if normalized_file and str(unit.get("file") or "").strip() == normalized_file:
+                return unit
+        for unit in source_units:
+            if str(unit.get("symbol") or "").strip() == normalized_symbol:
+                return unit
+        return None
+
+    def _resolve_next_method_call(
+        self,
+        *,
+        source_units: List[Dict[str, Any]],
+        current_unit: Dict[str, Any],
+        method_meta: Dict[str, Any],
+    ) -> Optional[Dict[str, str]]:
+        snippet = str(method_meta.get("snippet") or "")
+        fields = current_unit.get("fields") if isinstance(current_unit.get("fields"), dict) else {}
+        for match in re.finditer(r"\b([a-zA-Z_][A-Za-z0-9_]*)\.([a-zA-Z_][A-Za-z0-9_]*)\s*\(", snippet):
+            receiver = str(match.group(1) or "").strip()
+            method = str(match.group(2) or "").strip()
+            symbol = str(fields.get(receiver) or "").strip()
+            if not symbol or method in {"println", "info", "warn", "error", "debug"}:
+                continue
+            if self._find_source_unit(source_units, symbol):
+                return {"symbol": symbol, "method": method}
+        return None
+
+    @staticmethod
+    def _trim_mapping(value: Any, *, item_limit: int, value_limit: int) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        result: Dict[str, Any] = {}
+        for key, item in list(value.items())[:item_limit]:
+            if isinstance(item, list):
+                result[str(key)] = item[:value_limit]
+            elif isinstance(item, dict):
+                result[str(key)] = dict(list(item.items())[:value_limit])
+            else:
+                result[str(key)] = item
+        return result
+
+    @staticmethod
+    def _remote_source_summary(value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {"enabled": False, "status": "unavailable"}
+        return {
+            "enabled": bool(value.get("enabled")),
+            "status": str(value.get("status") or ""),
+            "payload_keys": list((value.get("payload") or {}).keys())[:12] if isinstance(value.get("payload"), dict) else [],
+        }
+
+    def _summarize_metric_signals(self, signals: List[Dict[str, Any]]) -> List[str]:
+        summaries: List[str] = []
+        for item in signals:
+            metric = str(item.get("label") or item.get("metric") or "").strip()
+            value = str(item.get("value") or "").strip()
+            snippet = str(item.get("snippet") or "").strip()
+            if not metric or not value:
+                continue
+            summaries.append(f"{metric}={value}，证据={snippet[:120]}")
+            if len(summaries) >= 8:
+                break
+        return summaries
+
+    def _build_metric_causal_chain(self, signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        chain: List[Dict[str, Any]] = []
+        for item in signals:
+            metric = str(item.get("metric") or "").strip().lower()
+            label = str(item.get("label") or metric).strip()
+            value = str(item.get("value") or "").strip()
+            snippet = str(item.get("snippet") or "").strip()
+            stage = ""
+            rationale = ""
+            if metric in {"cpu", "threads", "memory", "gc"}:
+                stage = "resource_pressure"
+                rationale = "资源指标先行异常，通常代表系统已进入压力阶段。"
+            elif metric in {"db_conn", "hikari_pending", "pool", "queue"}:
+                stage = "capacity_saturation"
+                rationale = "连接/队列类指标打满，说明容量瓶颈已形成。"
+            elif metric in {"error_rate", "latency", "p99", "availability", "5xx"}:
+                stage = "user_visible_failure"
+                rationale = "错误率或延迟已上升到用户可感知层。"
+            if not stage:
+                continue
+            chain.append(
+                {
+                    "stage": stage,
+                    "metric": metric,
+                    "label": label,
+                    "value": value,
+                    "snippet": snippet[:180],
+                    "rationale": rationale,
+                }
+            )
+        if not chain:
+            return []
+        stage_order = {"resource_pressure": 1, "capacity_saturation": 2, "user_visible_failure": 3}
+        chain.sort(key=lambda item: (stage_order.get(str(item.get("stage") or ""), 99), str(item.get("metric") or "")))
+        deduped: List[Dict[str, Any]] = []
+        seen = set()
+        for item in chain:
+            key = f"{item.get('stage')}|{item.get('metric')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped[:8]
+
+    def _extract_runbook_actions(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        actions: List[Dict[str, Any]] = []
+        for item in items:
+            runbook_fields = item.get("runbook_fields") if isinstance(item.get("runbook_fields"), dict) else {}
+            if runbook_fields:
+                steps = list(runbook_fields.get("steps") or [])[:4]
+                verify = list(runbook_fields.get("verification_steps") or [])[:3]
+            else:
+                steps = []
+                verify = []
+            actions.append(
+                {
+                    "title": str(item.get("title") or "")[:160],
+                    "entry_type": str(item.get("entry_type") or "")[:40],
+                    "steps": steps,
+                    "verification_steps": verify,
+                }
+            )
+            if len(actions) >= 6:
+                break
+        return actions
+
+    def _build_database_causal_summary(
+        self,
+        *,
+        target_tables: List[str],
+        tool_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        slow_sql = [item for item in list(tool_data.get("slow_sql") or []) if isinstance(item, dict)]
+        top_sql = [item for item in list(tool_data.get("top_sql") or []) if isinstance(item, dict)]
+        session_status = [item for item in list(tool_data.get("session_status") or []) if isinstance(item, dict)]
+        keyword_hits = [item for item in list(tool_data.get("keyword_hits") or []) if isinstance(item, dict)]
+
+        evidence_points: List[str] = []
+        likely_causes: List[str] = []
+        dominant_pattern = "db_pressure"
+
+        for row in session_status:
+            wait_type = str(row.get("wait_event_type") or "").strip()
+            wait_event = str(row.get("wait_event") or "").strip()
+            sessions = row.get("sessions")
+            if wait_type or wait_event:
+                evidence_points.append(f"session wait: {wait_type or 'unknown'}/{wait_event or 'unknown'} sessions={sessions}")
+            if wait_type.lower() == "lock" or "lock" in wait_event.lower():
+                dominant_pattern = "lock_contention"
+                likely_causes.append("存在数据库锁等待，事务争用可能是放大点。")
+
+        for row in slow_sql[:3]:
+            query = str(row.get("query") or row.get("sql_text") or "")[:180]
+            mean_exec_time = row.get("mean_exec_time") or row.get("duration_ms") or row.get("elapsed_ms")
+            if query:
+                evidence_points.append(f"slow sql: {query} time={mean_exec_time}")
+            if "update " in query.lower() or "for update" in query.lower():
+                likely_causes.append("慢 SQL 包含写操作，可能造成锁持有时间过长。")
+
+        for row in keyword_hits[:3]:
+            query = str(row.get("query") or row.get("sql_text") or "")[:180]
+            if query:
+                evidence_points.append(f"keyword hit: {query}")
+
+        if not likely_causes and slow_sql:
+            likely_causes.append("数据库存在明显慢 SQL，可能导致连接占用升高和上游超时。")
+        if not likely_causes and top_sql:
+            likely_causes.append("数据库访问压力升高，需结合高频 SQL 判断是否存在热点查询。")
+
+        return {
+            "dominant_pattern": dominant_pattern,
+            "target_tables": list(target_tables)[:12],
+            "likely_causes": list(dict.fromkeys(likely_causes))[:4],
+            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
+        }
+
+    def _build_domain_causal_summary(
+        self,
+        *,
+        mapping: Dict[str, Any],
+        endpoint: Dict[str, Any],
+        matches: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        matched = bool(mapping.get("matched"))
+        owner_team = str(mapping.get("owner_team") or "")[:120]
+        owner = str(mapping.get("owner") or "")[:120]
+        domain = str(mapping.get("domain") or "")[:120]
+        aggregate = str(mapping.get("aggregate") or "")[:120]
+        feature = str(mapping.get("feature") or "")[:120]
+        service = str(endpoint.get("service") or "")[:160]
+        database_tables = list(mapping.get("database_tables") or mapping.get("db_tables") or [])[:12]
+        dependency_services = list(mapping.get("dependency_services") or [])[:10]
+        monitor_items = list(mapping.get("monitor_items") or [])[:10]
+
+        evidence_points: List[str] = []
+        if matched:
+            evidence_points.append(
+                f"接口已命中责任田：{domain or '-'} / {aggregate or '-'} / {feature or '-'}"
+            )
+        if owner_team or owner:
+            evidence_points.append(f"责任团队：{owner_team or '-'}；责任人：{owner or '-'}")
+        if service:
+            evidence_points.append(f"接口归属服务：{service}")
+        if matches:
+            first = matches[0]
+            evidence_points.append(
+                f"责任田文档命中：{str(first.get('domain') or domain or '-')}/{str(first.get('aggregate') or aggregate or '-')}"
+            )
+
+        return {
+            "dominant_pattern": "owner_confirmed" if matched and owner_team else "mapping_gap",
+            "owner_team": owner_team,
+            "owner": owner,
+            "domain": domain,
+            "aggregate": aggregate,
+            "impact_scope": {
+                "service": service,
+                "database_tables": database_tables,
+                "dependency_services": dependency_services,
+                "monitor_items": monitor_items,
+            },
+            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
+        }
+
+    def _build_change_causal_summary(
+        self,
+        *,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+        changes: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        leads = self._extract_investigation_leads(compact_context, incident_context, assigned_command)
+        endpoint_texts = [
+            str(item or "").strip().lower()
+            for item in list(leads.get("api_endpoints") or [])
+            if str(item or "").strip()
+        ]
+        service_names = [
+            str(item or "").strip().lower()
+            for item in list(leads.get("service_names") or [])
+            if str(item or "").strip()
+        ]
+        artifact_names = [
+            str(Path(str(item or "")).stem or "").strip().lower()
+            for item in list(leads.get("code_artifacts") or [])
+            if str(item or "").strip()
+        ]
+        focus_text = " ".join(
+            filter(
+                None,
+                [
+                    str((assigned_command or {}).get("task") or "").strip(),
+                    str((assigned_command or {}).get("focus") or "").strip(),
+                    str(incident_context.get("description") or "").strip(),
+                ],
+            )
+        ).lower()
+
+        suspect_changes: List[Dict[str, Any]] = []
+        mechanism_links: List[str] = []
+        evidence_points: List[str] = []
+        dominant_pattern = "change_window_noise"
+
+        for change in changes[:12]:
+            commit = str(change.get("commit") or "")[:12]
+            subject = str(change.get("subject") or "").strip()
+            subject_lower = subject.lower()
+            score = 0
+
+            if any(service and service in subject_lower for service in service_names):
+                score += 2
+                mechanism_links.append("变更主题直接命中责任服务，需优先评估是否为发布回归。")
+            if any(endpoint and endpoint.split()[-1] in subject_lower for endpoint in endpoint_texts):
+                score += 2
+                mechanism_links.append("变更主题与问题接口路径相邻，可能影响路由或接口注册。")
+            if any(artifact and artifact in subject_lower for artifact in artifact_names):
+                score += 2
+                mechanism_links.append("变更主题提到责任田代码符号，可能直接触发实现回归。")
+            if any(token in subject_lower for token in ("route", "mapping", "controller", "retry", "timeout", "transaction", "pool")):
+                score += 1
+                mechanism_links.append("变更涉及路由/重试/事务/连接池等敏感机制，可能改变故障放大链。")
+            if focus_text and any(token in subject_lower for token in focus_text.split()):
+                score += 1
+
+            if subject:
+                evidence_points.append(f"{commit}: {subject[:160]}")
+            if score >= 2:
+                dominant_pattern = "recent_release_regression"
+                suspect_changes.append(
+                    {
+                        "commit": commit,
+                        "author": str(change.get("author") or "")[:80],
+                        "time": str(change.get("time") or "")[:64],
+                        "subject": subject[:200],
+                        "score": score,
+                    }
+                )
+
+        if dominant_pattern == "recent_release_regression":
+            mechanism_links.append("近期变更与服务/接口/关键机制同时命中，符合发布后回归的初步特征。")
+        elif changes:
+            mechanism_links.append("已获取变更窗口，但暂无强匹配项，需要与日志和代码证据交叉验证。")
+        else:
+            evidence_points.append("变更窗口为空，当前无法从代码提交侧建立直接因果。")
+
+        return {
+            "dominant_pattern": dominant_pattern,
+            "suspect_changes": suspect_changes[:4],
+            "mechanism_links": list(dict.fromkeys(mechanism_links))[:4],
+            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
+        }
+
+    def _build_runbook_action_summary(
+        self,
+        *,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+        items: List[Dict[str, Any]],
+        recommended_actions: List[Dict[str, Any]],
+        source: str,
+    ) -> Dict[str, Any]:
+        service_name = self._primary_service_name(compact_context, incident_context, assigned_command)
+        recommended_steps: List[str] = []
+        verification_steps: List[str] = []
+        evidence_points: List[str] = []
+        dominant_pattern = "knowledge_gap"
+
+        for item in items[:6]:
+            title = str(item.get("title") or "").strip()
+            entry_type = str(item.get("entry_type") or "").strip().lower()
+            summary = str(item.get("summary") or "").strip()
+            runbook_fields = item.get("runbook_fields") if isinstance(item.get("runbook_fields"), dict) else {}
+            steps = [str(value).strip() for value in list(runbook_fields.get("steps") or []) if str(value).strip()]
+            verify = [
+                str(value).strip()
+                for value in list(runbook_fields.get("verification_steps") or [])
+                if str(value).strip()
+            ]
+            if title:
+                evidence_points.append(f"{entry_type or 'knowledge'}: {title[:160]}")
+            if summary:
+                evidence_points.append(summary[:180])
+            if entry_type == "runbook" and steps:
+                dominant_pattern = "matched_runbook"
+                recommended_steps.extend(steps[:3])
+                verification_steps.extend(verify[:3])
+
+        if dominant_pattern == "knowledge_gap" and recommended_actions:
+            for action in recommended_actions[:3]:
+                recommended_steps.extend(
+                    [str(value).strip() for value in list(action.get("steps") or []) if str(value).strip()][:2]
+                )
+                verification_steps.extend(
+                    [
+                        str(value).strip()
+                        for value in list(action.get("verification_steps") or [])
+                        if str(value).strip()
+                    ][:2]
+                )
+            if recommended_steps:
+                dominant_pattern = "matched_runbook"
+
+        if dominant_pattern == "matched_runbook":
+            evidence_points.append(
+                f"已命中 {source or 'knowledge'} 中与 {service_name or '当前服务'} 相关的处置知识，可用于止血与验证。"
+            )
+        else:
+            evidence_points.append("当前未命中可直接执行的 Runbook，需要结合专家结论补充处置步骤。")
+
+        return {
+            "dominant_pattern": dominant_pattern,
+            "service_name": service_name,
+            "recommended_steps": list(dict.fromkeys(recommended_steps))[:5],
+            "verification_steps": list(dict.fromkeys(verification_steps))[:4],
+            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
+        }
 
 
 agent_tool_context_service = AgentToolContextService()

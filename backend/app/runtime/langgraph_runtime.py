@@ -111,7 +111,7 @@ class LangGraphRuntimeOrchestrator:
     - RoutingService / StateTransitionService
     """
 
-    MAX_HISTORY_ITEMS = 2
+    MAX_HISTORY_ITEMS = 4
     PARALLEL_ANALYSIS_AGENTS = (
         "LogAgent",
         "DomainAgent",
@@ -810,7 +810,7 @@ class LangGraphRuntimeOrchestrator:
         context_summary = state.get("context_summary") or {}
         compact_context = self._session_compaction.compact_context(
             self._compact_round_context(context_summary),
-            max_len=1400,
+            max_len=3200,
         )
         phase_meta = self._phase_manager.summarize(
             current_round=current_round,
@@ -1098,7 +1098,7 @@ class LangGraphRuntimeOrchestrator:
         existing_agent_outputs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> str:
         """组装 ProblemAnalysisAgent 的 commander Prompt。"""
-        return self._prompt_builder.build_commander_prompt(
+        prompt = self._prompt_builder.build_commander_prompt(
             loop_round=loop_round,
             context=context,
             history_cards=history_cards,
@@ -1106,6 +1106,10 @@ class LangGraphRuntimeOrchestrator:
             dialogue_items=dialogue_items,
             existing_agent_outputs=existing_agent_outputs,
         )
+        if loop_round == 1 and self._execution_mode_name in {"quick", "background", "async"}:
+            max_chars = 1700 if self._execution_mode_name == "quick" else 2200
+            return self._compact_prompt_for_retry(prompt, max_chars=max_chars)
+        return prompt
 
     def _build_problem_analysis_supervisor_prompt(
         self,
@@ -2629,7 +2633,7 @@ class LangGraphRuntimeOrchestrator:
             first = exceptions[0] if isinstance(exceptions[0], dict) else {}
             compact_parsed["exception_summary"] = {
                 "type": str(first.get("type") or ""),
-                "message": str(first.get("message") or "")[:180],
+                "message": str(first.get("message") or "")[:320],
             }
         if "urls" in parsed_data and parsed_data.get("urls"):
             compact_parsed["urls"] = self._compact_value(parsed_data.get("urls"))
@@ -2645,17 +2649,17 @@ class LangGraphRuntimeOrchestrator:
         if not isinstance(investigation_leads, dict):
             investigation_leads = {}
         compact_leads = {
-            "api_endpoints": self._normalize_text_items(investigation_leads.get("api_endpoints"), limit=12, width=180),
-            "service_names": self._normalize_text_items(investigation_leads.get("service_names"), limit=12, width=120),
-            "code_artifacts": self._normalize_text_items(investigation_leads.get("code_artifacts"), limit=16, width=180),
-            "class_names": self._normalize_text_items(investigation_leads.get("class_names"), limit=16, width=120),
+            "api_endpoints": self._normalize_text_items(investigation_leads.get("api_endpoints"), limit=20, width=220),
+            "service_names": self._normalize_text_items(investigation_leads.get("service_names"), limit=20, width=160),
+            "code_artifacts": self._normalize_text_items(investigation_leads.get("code_artifacts"), limit=24, width=240),
+            "class_names": self._normalize_text_items(investigation_leads.get("class_names"), limit=24, width=180),
             "database_tables": self._normalize_database_tables(
                 investigation_leads.get("database_tables") or interface_mapping.get("database_tables") or []
             ),
-            "monitor_items": self._normalize_text_items(investigation_leads.get("monitor_items"), limit=16, width=160),
-            "dependency_services": self._normalize_text_items(investigation_leads.get("dependency_services"), limit=16, width=120),
-            "trace_ids": self._normalize_text_items(investigation_leads.get("trace_ids"), limit=8, width=120),
-            "error_keywords": self._normalize_text_items(investigation_leads.get("error_keywords"), limit=12, width=120),
+            "monitor_items": self._normalize_text_items(investigation_leads.get("monitor_items"), limit=20, width=180),
+            "dependency_services": self._normalize_text_items(investigation_leads.get("dependency_services"), limit=20, width=160),
+            "trace_ids": self._normalize_text_items(investigation_leads.get("trace_ids"), limit=12, width=160),
+            "error_keywords": self._normalize_text_items(investigation_leads.get("error_keywords"), limit=20, width=160),
             "domain": str(investigation_leads.get("domain") or interface_mapping.get("domain") or "").strip(),
             "aggregate": str(investigation_leads.get("aggregate") or interface_mapping.get("aggregate") or "").strip(),
             "owner_team": str(investigation_leads.get("owner_team") or interface_mapping.get("owner_team") or "").strip(),
@@ -2664,15 +2668,15 @@ class LangGraphRuntimeOrchestrator:
 
         return {
             "incident_summary": {
-                "title": str(incident_summary.get("title") or "")[:160],
-                "description": str(incident_summary.get("description") or "")[:280],
+                "title": str(incident_summary.get("title") or "")[:220],
+                "description": str(incident_summary.get("description") or "")[:900],
                 "severity": str(incident_summary.get("severity") or "")[:40],
-                "service_name": str(incident_summary.get("service_name") or "")[:120],
+                "service_name": str(incident_summary.get("service_name") or "")[:180],
             },
-            "log_excerpt": str(context.get("log_excerpt") or "")[:240],
+            "log_excerpt": str(context.get("log_excerpt") or "")[:2200],
             "parsed_data": compact_parsed,
             "execution_mode": str(context.get("execution_mode") or "")[:40],
-            "available_analysis_agents": list(context.get("available_analysis_agents") or [])[:10],
+            "available_analysis_agents": list(context.get("available_analysis_agents") or [])[:16],
             "interface_mapping": {
                 "matched": bool(interface_mapping.get("matched")),
                 "confidence": interface_mapping.get("confidence"),
@@ -2686,10 +2690,10 @@ class LangGraphRuntimeOrchestrator:
                     "service": matched_endpoint.get("service"),
                     "interface": matched_endpoint.get("interface"),
                 },
-                "database_tables": interface_mapping.get("database_tables") or [],
-                "code_artifacts": (interface_mapping.get("code_artifacts") or [])[:3],
-                "dependency_services": self._normalize_text_items(interface_mapping.get("dependency_services"), limit=16, width=120),
-                "monitor_items": self._normalize_text_items(interface_mapping.get("monitor_items"), limit=16, width=160),
+                "database_tables": self._normalize_database_tables(interface_mapping.get("database_tables") or interface_mapping.get("db_tables") or []),
+                "code_artifacts": self._normalize_text_items(interface_mapping.get("code_artifacts"), limit=12, width=240),
+                "dependency_services": self._normalize_text_items(interface_mapping.get("dependency_services"), limit=20, width=160),
+                "monitor_items": self._normalize_text_items(interface_mapping.get("monitor_items"), limit=20, width=180),
             },
             "investigation_leads": compact_leads,
             "asset_counts": {
@@ -2744,6 +2748,15 @@ class LangGraphRuntimeOrchestrator:
         detailed_tool_data = self._tool_event_value(tool_context.get("data") or {})
         command_gate = self._tool_event_value(tool_context.get("command_gate") or {})
         audit_log = self._tool_event_value(tool_context.get("audit_log") or [])
+        focused_context = agent_tool_context_service.build_focused_context(
+            agent_name=agent_name,
+            compact_context=compact_context,
+            incident_context=self._input_context,
+            tool_context=tool_context,
+            assigned_command=assigned_command,
+        )
+        focused_preview = self._compact_value(focused_context)
+        focused_detail = self._tool_event_value(focused_context)
         await self._emit_event(
             {
                 "type": "agent_tool_context_prepared",
@@ -2758,6 +2771,8 @@ class LangGraphRuntimeOrchestrator:
                 "summary": str(tool_context.get("summary") or "")[:260],
                 "data_preview": compact_tool_data,
                 "data_detail": detailed_tool_data,
+                "focused_preview": focused_preview,
+                "focused_detail": focused_detail,
                 "command_gate": command_gate,
                 "audit_log": audit_log,
                 "execution_path": str(tool_context.get("execution_path") or ""),
@@ -2776,6 +2791,7 @@ class LangGraphRuntimeOrchestrator:
             status=str(tool_context.get("status") or ""),
             summary=str(tool_context.get("summary") or "")[:260],
             data_preview=compact_tool_data,
+            focused_preview=focused_preview,
             command_gate=command_gate,
             audit_log=audit_log,
             execution_path=str(tool_context.get("execution_path") or ""),
@@ -2815,6 +2831,7 @@ class LangGraphRuntimeOrchestrator:
 
         return {
             **compact_context,
+            "focused_context": focused_detail,
             "tool_context": {
                 "name": tool_context.get("name"),
                 "enabled": bool(tool_context.get("enabled")),
@@ -2910,17 +2927,19 @@ class LangGraphRuntimeOrchestrator:
         """按 Agent 角色返回本轮允许使用的最大 token 预算。"""
         if agent_name == "JudgeAgent":
             configured = int(settings.DEBATE_JUDGE_MAX_TOKENS)
-            return max(800, min(configured, 1400))
+            return max(900, min(configured, 1600))
         if agent_name in {"CriticAgent", "RebuttalAgent"}:
             configured = int(settings.DEBATE_REVIEW_MAX_TOKENS)
-            return max(480, min(configured, 900))
+            return max(560, min(configured, 1100))
         if agent_name == "ProblemAnalysisAgent":
             configured = int(settings.DEBATE_ANALYSIS_MAX_TOKENS)
             if self._deployment_profile_name in {"investigation_full", "production_governed"} and not self.turns:
                 return max(280, min(configured, 360))
-            return max(520, min(configured, 900))
+            if not self._require_verification_plan and not self.turns:
+                return max(360, min(configured, 480))
+            return max(620, min(configured, 1100))
         configured = int(settings.DEBATE_ANALYSIS_MAX_TOKENS)
-        return max(420, min(configured, 800))
+        return max(560, min(configured, 1100))
 
     def _agent_timeout_plan(self, agent_name: str) -> List[float]:
         """按 Agent 角色生成 HTTP 超时与重试超时计划。"""
@@ -2934,7 +2953,7 @@ class LangGraphRuntimeOrchestrator:
             return [first_timeout, retry_timeout]
         if agent_name == "ProblemAnalysisAgent":
             if not self._require_verification_plan:
-                return [float(max(20, int(settings.llm_analysis_timeout)))]
+                return [float(max(45, int(settings.llm_analysis_timeout)))]
             first_timeout = float(max(12, int(settings.llm_analysis_timeout)))
             retry_timeout = float(max(first_timeout, min(int(settings.llm_analysis_timeout) + 10, 60)))
             return [first_timeout, retry_timeout]

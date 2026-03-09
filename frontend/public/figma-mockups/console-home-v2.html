@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Console Home v2</title>
+    <link rel="stylesheet" href="/figma-mockups/mockups.css" />
+    <script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script>
+  </head>
+  <body>
+    <div class="lux-shell">
+      <header class="lux-topbar">
+        <div class="lux-brand">
+          <div class="lux-logo">RC</div>
+          <div>
+            <h1>SRE Root Cause Console</h1>
+            <p>High-trust operations cockpit for production incident analysis</p>
+          </div>
+        </div>
+        <div class="lux-statusbar">
+          <div class="lux-chip">LLM / Tools / Audit healthy</div>
+          <div class="lux-chip">Asia/Shanghai · 2026-03-08 23:10</div>
+        </div>
+      </header>
+
+      <div class="lux-workspace">
+        <aside class="lux-sidebar">
+          <div class="lux-nav-title">Main navigation</div>
+          <div class="lux-nav">
+            <div class="lux-nav-item active">首页总控台</div>
+            <div class="lux-nav-item">故障分析</div>
+            <div class="lux-nav-item">历史会话</div>
+            <div class="lux-nav-item">责任田资产</div>
+            <div class="lux-nav-item">设置</div>
+            <div class="lux-nav-item">高级能力</div>
+          </div>
+          <div class="lux-sidecard">
+            <h3>当班态势</h3>
+            <p>值班首页只回答三件事：现在发生了什么、哪几件最急、我要从哪里开始。去掉宣传式 hero，增强调度感和可信度。</p>
+          </div>
+          <div class="lux-sidecard">
+            <h4>接入状态</h4>
+            <p>Git、日志、责任田、PostgreSQL 已接入。Grafana、APM、告警平台保留入口，待真实环境启用。</p>
+          </div>
+        </aside>
+
+        <main class="lux-main">
+          <section class="lux-pagehead">
+            <div>
+              <h2>生产问题分析总台</h2>
+              <p>这版不再像常见后台模板。深色结构层负责节奏，浅色工作面负责操作，整个首页更像一个“值班指挥中台”而不是普通运营页。</p>
+            </div>
+            <div class="lux-actions">
+              <button class="lux-btn">导入责任田</button>
+              <button class="lux-btn primary">创建并启动分析</button>
+            </div>
+          </section>
+
+          <section class="lux-strip">
+            <div class="lux-stat"><div class="k">Today sessions</div><div class="v"><strong>28</strong><span>+6 vs yesterday</span></div></div>
+            <div class="lux-stat"><div class="k">Active now</div><div class="v"><strong>7</strong><span>2 waiting review</span></div></div>
+            <div class="lux-stat"><div class="k">Closure rate</div><div class="v"><strong>83%</strong><span>Top1 hit 71%</span></div></div>
+            <div class="lux-stat"><div class="k">Mean time to locate</div><div class="v"><strong>11m</strong><span>-18% WoW</span></div></div>
+          </section>
+
+          <section class="lux-grid-home">
+            <div class="lux-panel light">
+              <h3 class="lux-title">快速创建分析</h3>
+              <div class="lux-subtitle">把首页做成真正的启动台，减少跳转成本，同时保留强秩序感。</div>
+              <div class="lux-form" style="margin-top:16px;">
+                <div class="lux-form-grid">
+                  <div>
+                    <label>故障标题</label>
+                    <div class="lux-input">/orders 接口 502，CPU 飙升且 DB 连接打满</div>
+                  </div>
+                  <div>
+                    <label>服务名称</label>
+                    <div class="lux-input">order-service</div>
+                  </div>
+                </div>
+                <div class="lux-form-grid">
+                  <div>
+                    <label>环境</label>
+                    <div class="lux-input">production</div>
+                  </div>
+                  <div>
+                    <label>严重级别</label>
+                    <div class="lux-inline-row">
+                      <div class="lux-pill">P3</div>
+                      <div class="lux-pill">P2</div>
+                      <div class="lux-pill active">P1</div>
+                      <div class="lux-pill">P0</div>
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <label>故障日志 / 现象摘要</label>
+                  <div class="lux-textarea">Gateway 502 / costMs 30211
+OrderAppService CannotCreateTransactionException
+HikariPool request timed out after 30000ms
+MySQL lock wait timeout on t_order_item</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="lux-stack">
+              <div class="lux-panel">
+                <h3 class="lux-title">运行摘要</h3>
+                <div class="lux-subtitle">更像高端 B 端主控面板，而不是普通状态卡片。</div>
+                <div class="lux-statuslist" style="margin-top:16px;">
+                  <div class="lux-statusitem"><div><div class="lux-row-title">Current critical queue</div><div class="lux-muted">orders / payment / inventory 三个热点在 30 分钟内有明显波动</div></div><span class="lux-badge amber">attention</span></div>
+                  <div class="lux-statusitem"><div><div class="lux-row-title">Automatic investigation</div><div class="lux-muted">2 alerts auto-created sessions, no pending deadlock</div></div><span class="lux-badge green">stable</span></div>
+                  <div class="lux-statusitem"><div><div class="lux-row-title">Tooling health</div><div class="lux-muted">7 connectors healthy / 1 repo cache retrying</div></div><span class="lux-badge blue">watch</span></div>
+                </div>
+              </div>
+
+              <div class="lux-panel">
+                <h3 class="lux-title">值班重点</h3>
+                <div class="lux-subtitle">把“最近风险”做成更像 executive brief 的模块。</div>
+                <table class="lux-table" style="margin-top:10px;">
+                  <thead><tr><th>Incident</th><th>Status</th><th>Current read</th></tr></thead>
+                  <tbody>
+                    <tr><td><strong>inc_958527ac</strong></td><td><span class="lux-badge red">review</span></td><td>DB 锁竞争已坐实，等待业务侧确认修复窗口</td></tr>
+                    <tr><td><strong>inc_850be312</strong></td><td><span class="lux-badge amber">debating</span></td><td>404 根因在路由注册和发布集群间二选一</td></tr>
+                    <tr><td><strong>inc_41043833</strong></td><td><span class="lux-badge green">closed</span></td><td>上游支付超时与本地重试放大已闭环</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <section class="lux-dual">
+            <div class="lux-panel">
+              <h3 class="lux-title">进行中的事件</h3>
+              <div class="lux-subtitle">大容器承载主列表，不再由大量碎卡片切割注意力。</div>
+              <table class="lux-table" style="margin-top:12px;">
+                <thead><tr><th>Event</th><th>Stage</th><th>Current conclusion</th><th>Updated</th></tr></thead>
+                <tbody>
+                  <tr><td><strong>inc_958527ac</strong><br><span class="lux-muted">orders 502 / cpu high / db lock</span></td><td><span class="lux-badge amber">judge</span></td><td>事务边界过宽 + 锁竞争</td><td>23:09</td></tr>
+                  <tr><td><strong>inc_850be312</strong><br><span class="lux-muted">orders 404 route miss</span></td><td><span class="lux-badge blue">analysis</span></td><td>主 Agent 正要求 Code / Domain 对齐</td><td>23:03</td></tr>
+                  <tr><td><strong>inc_7714fd29</strong><br><span class="lux-muted">inventory lag spike</span></td><td><span class="lux-badge green">report</span></td><td>队列积压 + 补偿消费延迟</td><td>22:54</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="lux-stack">
+              <div class="lux-panel">
+                <h3 class="lux-title">Agent capability grid</h3>
+                <div class="lux-subtitle">从“角色介绍”升级为平台能力矩阵。</div>
+                <div class="lux-form-grid" style="margin-top:12px;">
+                  <div class="lux-sidecard" style="margin-top:0;"><h4>Main Agent</h4><p>调度、命令、收敛、报告生成</p></div>
+                  <div class="lux-sidecard" style="margin-top:0;"><h4>Log Agent</h4><p>日志链路、异常时间线、放大关系</p></div>
+                  <div class="lux-sidecard" style="margin-top:0;"><h4>Code Agent</h4><p>代码热区、变更窗口、实现路径</p></div>
+                  <div class="lux-sidecard" style="margin-top:0;"><h4>Domain Agent</h4><p>责任田、聚合根、API 归属</p></div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

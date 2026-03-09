@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Governance Mock</title><link rel="stylesheet" href="/figma-mockups/mockups.css" /><script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script></head>
+  <body>
+    <div class="shell">
+      <header class="topbar"><div class="topbar-brand"><div class="logo">RC</div><div class="brand-copy"><h1>Governance Center</h1><p>Reliability / remediation / review / cost</p></div></div><div class="topbar-status"><div class="status-chip">governance active</div><div>2026-03-08 23:01 CST</div></div></header>
+      <div class="workspace">
+        <aside class="sidebar"><div class="sidebar-section"><div class="sidebar-label">Advanced</div><div class="nav-list"><div class="nav-item">调查复盘台</div><div class="nav-item active">运行治理</div><div class="nav-item">质量评估</div><div class="nav-item">工具中心</div></div></div><div class="sidebar-section sidebar-card"><h3>页面原则</h3><p>治理页先看可信度和风险动作，再处理审批、回滚和策略切换。</p></div></aside>
+        <main class="main">
+          <section class="page-header"><div><h2>运行治理中心</h2><p>把 system card、质量趋势、修复状态机、人工审核和成本视为一个统一治理面，而不是零散功能入口。</p></div><div class="header-actions"><button class="btn">切换运行策略</button><button class="btn primary">创建修复提案</button></div></section>
+          <section class="grid-4"><div class="metric-card"><div class="label">当前可信度</div><div class="metric-value"><strong>74%</strong><span>watch</span></div></div><div class="metric-card"><div class="label">待审批动作</div><div class="metric-value"><strong>1</strong><span>high risk</span></div></div><div class="metric-card"><div class="label">Timeout rate</div><div class="metric-value"><strong>9%</strong><span>7d window</span></div></div><div class="metric-card"><div class="label">单位成本</div><div class="metric-value"><strong>0.024</strong><span>CNY / case</span></div></div></section>
+          <section class="three-col">
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">System Card</h3><div class="panel-subtitle">能力边界、风险与禁用场景常态化展示。</div></div></div><p class="muted">当前系统适用于生产问题分析，不适合直接自动执行高风险修复动作，必须有人审核。</p></div>
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">修复状态机</h3><div class="panel-subtitle">PROPOSED → SIMULATED → APPROVED → EXECUTED → VERIFIED</div></div><span class="badge amber">1 waiting</span></div><div class="kv-list"><div class="kv-item"><h5>action_221</h5><p>订单服务事务缩边界，等待 sre-oncall 审核。</p></div></div></div>
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">人工审核</h3><div class="panel-subtitle">高风险动作默认不能自动放行。</div></div></div><div class="kv-list"><div class="kv-item"><h5>当前策略</h5><p>high risk requires approval · operator: sre-oncall</p></div></div></div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

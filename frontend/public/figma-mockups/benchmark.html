@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Benchmark Mock</title><link rel="stylesheet" href="/figma-mockups/mockups.css" /><script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script></head>
+  <body>
+    <div class="shell">
+      <header class="topbar"><div class="topbar-brand"><div class="logo">RC</div><div class="brand-copy"><h1>Benchmark Center</h1><p>Quality baseline and regression gate</p></div></div><div class="topbar-status"><div class="status-chip">baseline ready</div><div>2026-03-08 23:00 CST</div></div></header>
+      <div class="workspace">
+        <aside class="sidebar"><div class="sidebar-section"><div class="sidebar-label">Advanced</div><div class="nav-list"><div class="nav-item">调查复盘台</div><div class="nav-item">运行治理</div><div class="nav-item active">质量评估</div><div class="nav-item">工具中心</div></div></div><div class="sidebar-section sidebar-card"><h3>页面原则</h3><p>评测页先告诉用户现在质量是健康还是风险，再决定要不要跑 benchmark。</p></div></aside>
+        <main class="main">
+          <section class="page-header"><div><h2>质量评估中心</h2><p>不是单纯展示数字，而是先给出“当前判断”和“是否建议阻断回归”。</p></div><div class="header-actions"><button class="btn">查看最近基线</button><button class="btn primary">运行 Benchmark</button></div></section>
+          <section class="grid-4"><div class="metric-card"><div class="label">Top1 命中率</div><div class="metric-value"><strong>74%</strong><span>watch</span></div></div><div class="metric-card"><div class="label">平均重叠分</div><div class="metric-value"><strong>0.66</strong><span>healthy</span></div></div><div class="metric-card"><div class="label">超时率</div><div class="metric-value"><strong>9%</strong><span>watch</span></div></div><div class="metric-card"><div class="label">空结论率</div><div class="metric-value"><strong>3%</strong><span>healthy</span></div></div></section>
+          <section class="split-main">
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">当前判断</h3><div class="panel-subtitle">把指标翻译成人能判断的语言。</div></div><span class="badge amber">watch</span></div><div class="kv-list"><div class="kv-item"><h5>结论</h5><p>质量总体可用，但超时率抬头，建议先看慢链路和工具调用。</p></div><div class="kv-item"><h5>Gate 建议</h5><p>暂不阻断发布，但需要继续观察下一轮基线。</p></div></div></div>
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">最近基线趋势</h3><div class="panel-subtitle">可视化为 4 次基线条带。</div></div></div><div class="three-col"><div class="mini-panel"><h4>03-05</h4><p>Top1 0.71<br>timeout 0.12</p></div><div class="mini-panel"><h4>03-06</h4><p>Top1 0.73<br>timeout 0.11</p></div><div class="mini-panel"><h4>03-08</h4><p>Top1 0.74<br>timeout 0.09</p></div></div></div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

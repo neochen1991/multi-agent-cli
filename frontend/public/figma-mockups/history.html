@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>History Mock</title>
+    <link rel="stylesheet" href="/figma-mockups/mockups.css" />
+    <script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar"><div class="topbar-brand"><div class="logo">RC</div><div class="brand-copy"><h1>Session History</h1><p>Searchable incident ledger</p></div></div><div class="topbar-status"><div class="status-chip">history synced</div><div>2026-03-08 22:55 CST</div></div></header>
+      <div class="workspace">
+        <aside class="sidebar">
+          <div class="sidebar-section"><div class="sidebar-label">Navigation</div><div class="nav-list"><div class="nav-item">首页总控台</div><div class="nav-item">故障分析</div><div class="nav-item active">历史会话</div><div class="nav-item">责任田资产</div><div class="nav-item">设置</div><div class="nav-item">高级能力</div></div></div>
+          <div class="sidebar-section sidebar-card"><h3>页面原则</h3><p>历史页不再像普通表格页，而是“可筛、可扫、可恢复”的会话账本。</p></div>
+        </aside>
+        <main class="main">
+          <section class="page-header"><div><h2>历史会话账本</h2><p>顶部固定筛选，表格独立滚动。用户先扫状态和根因摘要，再决定进入详情。</p></div><div class="header-actions"><button class="btn">导出清单</button><button class="btn primary">查看待处理</button></div></section>
+          <section class="grid-4">
+            <div class="metric-card"><div class="label">总事件数</div><div class="metric-value"><strong>184</strong><span>近 30 天</span></div></div>
+            <div class="metric-card"><div class="label">进行中</div><div class="metric-value"><strong>7</strong><span>2 个等待审核</span></div></div>
+            <div class="metric-card"><div class="label">已闭环</div><div class="metric-value"><strong>151</strong><span>闭环率 82%</span></div></div>
+            <div class="metric-card"><div class="label">失败 / 取消</div><div class="metric-value"><strong>26</strong><span>需关注回归</span></div></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><div><h3 class="panel-title">筛选器</h3><div class="panel-subtitle">把检索栏固定在页面上方，不让整页跟着滚动。</div></div></div>
+            <div class="toolbar"><div class="input">状态：running / waiting_review / resolved</div><div class="input">严重级别：P1 / P2</div><div class="input">关键词：orders / timeout / db lock</div><div class="input">时间范围：最近 7 天</div></div>
+          </section>
+          <section class="split-main">
+            <div class="panel">
+              <div class="panel-head"><div><h3 class="panel-title">会话列表</h3><div class="panel-subtitle">默认突出状态、根因摘要和最后更新时间。</div></div><span class="badge brand">sticky filters</span></div>
+              <table class="table"><thead><tr><th>事件</th><th>状态</th><th>根因摘要</th><th>最后更新时间</th></tr></thead><tbody>
+                <tr><td><span class="row-title">inc_958527ac</span><br><span class="muted">/orders 502 / CPU high</span></td><td><span class="badge amber">waiting_review</span></td><td>事务边界过宽 + DB 锁竞争，需人工复核</td><td>22:52</td></tr>
+                <tr><td><span class="row-title">inc_850be312</span><br><span class="muted">/orders 404 route miss</span></td><td><span class="badge teal">closed</span></td><td>网关路由未注册到生产集群</td><td>22:08</td></tr>
+                <tr><td><span class="row-title">inc_41043833</span><br><span class="muted">payment upstream timeout</span></td><td><span class="badge teal">resolved</span></td><td>上游支付服务延迟 + 本地重试放大</td><td>21:44</td></tr>
+                <tr><td><span class="row-title">inc_6114ba90</span><br><span class="muted">inventory sync lag</span></td><td><span class="badge red">failed</span></td><td>证据不足，未形成有效结论</td><td>20:11</td></tr>
+              </tbody></table>
+            </div>
+            <div class="stack">
+              <div class="panel"><div class="panel-head"><div><h3 class="panel-title">详情预览</h3><div class="panel-subtitle">点击记录不新开心智模型，直接进入详情态。</div></div></div><div class="kv-list"><div class="kv-item"><h5>当前选中</h5><p>inc_958527ac · deb_958527ac · waiting_review</p></div><div class="kv-item"><h5>最终结论</h5><p>Top1：事务边界过宽 + DB 锁竞争。Confidence 0.81。</p></div><div class="kv-item"><h5>可执行动作</h5><p>进入详情 / 查看报告版本 / 恢复调查 / 审核放行</p></div></div></div>
+              <div class="panel"><div class="panel-head"><div><h3 class="panel-title">状态图例</h3><div class="panel-subtitle">状态统一，不再让用户猜测 phase 与 status 的区别。</div></div></div><div class="tag-row"><span class="badge brand">running</span><span class="badge amber">waiting_review</span><span class="badge teal">resolved</span><span class="badge red">failed</span></div></div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

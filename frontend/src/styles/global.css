@@ -193,7 +193,7 @@ body {
 }
 
 .history-page-fixed {
-  height: calc(100vh - 170px);
+  height: calc(100vh - 156px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -232,6 +232,45 @@ body {
 
 .history-table-card .ant-table-body {
   overflow-y: auto !important;
+}
+
+.history-table-card .ant-table-thead > tr > th,
+.history-table-card .ant-table-tbody > tr > td {
+  padding: 9px 10px !important;
+  vertical-align: top;
+}
+
+.history-table-card .ant-table-cell {
+  line-height: 1.35;
+}
+
+.history-id-text,
+.history-title-text {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-id-text {
+  font-family: 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
+  font-size: 12px;
+}
+
+.history-table-card .ant-tag {
+  margin-inline-end: 4px;
+  margin-bottom: 4px;
+}
+
+.history-table-card .ant-space {
+  gap: 4px !important;
+}
+
+.history-table-card .ant-btn.ant-btn-link {
+  height: auto;
+  padding-inline: 0;
+  font-size: 12px;
 }
 
 .module-card {
@@ -612,15 +651,20 @@ body {
   color: var(--text-muted) !important;
 }
 
-.incident-section-nav-shell {
+.incident-page {
   position: relative;
+}
+
+.incident-section-nav-shell {
+  position: sticky;
+  top: 76px;
+  z-index: 40;
   margin-bottom: 18px;
 }
 
 .incident-section-nav {
-  position: fixed;
-  top: 76px;
-  z-index: 90;
+  position: static;
+  width: 100%;
   padding: 12px 14px 10px;
   border: 1px solid #dde6f5;
   border-radius: 16px;
@@ -667,13 +711,35 @@ body {
 .history-quality-cell {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 3px;
+  min-width: 0;
+}
+
+.history-quality-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 .history-evidence-coverage {
   display: flex;
   flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.history-evidence-coverage .ant-typography {
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.history-action-links {
+  display: flex;
+  align-items: center;
   gap: 4px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 .history-evidence-coverage-bar {
@@ -1327,8 +1393,10 @@ body {
 }
 
 .process-timeline-wrap {
-  max-height: 560px;
+  max-height: min(62vh, 560px);
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   border: 1px solid #e6edf7;
   border-radius: 10px;
   background: #f9fbff;
@@ -1380,8 +1448,10 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 680px;
+  max-height: min(68vh, 680px);
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .discord-thread {
@@ -1724,7 +1794,8 @@ body {
 }
 
 .agent-network-scroll.is-scrollable {
-  max-height: 680px;
+  max-height: min(68vh, 680px);
+  overscroll-behavior: contain;
 }
 
 .agent-network-svg {
@@ -1955,7 +2026,9 @@ body {
   }
 
   .history-page-fixed {
-    height: calc(100vh - 158px);
+    height: auto;
+    min-height: calc(100vh - 158px);
+    overflow: visible;
   }
 
   .app-footer {

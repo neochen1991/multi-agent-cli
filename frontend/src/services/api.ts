@@ -238,6 +238,50 @@ export interface ResponsibilityAssetUploadResult {
   preview: ResponsibilityAssetRecord[];
 }
 
+export type KnowledgeEntryType = 'case' | 'runbook' | 'postmortem_template';
+
+export interface KnowledgeCaseFields {
+  incident_type: string;
+  symptoms: string[];
+  root_cause: string;
+  solution: string;
+  fix_steps: string[];
+}
+
+export interface KnowledgeRunbookFields {
+  applicable_scenarios: string[];
+  prechecks: string[];
+  steps: string[];
+  rollback_plan: string[];
+  verification_steps: string[];
+}
+
+export interface KnowledgePostmortemFields {
+  impact_scope_template: string[];
+  timeline_template: string[];
+  five_whys_template: string[];
+  action_items_template: string[];
+}
+
+export interface KnowledgeEntry {
+  id: string;
+  entry_type: KnowledgeEntryType;
+  title: string;
+  summary: string;
+  content: string;
+  tags: string[];
+  service_names: string[];
+  domain: string;
+  aggregate: string;
+  author: string;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
+  case_fields?: KnowledgeCaseFields | null;
+  runbook_fields?: KnowledgeRunbookFields | null;
+  postmortem_fields?: KnowledgePostmortemFields | null;
+}
+
 export interface CodeRepoToolConfig {
   enabled: boolean;
   repo_url: string;
@@ -771,6 +815,44 @@ export const settingsApi = {
   },
   async trialRunTool(payload: ToolTrialRunRequest): Promise<ToolTrialRunResponse> {
     const { data } = await api.post<ToolTrialRunResponse>('/settings/tooling/trial-run', payload);
+    return data;
+  },
+};
+
+export const knowledgeApi = {
+  async list(params?: {
+    entry_type?: KnowledgeEntryType;
+    q?: string;
+    tag?: string;
+  }): Promise<{ items: KnowledgeEntry[]; total: number }> {
+    const { data } = await api.get<{ items: KnowledgeEntry[]; total: number }>('/knowledge/entries', { params });
+    return data;
+  },
+  async get(entryId: string): Promise<KnowledgeEntry> {
+    const { data } = await api.get<KnowledgeEntry>(`/knowledge/entries/${encodeURIComponent(entryId)}`);
+    return data;
+  },
+  async create(payload: Omit<KnowledgeEntry, 'id' | 'created_at' | 'updated_at'>): Promise<KnowledgeEntry> {
+    const { data } = await api.post<KnowledgeEntry>('/knowledge/entries', payload);
+    return data;
+  },
+  async update(
+    entryId: string,
+    payload: Omit<KnowledgeEntry, 'id' | 'created_at' | 'updated_at'>,
+  ): Promise<KnowledgeEntry> {
+    const { data } = await api.put<KnowledgeEntry>(`/knowledge/entries/${encodeURIComponent(entryId)}`, payload);
+    return data;
+  },
+  async delete(entryId: string): Promise<{ deleted: boolean; entry_id: string }> {
+    const { data } = await api.delete<{ deleted: boolean; entry_id: string }>(
+      `/knowledge/entries/${encodeURIComponent(entryId)}`,
+    );
+    return data;
+  },
+  async stats(): Promise<{ total: number; case: number; runbook: number; postmortem_template: number }> {
+    const { data } = await api.get<{ total: number; case: number; runbook: number; postmortem_template: number }>(
+      '/knowledge/stats',
+    );
     return data;
   },
 };

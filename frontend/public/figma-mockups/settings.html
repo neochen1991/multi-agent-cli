@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Settings Mock</title><link rel="stylesheet" href="/figma-mockups/mockups.css" /><script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script></head>
+  <body>
+    <div class="shell">
+      <header class="topbar"><div class="topbar-brand"><div class="logo">RC</div><div class="brand-copy"><h1>Settings & Runtime</h1><p>Model / tool / source / governance controls</p></div></div><div class="topbar-status"><div class="status-chip">runtime configurable</div><div>2026-03-08 22:57 CST</div></div></header>
+      <div class="workspace">
+        <aside class="sidebar"><div class="sidebar-section"><div class="sidebar-label">Navigation</div><div class="nav-list"><div class="nav-item">首页总控台</div><div class="nav-item">故障分析</div><div class="nav-item">历史会话</div><div class="nav-item">责任田资产</div><div class="nav-item active">设置</div><div class="nav-item">高级能力</div></div></div><div class="sidebar-section sidebar-card"><h3>页面原则</h3><p>设置页改成分组折叠控制台，先看分组摘要，再展开局部配置。</p></div></aside>
+        <main class="main">
+          <section class="page-header"><div><h2>系统设置与运行时控制</h2><p>把现在杂乱的长表单收成四组：模型与运行时、数据源与工具、评测与治理、安全与审计。</p></div><div class="header-actions"><button class="btn">恢复默认</button><button class="btn primary">保存修改</button></div></section>
+          <section class="quad-grid">
+            <div class="mini-panel"><h4>模型与运行时</h4><p>kimi-k2.5 / LangGraph / timeout / round / degrade</p></div>
+            <div class="mini-panel"><h4>数据源与工具</h4><p>Git / Logs / Excel / PostgreSQL / Grafana / APM</p></div>
+            <div class="mini-panel"><h4>评测与治理</h4><p>benchmark gate / A/B / remediation / review</p></div>
+            <div class="mini-panel"><h4>安全与审计</h4><p>RBAC / 审计链 / 输出引用 / action approval</p></div>
+          </section>
+          <section class="three-col">
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">模型与运行时</h3><div class="panel-subtitle">运行时参数折叠分组化，不再散落在一整页。</div></div><span class="badge brand">expanded</span></div><div class="kv-list"><div class="kv-item"><h5>LLM Runtime</h5><p>Base URL: ark.cn-beijing.volces.com/api/coding<br>Model: kimi-k2.5</p></div><div class="kv-item"><h5>Debate policy</h5><p>默认 1 轮 / 并行专家开启 / 必须有效结论开启</p></div><div class="kv-item"><h5>Reliability</h5><p>timeout + retry + degrade + never-pending</p></div></div></div>
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">数据源与工具</h3><div class="panel-subtitle">用开关卡片表达配置状态，而不是原始表单堆叠。</div></div><span class="badge teal">4 local / 4 remote</span></div><div class="status-grid"><div class="status-row"><div><div class="status-name">Git Repo</div><div class="status-meta">enabled · local cache + remote repo</div></div><span class="badge teal">connected</span></div><div class="status-row"><div><div class="status-name">Log File</div><div class="status-meta">enabled · /mock_data/order.log</div></div><span class="badge teal">ready</span></div><div class="status-row"><div><div class="status-name">PostgreSQL</div><div class="status-meta">enabled · schema public</div></div><span class="badge amber">manual verify</span></div><div class="status-row"><div><div class="status-name">Grafana / APM</div><div class="status-meta">入口已保留，当前关闭</div></div><span class="badge brand">disabled</span></div></div></div>
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">安全与审计</h3><div class="panel-subtitle">把“谁能做什么”也纳入控制台主视图。</div></div></div><div class="kv-list"><div class="kv-item"><h5>Human Review</h5><p>高风险动作必须审核，waiting_review 显式进入终态。</p></div><div class="kv-item"><h5>Audit Trails</h5><p>tool audit / skill audit / report lineage / output refs</p></div><div class="kv-item"><h5>Cost & Quota</h5><p>按团队统计 token、成本、成功率和风险动作。</p></div></div></div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

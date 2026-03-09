@@ -208,7 +208,7 @@ npm run stop:all:force
 
 核心 LLM 配置（当前默认）：
 
-- `LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/coding`
+- `LLM_BASE_URL=https://coding.dashscope.aliyuncs.com/v1`
 - `LLM_MODEL=kimi-k2.5`
 - `LLM_API_KEY=<your_api_key>`
 

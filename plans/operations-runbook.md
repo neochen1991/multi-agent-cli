@@ -13,8 +13,8 @@ npm run dev
 ```
 
 ## 关键配置
-- `LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/coding`
-- `LLM_API_KEY=7b446c97-7172-4c90-a4ef-3f3ff5a8f894`
+- `LLM_BASE_URL=https://coding.dashscope.aliyuncs.com/v1`
+- `LLM_API_KEY=sk-sp-5abc4c1d85414988979e90771e112f2f`
 - `LLM_MODEL=kimi-k2.5`
 - `LOCAL_STORE_BACKEND=file`（默认）
 - `LOCAL_STORE_DIR=/tmp/sre_debate_store`

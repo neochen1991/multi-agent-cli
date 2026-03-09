@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Replay Mock</title><link rel="stylesheet" href="/figma-mockups/mockups.css" /><script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script></head>
+  <body>
+    <div class="shell">
+      <header class="topbar"><div class="topbar-brand"><div class="logo">RC</div><div class="brand-copy"><h1>Investigation Replay</h1><p>Decision path / evidence / report diff</p></div></div><div class="topbar-status"><div class="status-chip">replay loaded</div><div>2026-03-08 22:59 CST</div></div></header>
+      <div class="workspace">
+        <aside class="sidebar"><div class="sidebar-section"><div class="sidebar-label">Advanced</div><div class="nav-list"><div class="nav-item active">调查复盘台</div><div class="nav-item">运行治理</div><div class="nav-item">质量评估</div><div class="nav-item">工具中心</div></div></div><div class="sidebar-section sidebar-card"><h3>页面原则</h3><p>先给复盘总览，再给关键决策与证据，不要求用户先读完整时间线。</p></div></aside>
+        <main class="main">
+          <section class="page-header"><div><h2>调查复盘台</h2><p>用一个页面回答：这次 session 做了什么、为什么下这个结论、和上一版报告差在哪。</p></div><div class="header-actions"><button class="btn">加载 session</button><button class="btn primary">对比报告版本</button></div></section>
+          <section class="grid-4"><div class="metric-card"><div class="label">Confidence</div><div class="metric-value"><strong>81%</strong><span>cross-source passed</span></div></div><div class="metric-card"><div class="label">关键决策数</div><div class="metric-value"><strong>6</strong><span>主 Agent 指令链</span></div></div><div class="metric-card"><div class="label">工具调用</div><div class="metric-value"><strong>9</strong><span>audit ready</span></div></div><div class="metric-card"><div class="label">报告版本</div><div class="metric-value"><strong>3</strong><span>可对比 diff</span></div></div></section>
+          <section class="split-main">
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">复盘总览</h3><div class="panel-subtitle">第一次打开时先看这个，不需要先翻长列表。</div></div></div><div class="kv-list"><div class="kv-item"><h5>当前结论</h5><p>事务边界过宽 + DB 锁竞争，导致连接池耗尽与 502。</p></div><div class="kv-item"><h5>关键证据</h5><p>gateway timeout、Hikari exhausted、MySQL lock wait、Git 变更窗口。</p></div><div class="kv-item"><h5>下一步</h5><p>进入决策路径或报告 diff，而不是直接看原始 timeline。</p></div></div></div>
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">报告差异</h3><div class="panel-subtitle">把“版本变化”做成结构化比较。</div></div><span class="badge amber">v3 vs v2</span></div><div class="kv-list"><div class="kv-item"><h5>根因变化</h5><p>v3 明确补上 DB 锁竞争，v2 仅写连接池不足。</p></div><div class="kv-item"><h5>证据变化</h5><p>新增 PostgreSQL 与 Git 变更证据。</p></div></div></div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

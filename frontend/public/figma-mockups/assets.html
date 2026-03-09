@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Assets Mock</title><link rel="stylesheet" href="/figma-mockups/mockups.css" /><script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script></head>
+  <body>
+    <div class="shell">
+      <header class="topbar"><div class="topbar-brand"><div class="logo">RC</div><div class="brand-copy"><h1>Responsibility Assets</h1><p>Domain / aggregate / API / DB ownership</p></div></div><div class="topbar-status"><div class="status-chip">asset catalog online</div><div>2026-03-08 22:56 CST</div></div></header>
+      <div class="workspace">
+        <aside class="sidebar"><div class="sidebar-section"><div class="sidebar-label">Navigation</div><div class="nav-list"><div class="nav-item">首页总控台</div><div class="nav-item">故障分析</div><div class="nav-item">历史会话</div><div class="nav-item active">责任田资产</div><div class="nav-item">设置</div><div class="nav-item">高级能力</div></div></div><div class="sidebar-section sidebar-card"><h3>页面原则</h3><p>责任田页是资产目录，不是文件上传页。上传入口只是维护方式之一。</p></div></aside>
+        <main class="main">
+          <section class="page-header"><div><h2>责任田资产目录</h2><p>资产总览和导入维护拆成清晰的双标签页；默认先看已保存资产，再决定是否导入或编辑。</p></div><div class="header-actions"><button class="btn">导出 CSV</button><button class="btn primary">上传责任田 Excel</button></div></section>
+          <section class="grid-4">
+            <div class="metric-card"><div class="label">领域数</div><div class="metric-value"><strong>12</strong><span>覆盖核心业务域</span></div></div>
+            <div class="metric-card"><div class="label">聚合根数</div><div class="metric-value"><strong>38</strong><span>订单域占 9 个</span></div></div>
+            <div class="metric-card"><div class="label">API 数</div><div class="metric-value"><strong>214</strong><span>接口映射已接入</span></div></div>
+            <div class="metric-card"><div class="label">责任人覆盖率</div><div class="metric-value"><strong>96%</strong><span>仍有 8 条缺失</span></div></div>
+          </section>
+          <section class="panel"><div class="panel-head"><div><h3 class="panel-title">页面结构</h3><div class="panel-subtitle">已保存资产和导入维护并列，而不是把保存结果丢到页面最底部。</div></div></div><div class="tab-strip"><div class="tab-chip active">资产总览</div><div class="tab-chip">导入与维护</div></div></section>
+          <section class="split-main">
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">已保存资产</h3><div class="panel-subtitle">支持多维筛选：领域、聚合根、API、Owner。</div></div></div><div class="toolbar"><div class="input">领域：order-domain</div><div class="input">聚合根：Order</div><div class="input">API：POST /api/v1/orders</div></div><table class="table"><thead><tr><th>资产</th><th>Owner</th><th>接口 / 表</th><th>依赖</th></tr></thead><tbody><tr><td><span class="row-title">订单域 / Order</span><br><span class="muted">特性：下单 / 支付 / 履约</span></td><td>order-domain-team / alice</td><td>POST /api/v1/orders<br>t_order / t_order_item</td><td>inventory-service<br>payment-service</td></tr><tr><td><span class="row-title">库存域 / Inventory</span><br><span class="muted">聚合根：InventoryReservation</span></td><td>inventory-team / bob</td><td>POST /api/v1/inventory/deduct<br>t_inventory</td><td>warehouse-service</td></tr></tbody></table></div>
+            <div class="stack">
+              <div class="panel"><div class="panel-head"><div><h3 class="panel-title">资产详情</h3><div class="panel-subtitle">展开后按“页面 / 接口 / 代码 / DB / 监控”展示。</div></div><span class="badge teal">Order aggregate</span></div><dl class="summary-grid"><div class="summary-row"><dt>前端页面</dt><dd>/orders/create · /orders/detail</dd></div><div class="summary-row"><dt>代码清单</dt><dd>OrderController.java<br>OrderAppService.java</dd></div><div class="summary-row"><dt>数据库表</dt><dd>t_order / t_order_item / t_inventory</dd></div><div class="summary-row"><dt>监控</dt><dd>orders-5xx / db-lock / hikari-pending</dd></div></dl></div>
+              <div class="panel"><div class="panel-head"><div><h3 class="panel-title">导入与维护</h3><div class="panel-subtitle">同页完成上传、替换、手工补录，不干扰目录浏览。</div></div></div><div class="kv-list"><div class="kv-item"><h5>Excel 导入</h5><p>支持 replace existing / append 模式，导入后即时刷新目录。</p></div><div class="kv-item"><h5>手工补录</h5><p>用于修正 owner、接口、代码、数据库表和监控项缺口。</p></div></div></div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

@@ -202,6 +202,19 @@ class DebateService:
         """
         text = str(error_text or "").strip()
         lowered = text.lower()
+        reset_match = re.search(r"reset at ([0-9:\-+\sA-Z]+)", text, flags=re.IGNORECASE)
+        reset_at = str(reset_match.group(1) or "").strip() if reset_match else ""
+        # 限流错误优先级高于“无有效结论”，因为上层 often 会把底层 429 包进结论错误里。
+        if "rate_limit" in lowered or "429" in lowered or "accountquotaexceeded" in lowered or "toomanyrequests" in lowered:
+            retry_hint = "稍后重试，或降低并发配置"
+            if reset_at:
+                retry_hint = f"模型额度已耗尽，请在 {reset_at} 后重试，或降低并发配置"
+            return {
+                "error_code": "LLM_RATE_LIMITED",
+                "error_message": text,
+                "recoverable": True,
+                "retry_hint": retry_hint,
+            }
         # 未获得有效大模型结论
         if "未获得有效大模型结论" in text:
             return {
@@ -217,14 +230,6 @@ class DebateService:
                 "error_message": text,
                 "recoverable": True,
                 "retry_hint": "可先降低辩论轮次或缩短输入日志后重试",
-            }
-        # 限流错误
-        if "rate_limit" in lowered or "429" in lowered:
-            return {
-                "error_code": "LLM_RATE_LIMITED",
-                "error_message": text,
-                "recoverable": True,
-                "retry_hint": "稍后重试，或降低并发配置",
             }
         # 内部运行时错误
         return {

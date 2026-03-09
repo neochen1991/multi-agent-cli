@@ -50,11 +50,69 @@
           <section class="page-header">
             <div>
               <h2>故障分析工作台</h2>
-              <p>页面结构改为左中右调查台：左侧控制输入，中部展示对话和证据，右侧收敛责任田映射、根因候选和行动建议。</p>
+              <p>新版强调“先结论，再过程，再证据”。结论提升到顶部主视觉，辩论过程是核心工作区，链路图和事件明细收为二级视图。</p>
             </div>
             <div class="header-actions">
               <button class="btn">重新生成报告</button>
               <button class="btn primary">继续调查</button>
+            </div>
+          </section>
+
+          <section class="conclusion-band">
+            <div class="conclusion-hero">
+              <div class="conclusion-kicker">Primary conclusion</div>
+              <h3>Top1 根因：订单创建事务边界过宽，叠加库存写锁竞争，导致连接池耗尽并放大为网关 502。</h3>
+              <p>当前设计把结论放在页面最醒目的位置，让值班同学进入页面 3 秒内就知道“系统当前的判断是什么”，再决定是否下钻看过程与证据。</p>
+              <div class="conclusion-meta">
+                <div class="conclusion-stat">
+                  <div class="meta-label">Confidence</div>
+                  <strong>0.81</strong>
+                </div>
+                <div class="conclusion-stat">
+                  <div class="meta-label">Current stage</div>
+                  <strong>Judge / Report</strong>
+                </div>
+                <div class="conclusion-stat">
+                  <div class="meta-label">Human review</div>
+                  <strong>Required</strong>
+                </div>
+                <div class="conclusion-stat">
+                  <div class="meta-label">Primary owner</div>
+                  <strong>order-domain-team</strong>
+                </div>
+              </div>
+            </div>
+
+            <div class="conclusion-side">
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h3 class="panel-title">行动建议</h3>
+                    <div class="panel-subtitle">结论旁边直接放下一步动作，而不是藏到报告底部。</div>
+                  </div>
+                  <span class="badge amber">Actionable</span>
+                </div>
+                <div class="status-grid">
+                  <div class="status-row">
+                    <div>
+                      <div class="status-name">立即动作</div>
+                      <div class="status-meta">缩短 createOrder 事务范围，隔离库存调用</div>
+                    </div>
+                  </div>
+                  <div class="status-row">
+                    <div>
+                      <div class="status-name">确认项</div>
+                      <div class="status-meta">核对近 24h 库存调用改动与重试策略</div>
+                    </div>
+                  </div>
+                  <div class="status-row">
+                    <div>
+                      <div class="status-name">报告入口</div>
+                      <div class="status-meta">报告摘要 / 图谱 / 证据回放</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -119,20 +177,6 @@ MySQL lock wait timeout exceeded on t_order_item</div>
                     </div>
                     <span class="badge teal">Audited</span>
                   </div>
-                </div>
-              </div>
-
-              <div class="timeline">
-                <div class="section-label">原始事件明细</div>
-                <div class="timeline-card">
-                  <div class="timeline-meta"><span>22:35:07</span><span>gateway</span></div>
-                  <h4>POST /api/v1/orders 502</h4>
-                  <p>网关在 30s 超时后返回 502，traceId 已与 order-service 日志串联。</p>
-                </div>
-                <div class="timeline-card">
-                  <div class="timeline-meta"><span>22:35:38</span><span>order-service</span></div>
-                  <h4>CannotCreateTransactionException</h4>
-                  <p>连接池在事务开启前耗尽，pending threads 超过 400。</p>
                 </div>
               </div>
             </div>
@@ -258,6 +302,94 @@ MySQL lock wait timeout exceeded on t_order_item</div>
                 <div class="evidence-item">
                   <h5>Top3 · 0.28</h5>
                   <p>近 24h 代码变更引入库存重试路径，放大锁持有时间。</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="bottom-lab">
+            <div class="section-label">调查辅助视图</div>
+            <div class="lab-grid">
+              <div class="panel graph-card">
+                <div class="panel-head">
+                  <div>
+                    <h3 class="panel-title">Agent 链路图</h3>
+                    <div class="panel-subtitle">解释机制，但不抢主结论层级。</div>
+                  </div>
+                </div>
+                <div class="graph-stage">
+                  <div class="graph-node main">Main Agent</div>
+                  <div class="graph-arrow"></div>
+                  <div class="graph-node">Log</div>
+                </div>
+                <div class="graph-stage">
+                  <div class="graph-node main">Main Agent</div>
+                  <div class="graph-arrow"></div>
+                  <div class="graph-node">Code</div>
+                </div>
+                <div class="graph-stage">
+                  <div class="graph-node main">Main Agent</div>
+                  <div class="graph-arrow"></div>
+                  <div class="graph-node">Domain</div>
+                </div>
+                <div class="graph-stage">
+                  <div class="graph-node main">Main Agent</div>
+                  <div class="graph-arrow"></div>
+                  <div class="graph-node">Database</div>
+                </div>
+                <div class="graph-stage" style="margin-top:16px;">
+                  <div class="graph-node">Experts</div>
+                  <div class="graph-arrow"></div>
+                  <div class="graph-node judge">Judge</div>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h3 class="panel-title">轮次详情</h3>
+                    <div class="panel-subtitle">谁在第几轮干了什么，用于过程复盘。</div>
+                  </div>
+                </div>
+                <div class="round-list">
+                  <div class="round-item">
+                    <h5>Round 1 / 主 Agent 规划</h5>
+                    <p>命令 4 个专家并行分析日志、代码、责任田和数据库，并明确要核对事务边界与锁冲突。</p>
+                  </div>
+                  <div class="round-item">
+                    <h5>Round 1 / 专家取证</h5>
+                    <p>LogAgent 与 DatabaseAgent 给出时间线证据，CodeAgent 发现事务内串行库存调用，DomainAgent 完成责任田收口。</p>
+                  </div>
+                  <div class="round-item">
+                    <h5>Round 1 / Judge 收敛</h5>
+                    <p>Judge 合并四路证据，输出 Top-K 根因和行动建议，并标记需要人工复核的边界问题。</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-head">
+                  <div>
+                    <h3 class="panel-title">事件明细</h3>
+                    <div class="panel-subtitle">原始事件是审计信息，默认降级到页面底部。</div>
+                  </div>
+                </div>
+                <div class="timeline">
+                  <div class="timeline-card">
+                    <div class="timeline-meta"><span>22:35:07</span><span>gateway</span></div>
+                    <h4>POST /api/v1/orders 502</h4>
+                    <p>网关在 30s 超时后返回 502，traceId 已与 order-service 日志串联。</p>
+                  </div>
+                  <div class="timeline-card">
+                    <div class="timeline-meta"><span>22:35:18</span><span>runtime</span></div>
+                    <h4>agent_command_issued</h4>
+                    <p>Main Agent 向 Log / Code / Domain / Database 同时发起取证命令。</p>
+                  </div>
+                  <div class="timeline-card">
+                    <div class="timeline-meta"><span>22:35:38</span><span>order-service</span></div>
+                    <h4>CannotCreateTransactionException</h4>
+                    <p>连接池在事务开启前耗尽，pending threads 超过 400。</p>
+                  </div>
                 </div>
               </div>
             </div>

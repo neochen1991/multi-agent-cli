@@ -60,6 +60,14 @@ def _tool_limited_instruction(context: Dict[str, Any], *, to_json: ToJsonFn) -> 
     )
 
 
+def _focused_context_block(context: Dict[str, Any], *, to_json: ToJsonFn) -> str:
+    """把 Agent 专属分析上下文单独展示，避免模型只盯着粗粒度全局摘要。"""
+    focused = context.get("focused_context")
+    if not isinstance(focused, dict) or not focused:
+        return ""
+    return f"Agent 专属分析上下文：\n```json\n{to_json(focused)}\n```\n\n"
+
+
 def coordinator_command_schema() -> Dict[str, Any]:
     """定义主 Agent / supervisor 共用的协调输出 Schema。"""
     return {
@@ -384,6 +392,7 @@ def build_agent_prompt(
     if skill_context:
         skill_block = f"RCA 技能模板与场景参数：\n```json\n{to_json(skill_context)}\n```\n\n"
     tool_limited_block = _tool_limited_instruction(context, to_json=to_json)
+    focused_block = _focused_context_block(context, to_json=to_json)
     return (
         f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段={spec.phase}。\n"
         "只需要基于核心观点与结论推理，不要复述全部历史，结论请简短。\n"
@@ -394,10 +403,11 @@ def build_agent_prompt(
         f"{dialogue_block}"
         f"{inbox_block}"
         f"{skill_block}"
+        f"{focused_block}"
         f"{tool_limited_block}"
         f"{work_log_block}"
         f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
-        f"最近交互摘要：\n```json\n{to_json(history_items[-3:])}\n```\n\n"
+        f"最近交互摘要：\n```json\n{to_json(history_items[-5:])}\n```\n\n"
         f"请仅输出 JSON，格式示例：\n```json\n{to_json(output_schema)}\n```"
     )
 
@@ -452,6 +462,7 @@ def build_collaboration_prompt(
     skill_block = ""
     if skill_context:
         skill_block = f"RCA 技能模板与场景参数：\n```json\n{to_json(skill_context)}\n```\n\n"
+    focused_block = _focused_context_block(context, to_json=to_json)
     return (
         f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段=analysis。\n"
         "现在进入协同复核阶段：你必须基于其他 Agent 的结论进行交叉校验并修正自己的判断。\n"
@@ -465,6 +476,7 @@ def build_collaboration_prompt(
         f"{dialogue_block}"
         f"{inbox_block}"
         f"{skill_block}"
+        f"{focused_block}"
         f"{work_log_block}"
         f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
         f"同伴结论：\n```json\n{to_json(peer_items[-4:])}\n```\n\n"
@@ -499,6 +511,7 @@ def build_peer_driven_prompt(
     skill_block = ""
     if skill_context:
         skill_block = f"RCA 技能模板与场景参数：\n```json\n{to_json(skill_context)}\n```\n\n"
+    focused_block = _focused_context_block(context, to_json=to_json)
     if spec.name == "JudgeAgent":
         command_block = ""
         if assigned_command:
@@ -516,6 +529,7 @@ def build_peer_driven_prompt(
             f"{dialogue_block}"
             f"{inbox_block}"
             f"{skill_block}"
+            f"{focused_block}"
             f"{work_log_block}"
             f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
             f"同伴结论：\n```json\n{to_json(peer_items[-5:])}\n```\n\n"
@@ -538,6 +552,7 @@ def build_peer_driven_prompt(
             f"{dialogue_block}"
             f"{inbox_block}"
             f"{skill_block}"
+            f"{focused_block}"
             f"{work_log_block}"
             f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
             f"同伴结论：\n```json\n{to_json(peer_items[-5:])}\n```\n\n"
@@ -563,6 +578,7 @@ def build_peer_driven_prompt(
         f"{dialogue_block}"
         f"{inbox_block}"
         f"{skill_block}"
+        f"{focused_block}"
         f"{work_log_block}"
         f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
         f"同伴结论：\n```json\n{to_json(peer_items[-5:])}\n```\n\n"

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Tools Mock</title><link rel="stylesheet" href="/figma-mockups/mockups.css" /><script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script></head>
+  <body>
+    <div class="shell">
+      <header class="topbar"><div class="topbar-brand"><div class="logo">RC</div><div class="brand-copy"><h1>Tools Center</h1><p>Registry / connector / trial / audit</p></div></div><div class="topbar-status"><div class="status-chip">connector health 7/8</div><div>2026-03-08 23:02 CST</div></div></header>
+      <div class="workspace">
+        <aside class="sidebar"><div class="sidebar-section"><div class="sidebar-label">Advanced</div><div class="nav-list"><div class="nav-item">调查复盘台</div><div class="nav-item">运行治理</div><div class="nav-item">质量评估</div><div class="nav-item active">工具中心</div></div></div><div class="sidebar-section sidebar-card"><h3>页面原则</h3><p>工具页先告诉用户哪些工具可用、哪些连接器不健康，再决定试跑或看会话审计。</p></div></aside>
+        <main class="main">
+          <section class="page-header"><div><h2>工具中心</h2><p>把“工具总览 / 连接状态 / 参数试跑 / 会话审计”纳入一个统一工作台，不再让用户在 JSON 和表单之间来回跳。</p></div><div class="header-actions"><button class="btn">刷新连接器</button><button class="btn primary">执行试跑</button></div></section>
+          <section class="grid-4"><div class="metric-card"><div class="label">已启用工具</div><div class="metric-value"><strong>12</strong><span>registry</span></div></div><div class="metric-card"><div class="label">健康连接器</div><div class="metric-value"><strong>7</strong><span>1 retrying</span></div></div><div class="metric-card"><div class="label">最近审计会话</div><div class="metric-value"><strong>9</strong><span>tool audit ready</span></div></div><div class="metric-card"><div class="label">建议</div><div class="metric-value"><strong>先看</strong><span>不稳定连接器</span></div></div></section>
+          <section class="split-main">
+            <div class="panel"><div class="panel-head"><div><h3 class="panel-title">工具总览</h3><div class="panel-subtitle">先理解工具归属和启用状态，再下钻试跑。</div></div></div><table class="table"><thead><tr><th>工具</th><th>Agent</th><th>状态</th><th>连接器</th></tr></thead><tbody><tr><td><span class="row-title">git_repo_search</span></td><td>CodeAgent</td><td><span class="badge teal">enabled</span></td><td>github-connector</td></tr><tr><td><span class="row-title">local_log_reader</span></td><td>LogAgent</td><td><span class="badge teal">enabled</span></td><td>local-file</td></tr><tr><td><span class="row-title">pg_diagnostics</span></td><td>DatabaseAgent</td><td><span class="badge amber">manual verify</span></td><td>postgres-connector</td></tr></tbody></table></div>
+            <div class="stack"><div class="panel"><div class="panel-head"><div><h3 class="panel-title">参数试跑</h3><div class="panel-subtitle">当你怀疑工具结果不可靠时，先试跑，不要直接用真实 session 冒险。</div></div></div><div class="kv-list"><div class="kv-item"><h5>当前选中</h5><p>git_repo_search · task=trace OrderAppService transaction scope</p></div><div class="kv-item"><h5>试跑摘要</h5><p>命中 3 个文件，耗时 1.2s，输出引用已生成。</p></div></div></div><div class="panel"><div class="panel-head"><div><h3 class="panel-title">会话审计</h3><div class="panel-subtitle">展示 request summary / response summary / status / latency。</div></div></div><p class="muted">deb_958527ac: 7 calls · 0 failed · max latency 1.8s</p></div></div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

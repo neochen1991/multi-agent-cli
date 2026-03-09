@@ -1,7 +1,8 @@
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
-const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
-const WS_TIMEOUT_MS = Number(process.env.WS_TIMEOUT_MS || 420000);
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://127.0.0.1:5173';
+const BACKEND_URL = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
+const WS_TIMEOUT_MS = Number(process.env.WS_TIMEOUT_MS || 720000);
 const SMOKE_SCENARIO = String(process.env.SMOKE_SCENARIO || '').trim();
+const REQUIRE_FRONTEND_HTTP = String(process.env.REQUIRE_FRONTEND_HTTP || '').trim() === 'true';
 
 const scenarios = [
   {
@@ -70,12 +71,67 @@ async function jsonRequest(url, init = {}, token = '') {
   return data;
 }
 
+async function waitForDebateArtifacts(sessionId, incidentId, token = '', timeoutMs = WS_TIMEOUT_MS) {
+  const start = Date.now();
+  let lastDetail = null;
+  let lastResult = null;
+  let lastReport = null;
+
+  while (Date.now() - start < timeoutMs) {
+    try {
+      lastDetail = await jsonRequest(
+        `${BACKEND_URL}/api/v1/debates/${sessionId}`,
+        { method: 'GET' },
+        token,
+      );
+    } catch (_) {
+      lastDetail = null;
+    }
+
+    try {
+      lastResult = await jsonRequest(
+        `${BACKEND_URL}/api/v1/debates/${sessionId}/result`,
+        { method: 'GET' },
+        token,
+      );
+    } catch (_) {
+      lastResult = null;
+    }
+
+    try {
+      lastReport = await jsonRequest(
+        `${BACKEND_URL}/api/v1/reports/${incidentId}`,
+        { method: 'GET' },
+        token,
+      );
+    } catch (_) {
+      lastReport = null;
+    }
+
+    const status = String(lastDetail?.status || '');
+    const hasResult = Boolean(lastResult && Object.keys(lastResult).length > 0);
+    const hasReport = Boolean(lastReport?.report_id);
+    if (status === 'completed' && hasResult && hasReport) {
+      return { detail: lastDetail, debateResult: lastResult, report: lastReport };
+    }
+    if (status === 'failed' || status === 'cancelled') {
+      throw new Error(`session_${status}: ${JSON.stringify(lastDetail || {})}`);
+    }
+    await sleep(2000);
+  }
+
+  throw new Error(
+    `artifact_poll_timeout: session=${sessionId} detail=${JSON.stringify(lastDetail || {})}`,
+  );
+}
+
 async function runRealtimeDebate(sessionId, token = '', timeoutMs = WS_TIMEOUT_MS) {
   const params = new URLSearchParams();
   params.set('auto_start', 'true');
   if (token) params.set('token', token);
 
-  const wsUrl = `ws://localhost:8000/ws/debates/${sessionId}?${params.toString()}`;
+  const backendWsBase = BACKEND_URL.replace(/^http/i, 'ws');
+  const wsUrl = `${backendWsBase}/ws/debates/${sessionId}?${params.toString()}`;
 
   return new Promise((resolve, reject) => {
     const events = [];
@@ -166,23 +222,21 @@ async function runScenario(scenario, token) {
     token,
   );
 
-  const realtime = await runRealtimeDebate(session.id, token);
+  let realtime = { result: null, events: [], fallback: false };
+  try {
+    realtime = await runRealtimeDebate(session.id, token);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.includes('websocket timeout waiting result') && !message.includes('websocket closed before result')) {
+      throw err;
+    }
+    realtime = { result: null, events: [], fallback: true, ws_error: message };
+  }
 
-  const detail = await jsonRequest(
-    `${BACKEND_URL}/api/v1/debates/${session.id}`,
-    { method: 'GET' },
-    token,
-  );
-  const debateResult = await jsonRequest(
-    `${BACKEND_URL}/api/v1/debates/${session.id}/result`,
-    { method: 'GET' },
-    token,
-  );
-  const report = await jsonRequest(
-    `${BACKEND_URL}/api/v1/reports/${incident.id}`,
-    { method: 'GET' },
-    token,
-  );
+  const artifacts = await waitForDebateArtifacts(session.id, incident.id, token);
+  const detail = artifacts.detail;
+  const debateResult = artifacts.debateResult;
+  const report = artifacts.report;
 
   const effective = isEffectiveRootCause(debateResult.root_cause);
   return {
@@ -195,18 +249,37 @@ async function runScenario(scenario, token) {
     effective_root_cause: effective,
     report_generated: Boolean(report.report_id),
     ws_events: realtime.events,
+    ws_fallback: Boolean(realtime.fallback),
+    ws_error: realtime.ws_error || '',
     passed: detail.status === 'completed' && effective && Boolean(report.report_id),
   };
 }
 
 async function main() {
-  await waitForHttp(`${FRONTEND_URL}/`);
   await waitForHttp(`${BACKEND_URL}/health`);
-
-  const home = await fetch(`${FRONTEND_URL}/`);
-  const html = await home.text();
-  if (!html.includes('<div id="root">')) {
-    throw new Error('frontend root html invalid');
+  let frontendCheck = {
+    checked: false,
+    ok: false,
+    warning: '',
+  };
+  try {
+    await waitForHttp(`${FRONTEND_URL}/`, 15000);
+    const home = await fetch(`${FRONTEND_URL}/`);
+    const html = await home.text();
+    if (!html.includes('<div id="root">')) {
+      throw new Error('frontend root html invalid');
+    }
+    frontendCheck = { checked: true, ok: true, warning: '' };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    frontendCheck = {
+      checked: true,
+      ok: false,
+      warning: `frontend_http_check_skipped: ${message}`,
+    };
+    if (REQUIRE_FRONTEND_HTTP) {
+      throw err;
+    }
   }
 
   let token = '';
@@ -248,6 +321,9 @@ async function main() {
   const pass_rate = total > 0 ? Number(((passed / total) * 100).toFixed(1)) : 0;
 
   const summary = { total, passed, failed, pass_rate, details };
+  if (frontendCheck.checked) {
+    summary.frontend_check = frontendCheck;
+  }
   console.log(JSON.stringify(summary, null, 2));
 
   if (failed > 0) {

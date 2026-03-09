@@ -22,6 +22,11 @@ from app.repositories.asset_repository import (
     AssetRepository,
     InMemoryAssetRepository,
 )
+from app.repositories.knowledge_repository import (
+    KnowledgeRepository,
+    FileKnowledgeRepository,
+    knowledge_repository,
+)
 
 __all__ = [
     "IncidentRepository",
@@ -35,4 +40,7 @@ __all__ = [
     "FileReportRepository",
     "AssetRepository",
     "InMemoryAssetRepository",
+    "KnowledgeRepository",
+    "FileKnowledgeRepository",
+    "knowledge_repository",
 ]

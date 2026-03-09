@@ -5,7 +5,7 @@
 
 from fastapi import APIRouter
 
-from app.api import incidents, assets, debates, reports, auth, settings as settings_api, benchmark, governance
+from app.api import incidents, assets, debates, reports, auth, settings as settings_api, benchmark, governance, knowledge
 
 api_router = APIRouter()
 
@@ -26,6 +26,12 @@ api_router.include_router(
     assets.router,
     prefix="/assets",
     tags=["Assets"],
+)
+
+api_router.include_router(
+    knowledge.router,
+    prefix="/knowledge",
+    tags=["Knowledge"],
 )
 
 api_router.include_router(

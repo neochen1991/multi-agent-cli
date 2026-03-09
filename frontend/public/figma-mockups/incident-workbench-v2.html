@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Incident Workbench v2</title>
+    <link rel="stylesheet" href="/figma-mockups/mockups.css" />
+    <script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script>
+  </head>
+  <body>
+    <div class="lux-shell">
+      <header class="lux-topbar">
+        <div class="lux-brand">
+          <div class="lux-logo">RC</div>
+          <div>
+            <h1>Incident Investigation Workbench</h1>
+            <p>Decision-first investigation interface for multi-agent analysis</p>
+          </div>
+        </div>
+        <div class="lux-statusbar">
+          <div class="lux-chip">session deb_958527ac · round 1/1</div>
+          <div class="lux-chip">judge in progress</div>
+        </div>
+      </header>
+
+      <div class="lux-workspace">
+        <aside class="lux-sidebar">
+          <div class="lux-nav-title">Main navigation</div>
+          <div class="lux-nav">
+            <div class="lux-nav-item">首页总控台</div>
+            <div class="lux-nav-item active">故障分析</div>
+            <div class="lux-nav-item">历史会话</div>
+            <div class="lux-nav-item">责任田资产</div>
+            <div class="lux-nav-item">设置</div>
+            <div class="lux-nav-item">高级能力</div>
+          </div>
+          <div class="lux-sidecard">
+            <h3>Incident brief</h3>
+            <p>/orders 接口 502，CPU 飙升且连接池耗尽。页面不再让过程和细节抢走第一视线，而是先把“现在的判断”放到主屏中央。</p>
+          </div>
+          <div class="lux-sidecard">
+            <h4>Live mode</h4>
+            <p>Main Agent 已完成任务分发，Log / Code / Domain / Database 正在合并证据，Judge 给出第一版收敛结论。</p>
+          </div>
+        </aside>
+
+        <main class="lux-main">
+          <section class="lux-pagehead">
+            <div>
+              <h2>故障分析主屏</h2>
+              <p>这次重点不是“信息都放上去”，而是形成真正的主次：顶部是结论面板，中间是辩论主工作区，右侧是责任田和证据，底部才是链路图、轮次和事件明细。</p>
+            </div>
+            <div class="lux-actions">
+              <button class="lux-btn">重新生成报告</button>
+              <button class="lux-btn primary">继续调查</button>
+            </div>
+          </section>
+
+          <section class="lux-conclusion">
+            <div class="lux-hero">
+              <div class="lux-kicker">Current verdict</div>
+              <h3>Top1 根因：订单创建事务边界过宽，叠加库存写锁竞争，导致连接池耗尽并放大为网关 502。</h3>
+              <p>现在进入页面先看到的是系统当前判断，而不是一串 tabs 或长列表。这个结论区承担“指挥面板”职责，给值班同学第一时间的决策抓手。</p>
+              <div class="lux-hero-metrics">
+                <div class="lux-hero-stat"><div class="t">Confidence</div><strong>0.81</strong></div>
+                <div class="lux-hero-stat"><div class="t">Status</div><strong>Judge</strong></div>
+                <div class="lux-hero-stat"><div class="t">Human review</div><strong>Required</strong></div>
+                <div class="lux-hero-stat"><div class="t">Owner</div><strong>order-domain-team</strong></div>
+              </div>
+            </div>
+
+            <div class="lux-stack">
+              <div class="lux-panel">
+                <h3 class="lux-title">Action panel</h3>
+                <div class="lux-subtitle">把下一步动作放到结论旁边，而不是藏到报告底部。</div>
+                <div class="lux-statuslist" style="margin-top:14px;">
+                  <div class="lux-statusitem"><div><div class="lux-row-title">Immediate action</div><div class="lux-muted">缩短 createOrder 事务范围，隔离库存调用</div></div><span class="lux-badge amber">P1</span></div>
+                  <div class="lux-statusitem"><div><div class="lux-row-title">Review checklist</div><div class="lux-muted">确认近 24h 重试相关变更是否放大锁持有时间</div></div><span class="lux-badge blue">review</span></div>
+                  <div class="lux-statusitem"><div><div class="lux-row-title">Report</div><div class="lux-muted">摘要 / 图谱 / 差异对比 / 回放入口</div></div><span class="lux-badge green">ready</span></div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="lux-3col">
+            <div class="lux-stack">
+              <div class="lux-panel">
+                <h3 class="lux-title">Session controls</h3>
+                <div class="lux-subtitle">左栏是控制和输入，不再承担主视觉。</div>
+                <div class="lux-form" style="margin-top:14px;">
+                  <div>
+                    <label>Incident title</label>
+                    <div class="lux-input">/orders 接口 502，CPU 超过 100%</div>
+                  </div>
+                  <div>
+                    <label>Execution mode</label>
+                    <div class="lux-inline-row">
+                      <div class="lux-pill active">standard</div>
+                      <div class="lux-pill">quick</div>
+                      <div class="lux-pill">background</div>
+                    </div>
+                  </div>
+                  <div>
+                    <label>Signal summary</label>
+                    <div class="lux-textarea">Gateway 502 / costMs 30211
+OrderAppService CannotCreateTransactionException
+HikariPool request timed out after 30000ms
+MySQL lock wait timeout exceeded</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="lux-panel">
+                <h3 class="lux-title">Stage snapshot</h3>
+                <div class="lux-subtitle">状态用更凝练的 executive summary 表达。</div>
+                <div class="lux-statuslist" style="margin-top:14px;">
+                  <div class="lux-statusitem"><div><div class="lux-row-title">Phase</div><div class="lux-muted">DEBATING</div></div><span class="lux-badge amber">live</span></div>
+                  <div class="lux-statusitem"><div><div class="lux-row-title">Rounds</div><div class="lux-muted">1 / 1</div></div><span class="lux-badge blue">locked</span></div>
+                  <div class="lux-statusitem"><div><div class="lux-row-title">Tool calls</div><div class="lux-muted">7 audited calls, 0 failed</div></div><span class="lux-badge green">clean</span></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="lux-panel">
+              <h3 class="lux-title">Debate stream</h3>
+              <div class="lux-subtitle">消息更像专业协作软件，而不是气泡聊天或 JSON dump。</div>
+              <div class="lux-chat" style="margin-top:14px;">
+                <div class="lux-message command">
+                  <div class="lux-message-head"><strong>ProblemAnalysisAgent · task dispatch</strong><span>23:12</span></div>
+                  <p>/orders 502 已命中 order-domain-team。LogAgent 看超时链路，CodeAgent 查事务边界和变更，DomainAgent 校验责任田归属，DatabaseAgent 核查 t_order / t_order_item / t_inventory 的锁和索引。</p>
+                </div>
+                <div class="lux-evidence-strip">
+                  <strong>DatabaseAgent / PostgreSQL diagnostic</strong>
+                  <span>读取表结构、索引和锁等待摘要，命中 t_order_item 与 t_inventory 写锁竞争，耗时 1.8s。</span>
+                </div>
+                <div class="lux-message">
+                  <div class="lux-message-head"><strong>LogAgent · chain reconstruction</strong><span>23:13</span></div>
+                  <p>Gateway 30211ms 超时与 order-service 事务创建失败属于同一条 trace。CPU 与线程飙升更像连接池阻塞造成的级联放大，而不是单纯的上游网络问题。</p>
+                </div>
+                <div class="lux-evidence-strip">
+                  <strong>CodeAgent / Git repository search</strong>
+                  <span>命中 `OrderAppService.createOrder`、`InventoryClient.deduct` 和近 24 小时事务相关改动 3 条。</span>
+                </div>
+                <div class="lux-message">
+                  <div class="lux-message-head"><strong>CodeAgent · implementation read</strong><span>23:14</span></div>
+                  <p>createOrder 在同一事务内串行执行订单落库和库存扣减。库存调用一旦阻塞，会长时间持有连接与行锁，足以解释连接池耗尽。</p>
+                </div>
+                <div class="lux-message judge">
+                  <div class="lux-message-head"><strong>JudgeAgent · convergence</strong><span>23:15</span></div>
+                  <p>Top1 根因已收敛。建议先缩短事务范围并隔离库存扣减链路，再复核连接池参数与峰值流量是否匹配。</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="lux-stack">
+              <div class="lux-panel">
+                <h3 class="lux-title">Responsibility mapping</h3>
+                <div class="lux-subtitle">右栏上半固定承担“归属判断”。</div>
+                <table class="lux-table" style="margin-top:12px;">
+                  <tbody>
+                    <tr><td>领域</td><td>订单域</td></tr>
+                    <tr><td>聚合根</td><td>Order</td></tr>
+                    <tr><td>Owner</td><td>order-domain-team / alice</td></tr>
+                    <tr><td>API</td><td>POST /api/v1/orders</td></tr>
+                    <tr><td>DB</td><td>t_order / t_order_item / t_inventory</td></tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="lux-panel">
+                <h3 class="lux-title">Evidence chain & Top-K</h3>
+                <div class="lux-subtitle">右栏下半负责“为什么信这个结论”。</div>
+                <div class="lux-statuslist" style="margin-top:14px;">
+                  <div class="lux-statusitem"><div><div class="lux-row-title">22:35:07 · gateway timeout</div><div class="lux-muted">POST /api/v1/orders costMs=30211</div></div></div>
+                  <div class="lux-statusitem"><div><div class="lux-row-title">22:35:18 · pool exhausted</div><div class="lux-muted">Hikari pending threads > 400</div></div></div>
+                  <div class="lux-statusitem"><div><div class="lux-row-title">Top1 / 0.81</div><div class="lux-muted">事务边界过宽 + DB 锁竞争</div></div></div>
+                  <div class="lux-statusitem"><div><div class="lux-row-title">Top2 / 0.46</div><div class="lux-muted">连接池容量偏小</div></div></div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="lux-bottom">
+            <div class="lux-panel">
+              <h3 class="lux-title">Agent topology</h3>
+              <div class="lux-subtitle">机制解释降级到底部，但保持高完成度视觉。</div>
+              <div class="graph-stage" style="margin-top:14px;"><div class="graph-node main">Main</div><div class="graph-arrow"></div><div class="graph-node">Log</div></div>
+              <div class="graph-stage"><div class="graph-node main">Main</div><div class="graph-arrow"></div><div class="graph-node">Code</div></div>
+              <div class="graph-stage"><div class="graph-node main">Main</div><div class="graph-arrow"></div><div class="graph-node">Domain</div></div>
+              <div class="graph-stage"><div class="graph-node main">Main</div><div class="graph-arrow"></div><div class="graph-node">DB</div></div>
+              <div class="graph-stage" style="margin-top:14px;"><div class="graph-node">Experts</div><div class="graph-arrow"></div><div class="graph-node judge">Judge</div></div>
+            </div>
+
+            <div class="lux-panel">
+              <h3 class="lux-title">Round details</h3>
+              <div class="lux-subtitle">谁在第几轮做了什么，用于过程复盘。</div>
+              <div class="round-list" style="margin-top:14px;">
+                <div class="round-item"><h5>Round 1 / planning</h5><p>Main Agent 下发四路取证命令，并明确要核对事务边界与锁冲突。</p></div>
+                <div class="round-item"><h5>Round 1 / evidence gathering</h5><p>日志、代码、责任田、数据库同时回流，形成跨源证据闭环。</p></div>
+                <div class="round-item"><h5>Round 1 / judging</h5><p>Judge 输出 Top-K 根因并标记需要人工复核的边界问题。</p></div>
+              </div>
+            </div>
+
+            <div class="lux-panel">
+              <h3 class="lux-title">Event details</h3>
+              <div class="lux-subtitle">原始事件明细保留，但作为调试与审计视图。</div>
+              <div class="lux-statuslist" style="margin-top:14px;">
+                <div class="lux-statusitem"><div><div class="lux-row-title">23:12:07 · gateway</div><div class="lux-muted">POST /api/v1/orders 502</div></div></div>
+                <div class="lux-statusitem"><div><div class="lux-row-title">23:12:18 · runtime</div><div class="lux-muted">agent_command_issued</div></div></div>
+                <div class="lux-statusitem"><div><div class="lux-row-title">23:12:38 · order-service</div><div class="lux-muted">CannotCreateTransactionException</div></div></div>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

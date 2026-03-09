@@ -10,6 +10,7 @@ type ToolAuditPayload = {
   requestText?: string;
   responseText?: string;
   auditText?: string;
+  focusedText?: string;
 };
 
 export type DialogueViewMessage = {
@@ -140,6 +141,12 @@ const DialogueStream: React.FC<Props> = ({
                     <div className="tool-audit-foot">
                       <Text className="tool-audit-col-title">调用审计</Text>
                       <pre className="tool-audit-pre">{msg.toolPayload.auditText}</pre>
+                    </div>
+                  ) : null}
+                  {msg.toolPayload.focusedText ? (
+                    <div className="tool-audit-foot">
+                      <Text className="tool-audit-col-title">分析收获</Text>
+                      <pre className="tool-audit-pre">{msg.toolPayload.focusedText}</pre>
                     </div>
                   ) : null}
                 </div>

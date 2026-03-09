@@ -6,16 +6,21 @@ import {
   Col,
   Descriptions,
   Empty,
+  Form,
+  Input,
   List,
+  Modal,
   Progress,
   Row,
+  Select,
   Space,
   Statistic,
   Tabs,
   Tag,
   Typography,
+  message,
 } from 'antd';
-import type { DebateResult, Report } from '@/services/api';
+import { knowledgeApi, type DebateResult, type Report, type KnowledgeEntryType } from '@/services/api';
 import { formatBeijingDateTime } from '@/utils/dateTime';
 
 const { Paragraph, Text } = Typography;
@@ -47,6 +52,8 @@ type Props = {
   reportLoading: boolean;
   incidentId: string;
   sessionId: string;
+  incidentTitle?: string;
+  serviceName?: string;
   debateConfidence?: number;
   sessionQualitySummary?: {
     limitedAnalysis: boolean;
@@ -78,16 +85,21 @@ const DebateResultPanel: React.FC<Props> = ({
   reportLoading,
   incidentId,
   sessionId,
+  incidentTitle,
+  serviceName,
   debateConfidence,
   sessionQualitySummary,
   onFocusLimitedAnalysis,
   onFocusEvidenceGap,
   onRegenerateReport,
 }) => {
+  const [knowledgeForm] = Form.useForm();
   const [expandedReportSections, setExpandedReportSections] = useState<Record<string, boolean>>({});
   const [expandedSummaryCards, setExpandedSummaryCards] = useState<Record<string, boolean>>({});
   const [expandedTopK, setExpandedTopK] = useState<Record<string, boolean>>({});
   const [expandedEvidence, setExpandedEvidence] = useState<Record<string, boolean>>({});
+  const [knowledgeModalOpen, setKnowledgeModalOpen] = useState(false);
+  const [savingKnowledge, setSavingKnowledge] = useState(false);
   const confidence = typeof debateConfidence === 'number' ? Number((debateConfidence * 100).toFixed(1)) : null;
   const rootCauseCandidates = Array.isArray(debateResult?.root_cause_candidates) ? debateResult.root_cause_candidates : [];
   const evidenceChain = Array.isArray(debateResult?.evidence_chain) ? debateResult.evidence_chain : [];
@@ -251,6 +263,138 @@ const DebateResultPanel: React.FC<Props> = ({
     anchor.click();
     anchor.remove();
     URL.revokeObjectURL(url);
+  };
+
+  const splitListText = (value?: string): string[] =>
+    String(value || '')
+      .split(/[,，;\n；、|]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  const buildKnowledgeSeed = (entryType: KnowledgeEntryType) => {
+    const baseTitle = String(incidentTitle || `Incident ${incidentId || sessionId || ''}`).trim();
+    const rootCause = String(debateResult?.root_cause || '').trim();
+    const summary = rootCause || String(mainAgentConclusion?.text || '').trim();
+    const reportBody = String(reportResult?.content || '').trim();
+    const reportOutline = reportSections
+      .slice(0, 5)
+      .map((section) => `## ${section.title}\n${section.body}`)
+      .join('\n\n')
+      .trim();
+    const content = reportBody || reportOutline || summary || '待补充';
+    return {
+      entry_type: entryType,
+      title:
+        entryType === 'case'
+          ? `${baseTitle} 复盘案例`
+          : entryType === 'runbook'
+            ? `${baseTitle} 处置 SOP`
+            : `${baseTitle} 复盘模板`,
+      summary,
+      content,
+      tags_text: [debateResult?.root_cause_category, serviceName].filter(Boolean).join(', '),
+      service_names_text: serviceName || '',
+      domain: '',
+      aggregate: '',
+      author: 'incident-panel',
+      case_incident_type: String(debateResult?.root_cause_category || '').trim(),
+      case_symptoms_text: baseTitle,
+      case_root_cause: rootCause,
+      case_solution: String((debateResult?.fix_recommendation as any)?.summary || '').trim(),
+      case_fix_steps_text: Array.isArray((debateResult?.fix_recommendation as any)?.testing_requirements)
+        ? ((debateResult?.fix_recommendation as any)?.testing_requirements || []).join(', ')
+        : '',
+      runbook_applicable_text: baseTitle,
+      runbook_prechecks_text: Array.isArray(debateResult?.risk_assessment?.risk_factors)
+        ? (debateResult?.risk_assessment?.risk_factors || []).join(', ')
+        : '',
+      runbook_steps_text: Array.isArray((debateResult?.fix_recommendation as any)?.steps)
+        ? ((debateResult?.fix_recommendation as any)?.steps || [])
+            .map((item: Record<string, unknown>) => String(item.summary || item.step || item.action || '').trim())
+            .filter(Boolean)
+            .join(', ')
+        : '',
+      runbook_rollback_text: (debateResult?.fix_recommendation as any)?.rollback_recommended ? '需要准备回滚方案' : '',
+      runbook_verification_text: Array.isArray(debateResult?.verification_plan)
+        ? (debateResult?.verification_plan || [])
+            .map((item: Record<string, unknown>) => String(item.summary || item.check || item.step || '').trim())
+            .filter(Boolean)
+            .join(', ')
+        : '',
+      postmortem_impact_text: Array.isArray(debateResult?.impact_analysis?.affected_services)
+        ? (debateResult?.impact_analysis?.affected_services || []).join(', ')
+        : '',
+      postmortem_timeline_text: `发现时间：${mainAgentConclusion?.timeText || '-'}`,
+      postmortem_whys_text: rootCause,
+      postmortem_actions_text: Array.isArray((debateResult?.risk_assessment as any)?.mitigation_suggestions)
+        ? (((debateResult?.risk_assessment as any)?.mitigation_suggestions || []) as string[]).join(', ')
+        : '',
+    };
+  };
+
+  const openKnowledgeModal = (entryType: KnowledgeEntryType) => {
+    knowledgeForm.setFieldsValue(buildKnowledgeSeed(entryType));
+    setKnowledgeModalOpen(true);
+  };
+
+  const handleSaveKnowledge = async () => {
+    try {
+      await knowledgeForm.validateFields(['entry_type', 'title']);
+      const values = knowledgeForm.getFieldsValue(true);
+      setSavingKnowledge(true);
+      await knowledgeApi.create({
+        entry_type: values.entry_type,
+        title: String(values.title || '').trim(),
+        summary: String(values.summary || '').trim(),
+        content: String(values.content || '').trim(),
+        tags: splitListText(values.tags_text),
+        service_names: splitListText(values.service_names_text),
+        domain: String(values.domain || '').trim(),
+        aggregate: String(values.aggregate || '').trim(),
+        author: String(values.author || '').trim(),
+        metadata: {
+          source_incident_id: incidentId,
+          source_session_id: sessionId,
+        },
+        case_fields:
+          values.entry_type === 'case'
+            ? {
+                incident_type: String(values.case_incident_type || '').trim(),
+                symptoms: splitListText(values.case_symptoms_text),
+                root_cause: String(values.case_root_cause || '').trim(),
+                solution: String(values.case_solution || '').trim(),
+                fix_steps: splitListText(values.case_fix_steps_text),
+              }
+            : null,
+        runbook_fields:
+          values.entry_type === 'runbook'
+            ? {
+                applicable_scenarios: splitListText(values.runbook_applicable_text),
+                prechecks: splitListText(values.runbook_prechecks_text),
+                steps: splitListText(values.runbook_steps_text),
+                rollback_plan: splitListText(values.runbook_rollback_text),
+                verification_steps: splitListText(values.runbook_verification_text),
+              }
+            : null,
+        postmortem_fields:
+          values.entry_type === 'postmortem_template'
+            ? {
+                impact_scope_template: splitListText(values.postmortem_impact_text),
+                timeline_template: splitListText(values.postmortem_timeline_text),
+                five_whys_template: splitListText(values.postmortem_whys_text),
+                action_items_template: splitListText(values.postmortem_actions_text),
+              }
+            : null,
+      });
+      message.success('已沉淀到知识库');
+      setKnowledgeModalOpen(false);
+      knowledgeForm.resetFields();
+    } catch (error: any) {
+      if (error?.errorFields) return;
+      message.error(error?.response?.data?.detail || error?.message || '沉淀知识条目失败');
+    } finally {
+      setSavingKnowledge(false);
+    }
   };
   const extractEvidenceTime = (item: EvidenceItem): string => {
     if (!item) return '时间未标注';
@@ -474,6 +618,17 @@ const DebateResultPanel: React.FC<Props> = ({
             <Button onClick={downloadReport} disabled={!hasReport}>
               下载报告
             </Button>
+            <Select
+              size="small"
+              defaultValue="case"
+              style={{ width: 142 }}
+              onSelect={(value) => openKnowledgeModal(value as KnowledgeEntryType)}
+              options={[
+                { label: '沉淀为运维案例', value: 'case' },
+                { label: '沉淀为 SOP', value: 'runbook' },
+                { label: '沉淀为复盘模板', value: 'postmortem_template' },
+              ]}
+            />
             <Button loading={reportLoading} onClick={() => void onRegenerateReport()} disabled={!incidentId}>
               重新生成报告
             </Button>
@@ -879,6 +1034,45 @@ const DebateResultPanel: React.FC<Props> = ({
           <Empty description="暂未生成报告，请先完成辩论或点击“重新生成报告”" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         )}
       </Card>
+      <Modal
+        title="沉淀到知识库"
+        open={knowledgeModalOpen}
+        onCancel={() => setKnowledgeModalOpen(false)}
+        onOk={() => void handleSaveKnowledge()}
+        confirmLoading={savingKnowledge}
+        width={760}
+        destroyOnClose
+      >
+        <Form form={knowledgeForm} layout="vertical">
+          <Form.Item name="entry_type" label="类型" rules={[{ required: true, message: '请选择类型' }]}>
+            <Select
+              options={[
+                { label: '运维案例', value: 'case' },
+                { label: 'Runbook / SOP', value: 'runbook' },
+                { label: '复盘模板', value: 'postmortem_template' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="title" label="标题" rules={[{ required: true, message: '请输入标题' }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="summary" label="摘要">
+            <Input.TextArea rows={2} />
+          </Form.Item>
+          <Form.Item name="content" label="正文">
+            <Input.TextArea rows={8} />
+          </Form.Item>
+          <Form.Item name="tags_text" label="标签（逗号分隔）">
+            <Input />
+          </Form.Item>
+          <Form.Item name="service_names_text" label="关联服务（逗号分隔）">
+            <Input />
+          </Form.Item>
+          <Form.Item name="author" label="作者">
+            <Input />
+          </Form.Item>
+        </Form>
+      </Modal>
     </Space>
   );
 };

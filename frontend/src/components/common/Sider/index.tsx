@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Layout, Menu } from 'antd';
 import {
   ApartmentOutlined,
+  BookOutlined,
   DeploymentUnitOutlined,
   AlertOutlined,
   HistoryOutlined,
@@ -40,6 +41,11 @@ const AppSider: React.FC = () => {
         label: '责任田',
       },
       {
+        key: '/knowledge',
+        icon: <BookOutlined />,
+        label: '知识库',
+      },
+      {
         key: '/settings',
         icon: <SettingOutlined />,
         label: '设置',
@@ -75,6 +81,9 @@ const AppSider: React.FC = () => {
       || location.pathname.startsWith('/tools')
     ) {
       return '/advanced';
+    }
+    if (location.pathname.startsWith('/knowledge')) {
+      return '/knowledge';
     }
     const matched = menuItems
       .filter((item) => item.key !== '/')

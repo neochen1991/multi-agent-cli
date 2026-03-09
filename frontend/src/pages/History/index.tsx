@@ -1,9 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Card, Col, Row, Space, Statistic, Table, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useNavigate } from 'react-router-dom';
 import { debateApi, incidentApi, type Incident } from '@/services/api';
-import { formatBeijingDateTime } from '@/utils/dateTime';
+import { formatBeijingDateTime, formatElapsedDuration } from '@/utils/dateTime';
 
 const { Paragraph, Text, Title } = Typography;
 
@@ -30,35 +30,16 @@ const severityColor: Record<string, string> = {
 
 const ACTIVE_STATUSES = ['pending', 'running', 'analyzing', 'debating', 'waiting', 'retrying'];
 const TERMINAL_STATUSES = ['resolved', 'completed', 'closed', 'failed', 'cancelled'];
-
-const parseTimestamp = (value?: string): number | null => {
-  if (!value) return null;
-  const ts = Date.parse(value);
-  return Number.isFinite(ts) ? ts : null;
-};
-
-const formatDuration = (start?: string, end?: string, running = false): string => {
-  const startTs = parseTimestamp(start);
-  if (!startTs) return '-';
-  const endTs = parseTimestamp(end) ?? Date.now();
-  const diffMs = Math.max(0, endTs - startTs);
-  const totalSeconds = Math.floor(diffMs / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const formatted = hours > 0
-    ? `${hours}小时${minutes}分${seconds}秒`
-    : minutes > 0
-      ? `${minutes}分${seconds}秒`
-      : `${seconds}秒`;
-  return running ? `进行中 · ${formatted}` : formatted;
-};
+const compactBeijingDateTime = (value?: string): string =>
+  formatBeijingDateTime(value, '--').replace(' (北京时间)', '');
+const compactElapsedDuration = (value: string): string => value.replace(/^进行中\s*[·•]\s*/, '');
 
 const HistoryPage: React.FC = () => {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<Incident[]>([]);
   const [nowTs, setNowTs] = useState(() => Date.now());
+  const missingResultSessionsRef = useRef<Set<string>>(new Set());
   const [sessionMeta, setSessionMeta] = useState<
     Record<
       string,
@@ -92,15 +73,35 @@ const HistoryPage: React.FC = () => {
         .filter(Boolean)
         .slice(0, 20);
       if (sessionIds.length > 0) {
+        const itemBySessionId = new Map(
+          (data.items || [])
+            .map((row) => [String(row.debate_session_id || '').trim(), row] as const)
+            .filter(([sid]) => Boolean(sid)),
+        );
         const details = await Promise.all(
           sessionIds.map((sid) =>
             debateApi.get(sid).catch(() => null),
           ),
         );
         const results = await Promise.all(
-          sessionIds.map((sid) =>
-            debateApi.getResult(sid).catch(() => null),
-          ),
+          sessionIds.map(async (sid) => {
+            const incident = itemBySessionId.get(sid);
+            if (!incident || !TERMINAL_STATUSES.includes(String(incident.status || '').toLowerCase())) {
+              return null;
+            }
+            if (missingResultSessionsRef.current.has(sid)) {
+              return null;
+            }
+            try {
+              return await debateApi.getResult(sid);
+            } catch (error: any) {
+              if (error?.response?.status === 404) {
+                missingResultSessionsRef.current.add(sid);
+                return null;
+              }
+              return null;
+            }
+          }),
         );
         const nextMeta: Record<
           string,
@@ -218,13 +219,27 @@ const HistoryPage: React.FC = () => {
   }, [items]);
 
   const columns: ColumnsType<Incident> = [
-    { title: 'ID', dataIndex: 'id', key: 'id', width: 160 },
-    { title: '标题', dataIndex: 'title', key: 'title' },
+    {
+      title: 'ID',
+      dataIndex: 'id',
+      key: 'id',
+      width: 122,
+      ellipsis: true,
+      render: (value: string) => <Text className="history-id-text">{value || '-'}</Text>,
+    },
+    {
+      title: '标题',
+      dataIndex: 'title',
+      key: 'title',
+      width: 220,
+      ellipsis: true,
+      render: (value: string) => <Text className="history-title-text" title={value}>{value || '-'}</Text>,
+    },
     {
       title: '严重程度',
       dataIndex: 'severity',
       key: 'severity',
-      width: 120,
+      width: 86,
       render: (severity: string) =>
         severity ? <Tag color={severityColor[severity] || 'default'}>{severity.toUpperCase()}</Tag> : '-',
     },
@@ -232,7 +247,7 @@ const HistoryPage: React.FC = () => {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 160,
+      width: 94,
       render: (status: string, record) => {
         const sid = String(record.debate_session_id || '');
         const reviewStatus = sid ? String(sessionMeta[sid]?.reviewStatus || '').toLowerCase() : '';
@@ -248,7 +263,8 @@ const HistoryPage: React.FC = () => {
     {
       title: '审核',
       key: 'review',
-      width: 180,
+      width: 110,
+      responsive: ['xxl'],
       render: (_: unknown, record) => {
         const sid = String(record.debate_session_id || '');
         const reviewStatus = sid ? String(sessionMeta[sid]?.reviewStatus || '').toLowerCase() : '';
@@ -269,7 +285,8 @@ const HistoryPage: React.FC = () => {
     {
       title: '模式',
       key: 'mode',
-      width: 120,
+      width: 100,
+      responsive: ['xxl'],
       render: (_: unknown, record) => {
         const sid = String(record.debate_session_id || '');
         const mode = sid ? String(sessionMeta[sid]?.mode || 'standard') : '-';
@@ -279,37 +296,39 @@ const HistoryPage: React.FC = () => {
     {
       title: '分析质量',
       key: 'quality',
-      width: 220,
+      width: 134,
       render: (_: unknown, record) => {
         const sid = String(record.debate_session_id || '');
         if (!sid || !sessionMeta[sid]) return '-';
         const meta = sessionMeta[sid];
         const confidence =
           typeof meta.confidence === 'number' ? `${(meta.confidence * 100).toFixed(1)}%` : '-';
+        const totalCoverage =
+          meta.evidenceCoverage.ok + meta.evidenceCoverage.degraded + meta.evidenceCoverage.missing;
         return (
           <div className="history-quality-cell">
-            <Space wrap size={4}>
-              <Tag>{`置信度 ${confidence}`}</Tag>
-              {meta.limitedAnalysis ? <Tag color="gold">受限分析</Tag> : null}
-              {meta.evidenceGap ? <Tag color="volcano">关键证据不足</Tag> : null}
-            </Space>
-            {(meta.evidenceCoverage.ok + meta.evidenceCoverage.degraded + meta.evidenceCoverage.missing) > 0 ? (
+            <div className="history-quality-tags">
+              <Tag>{confidence}</Tag>
+              {meta.limitedAnalysis ? <Tag color="gold">受限</Tag> : null}
+              {meta.evidenceGap ? <Tag color="volcano">缺口</Tag> : null}
+            </div>
+            {totalCoverage > 0 ? (
               <div className="history-evidence-coverage">
                 <div className="history-evidence-coverage-bar">
                   <div
                     className="history-evidence-coverage-segment ok"
-                    style={{ width: `${(meta.evidenceCoverage.ok / (meta.evidenceCoverage.ok + meta.evidenceCoverage.degraded + meta.evidenceCoverage.missing)) * 100}%` }}
+                    style={{ width: `${(meta.evidenceCoverage.ok / totalCoverage) * 100}%` }}
                   />
                   <div
                     className="history-evidence-coverage-segment degraded"
-                    style={{ width: `${(meta.evidenceCoverage.degraded / (meta.evidenceCoverage.ok + meta.evidenceCoverage.degraded + meta.evidenceCoverage.missing)) * 100}%` }}
+                    style={{ width: `${(meta.evidenceCoverage.degraded / totalCoverage) * 100}%` }}
                   />
                   <div
                     className="history-evidence-coverage-segment missing"
-                    style={{ width: `${(meta.evidenceCoverage.missing / (meta.evidenceCoverage.ok + meta.evidenceCoverage.degraded + meta.evidenceCoverage.missing)) * 100}%` }}
+                    style={{ width: `${(meta.evidenceCoverage.missing / totalCoverage) * 100}%` }}
                   />
                 </div>
-                <Text type="secondary">{`证据覆盖 成功${meta.evidenceCoverage.ok}/受限${meta.evidenceCoverage.degraded}/缺失${meta.evidenceCoverage.missing}`}</Text>
+                <Text type="secondary">{`覆盖 ${meta.evidenceCoverage.ok}/${meta.evidenceCoverage.degraded}/${meta.evidenceCoverage.missing}`}</Text>
               </div>
             ) : null}
           </div>
@@ -319,47 +338,51 @@ const HistoryPage: React.FC = () => {
     {
       title: '分析耗时',
       key: 'duration',
-      width: 140,
+      width: 116,
       render: (_: unknown, record) => {
         const sid = String(record.debate_session_id || '');
         const running = ACTIVE_STATUSES.includes(record.status);
         const meta = sid ? sessionMeta[sid] : null;
         if (meta) {
           const endAt = meta.completedAt || (running ? new Date(nowTs).toISOString() : meta.updatedAt);
-          return formatDuration(meta.createdAt, endAt, running);
+          return compactElapsedDuration(formatElapsedDuration(meta.createdAt, endAt, running, '-'));
         }
         if (TERMINAL_STATUSES.includes(record.status)) return '-';
-        return formatDuration(record.created_at, running ? new Date(nowTs).toISOString() : record.updated_at, running);
+        return compactElapsedDuration(
+          formatElapsedDuration(record.created_at, running ? new Date(nowTs).toISOString() : record.updated_at, running, '-'),
+        );
       },
     },
     {
       title: '创建时间',
       dataIndex: 'created_at',
       key: 'created_at',
-      width: 250,
-      render: (value: string) => formatBeijingDateTime(value),
+      width: 144,
+      responsive: ['xxl'],
+      render: (value: string) => compactBeijingDateTime(value),
     },
     {
       title: '操作',
       key: 'action',
-      width: 240,
+      width: 130,
       render: (_, record) => (
-        <Space>
-          <Button size="small" onClick={() => navigate(`/incident/${record.id}`)}>
-            进入详情
+        <div className="history-action-links">
+          <Button type="link" size="small" onClick={() => navigate(`/incident/${record.id}`)}>
+            详情
           </Button>
           {(record.status === 'resolved' || record.status === 'closed' || record.status === 'completed') ? (
-            <Button size="small" type="primary" onClick={() => navigate(`/incident/${record.id}?view=report`)}>
-              查看结论
+            <Button type="link" size="small" onClick={() => navigate(`/incident/${record.id}?view=report`)}>
+              结论
             </Button>
           ) : (
-            <Button size="small" type="primary" onClick={() => navigate(`/incident/${record.id}?view=analysis`)}>
-              继续处理
+            <Button type="link" size="small" onClick={() => navigate(`/incident/${record.id}?view=analysis`)}>
+              继续
             </Button>
           )}
           {record.debate_session_id && ACTIVE_STATUSES.includes(record.status) ? (
             <Button
               size="small"
+              type="link"
               danger
               onClick={async () => {
                 try {
@@ -374,7 +397,7 @@ const HistoryPage: React.FC = () => {
               取消
             </Button>
           ) : null}
-        </Space>
+        </div>
       ),
     },
   ];
@@ -441,8 +464,10 @@ const HistoryPage: React.FC = () => {
           dataSource={items}
           rowKey="id"
           loading={loading}
-          scroll={{ y: 'calc(100vh - 430px)', x: 1200 }}
-          pagination={{ pageSize: 10 }}
+          size="small"
+          tableLayout="fixed"
+          scroll={{ y: 'calc(100vh - 452px)', x: 900 }}
+          pagination={{ pageSize: 10, size: 'small', showSizeChanger: false }}
           locale={{ emptyText: '暂无历史记录，点击“新建分析”创建第一条任务。' }}
         />
       </Card>

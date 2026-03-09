@@ -440,35 +440,6 @@ async def call_agent(
                     try:
                         await asyncio.wait_for(semaphore.acquire(), timeout=queue_timeout)
                         acquired = True
-                        queue_wait_ms = round((perf_counter() - queue_started) * 1000, 2)
-                        logger.info(
-                            "runtime_agent_llm_started",
-                            session_id=orchestrator.session_id,
-                            agent_name=spec.name,
-                            phase=spec.phase,
-                            loop_round=loop_round,
-                            round_number=round_number,
-                            attempt=attempt_idx,
-                            max_attempts=max_attempts,
-                            timeout_seconds=attempt_timeout,
-                            queue_timeout_seconds=queue_timeout,
-                            queue_wait_ms=queue_wait_ms,
-                            session_budget_seconds=(
-                                round(float(session_budget), 3)
-                                if session_budget is not None
-                                else None
-                            ),
-                        )
-                        invoke_result = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                run_agent_once,
-                                orchestrator,
-                                spec,
-                                attempt_prompt,
-                                attempt_max_tokens,
-                            ),
-                            timeout=attempt_timeout,
-                        )
                     except asyncio.TimeoutError as queue_exc:
                         queue_wait_ms = round((perf_counter() - queue_started) * 1000, 2)
                         await orchestrator._emit_event(
@@ -484,6 +455,40 @@ async def call_agent(
                         raise RetryableAgentTimeoutError(
                             f"llm queue timeout after {queue_timeout:.1f}s"
                         ) from queue_exc
+                    queue_wait_ms = round((perf_counter() - queue_started) * 1000, 2)
+                    logger.info(
+                        "runtime_agent_llm_started",
+                        session_id=orchestrator.session_id,
+                        agent_name=spec.name,
+                        phase=spec.phase,
+                        loop_round=loop_round,
+                        round_number=round_number,
+                        attempt=attempt_idx,
+                        max_attempts=max_attempts,
+                        timeout_seconds=attempt_timeout,
+                        queue_timeout_seconds=queue_timeout,
+                        queue_wait_ms=queue_wait_ms,
+                        session_budget_seconds=(
+                            round(float(session_budget), 3)
+                            if session_budget is not None
+                            else None
+                        ),
+                    )
+                    try:
+                        invoke_result = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                run_agent_once,
+                                orchestrator,
+                                spec,
+                                attempt_prompt,
+                                attempt_max_tokens,
+                            ),
+                            timeout=attempt_timeout,
+                        )
+                    except asyncio.TimeoutError as invoke_exc:
+                        raise RetryableAgentTimeoutError(
+                            f"llm invoke timeout after {attempt_timeout:.1f}s"
+                        ) from invoke_exc
                     finally:
                         if acquired:
                             semaphore.release()
