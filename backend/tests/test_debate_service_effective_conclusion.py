@@ -174,3 +174,41 @@ def test_build_result_prefers_meaningful_root_cause_confidence_over_stale_top_le
 
     assert result.root_cause_category == "infrastructure.gateway-route-miss"
     assert result.confidence == pytest.approx(0.68, abs=1e-6)
+
+
+def test_build_result_preserves_claim_graph_from_final_judgment():
+    """结果出库应保留 runtime 生成的最小 claim graph。"""
+
+    service = DebateService()
+    session = _session()
+    flow_result = {
+        "confidence": 0.72,
+        "final_judgment": {
+            "root_cause": {
+                "summary": "PaymentAppService 同步调用 RiskService 缺少总超时预算。",
+                "category": "upstream_timeout_budget_missing",
+                "confidence": 0.72,
+            },
+            "evidence_chain": [
+                {"type": "log", "description": "重试时间线累计约 30.4s", "source": "LogAgent", "strength": "strong"},
+            ],
+            "claim_graph": {
+                "primary_claim": {
+                    "summary": "PaymentAppService 同步调用 RiskService 缺少总超时预算。",
+                    "category": "upstream_timeout_budget_missing",
+                    "confidence": 0.72,
+                },
+                "supports": [{"type": "log", "summary": "重试时间线累计约 30.4s", "source": "LogAgent", "strength": "strong"}],
+                "contradicts": [],
+                "missing_checks": ["验证熔断是否生效"],
+                "eliminated_alternatives": ["数据库不是原发根因"],
+            },
+        },
+        "action_items": [],
+        "responsible_team": {"team": "payment-team", "owner": "neo"},
+    }
+
+    result = service._build_result(session, flow_result, report={})
+
+    assert result.claim_graph["primary_claim"]["category"] == "upstream_timeout_budget_missing"
+    assert result.claim_graph["missing_checks"] == ["验证熔断是否生效"]

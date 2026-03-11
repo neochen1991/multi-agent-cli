@@ -66,12 +66,17 @@ const BenchmarkCenterPage: React.FC = () => {
   const overlapScore = Number(summary?.avg_overlap_score || 0);
   const timeoutRate = Number(summary?.timeout_rate || 0);
   const emptyConclusionRate = Number(summary?.empty_conclusion_rate || 0);
+  const claimGraphQuality = Number(summary?.avg_claim_graph_quality_score || 0);
+  const claimGraphSupportRate = Number(summary?.claim_graph_support_rate || 0);
+  const claimGraphExclusionRate = Number(summary?.claim_graph_exclusion_rate || 0);
+  const claimGraphMissingCheckRate = Number(summary?.claim_graph_missing_check_rate || 0);
   const latestFixtures = lastRun?.fixtures || 0;
 
   const top1Tone = metricTone(top1Rate, 0.75, 0.6);
   const overlapTone = metricTone(overlapScore, 0.65, 0.45);
   const timeoutTone = metricTone(timeoutRate, 0.08, 0.15, true);
   const emptyTone = metricTone(emptyConclusionRate, 0.05, 0.12, true);
+  const claimGraphTone = metricTone(claimGraphQuality, 0.7, 0.5);
 
   const summaryCards = [
     {
@@ -110,6 +115,18 @@ const BenchmarkCenterPage: React.FC = () => {
       value: latestFixtures || history.length || 0,
       tone: 'info',
       hint: lastRun ? '当前首屏指标来自本次运行结果' : '当前首屏指标来自最近基线文件',
+    },
+    {
+      title: 'Claim Graph 质量',
+      value: claimGraphQuality,
+      precision: 3,
+      tone: claimGraphTone,
+      hint:
+        claimGraphTone === 'healthy'
+          ? '支持证据、排除项和待验证项整体较完整'
+          : claimGraphTone === 'watch'
+            ? '结构化证据图已可用，但仍有缺口'
+            : '结构化证据图偏弱，建议优先看 supports / exclusions',
     },
   ];
 
@@ -152,6 +169,7 @@ const BenchmarkCenterPage: React.FC = () => {
   const baselineTop1 = Number(latest?.summary?.top1_rate || 0);
   const baselineTimeout = Number(latest?.summary?.timeout_rate || 0);
   const baselineEmpty = Number(latest?.summary?.empty_conclusion_rate || 0);
+  const baselineClaimGraphQuality = Number(latest?.summary?.avg_claim_graph_quality_score || 0);
 
   const comparisonText = useMemo(() => {
     if (!lastRun || !latest?.summary) return null;
@@ -242,6 +260,22 @@ const BenchmarkCenterPage: React.FC = () => {
                       </div>
                     </Space>
                   </Card>
+                  <Card size="small" className="ops-subtle-block mini-chart-card">
+                    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                      <Text strong>结构化证据图质量</Text>
+                      <List
+                        size="small"
+                        className="ops-list-tight"
+                        dataSource={[
+                          `平均质量分：${claimGraphQuality.toFixed(3)}`,
+                          `支持证据达标率：${percentText(claimGraphSupportRate)}`,
+                          `排除项达标率：${percentText(claimGraphExclusionRate)}`,
+                          `待验证项达标率：${percentText(claimGraphMissingCheckRate)}`,
+                        ]}
+                        renderItem={(item) => <List.Item>{item}</List.Item>}
+                      />
+                    </Space>
+                  </Card>
                 </Space>
               </Card>
             </Col>
@@ -257,6 +291,7 @@ const BenchmarkCenterPage: React.FC = () => {
                   { label: 'Top1 命中率', current: top1Rate, baseline: baselineTop1, inverse: false },
                   { label: '超时率', current: timeoutRate, baseline: baselineTimeout, inverse: true },
                   { label: '空结论率', current: emptyConclusionRate, baseline: baselineEmpty, inverse: true },
+                  { label: 'Claim Graph 质量', current: claimGraphQuality, baseline: baselineClaimGraphQuality, inverse: false },
                 ].map((item) => (
                   <div key={item.label} className="mini-compare-row">
                     <div className="mini-bar-label-wrap">

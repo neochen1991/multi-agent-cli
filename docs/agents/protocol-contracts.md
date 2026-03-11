@@ -193,6 +193,11 @@ Required fields:
 - `evidence_coverage`
 
 Recommended fields:
+- `claim_graph.primary_claim`
+- `claim_graph.supports`
+- `claim_graph.contradicts`
+- `claim_graph.missing_checks`
+- `claim_graph.eliminated_alternatives`
 - `action_items`
 - `responsible_team`
 - `responsible_owner`
@@ -207,8 +212,32 @@ Constraints:
 - output must remain machine-readable
 - `root_cause_candidates` should preserve ranking information for Top-K rendering
 - `evidence_coverage` should remain compatible with `ok / degraded / missing`
+- `claim_graph` is additive metadata and must not replace legacy `evidence_chain`
+- `claim_graph.primary_claim` should align with `root_cause`
+- `claim_graph.supports / contradicts / missing_checks / eliminated_alternatives` should stay list-shaped for benchmark and governance consumers
 
-## 10. Compatibility Rules
+## 10. Human Review Boundary Contract
+
+### `human_review`
+
+Purpose:
+- records the pending-review state used by runtime finalize, result persistence, and resume flow
+
+Required fields:
+- `status`
+- `reason`
+- `payload`
+- `resume_from_step`
+
+Recommended fields:
+- `requested_at`
+
+Constraints:
+- runtime waiting-review payloads should reuse the same structure in `session.context.human_review` and `final_payload.human_review`
+- `resume_from_step` should default to `report_generation` when omitted
+- human review metadata must stay additive and must not overwrite the final judgment body
+
+## 11. Compatibility Rules
 
 1. New fields may be added, but existing required fields must remain stable.
 2. Frontend views should prefer structured fields over transcript parsing.

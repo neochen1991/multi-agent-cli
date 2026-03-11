@@ -167,6 +167,26 @@ class GovernanceOpsService:
             rows.append({"file": str(path), "generated_at": payload.get("generated_at"), "summary": payload.get("summary") or {}})
         return rows
 
+    @staticmethod
+    def _claim_graph_metrics(result: Dict[str, Any]) -> Dict[str, float]:
+        """从结果对象中提取最小 claim_graph 质量信号。"""
+        claim_graph = result.get("claim_graph") if isinstance(result.get("claim_graph"), dict) else {}
+        supports = claim_graph.get("supports") if isinstance(claim_graph.get("supports"), list) else []
+        exclusions = claim_graph.get("eliminated_alternatives") if isinstance(claim_graph.get("eliminated_alternatives"), list) else []
+        missing_checks = claim_graph.get("missing_checks") if isinstance(claim_graph.get("missing_checks"), list) else []
+
+        support_score = 1.0 if len(supports) >= 3 else 0.75 if len(supports) == 2 else 0.5 if len(supports) == 1 else 0.0
+        exclusion_score = 1.0 if exclusions else 0.0
+        missing_check_score = 1.0 if missing_checks else 0.0
+        quality_score = round(max(0.0, min(1.0, 0.5 * support_score + 0.3 * exclusion_score + 0.2 * missing_check_score)), 3)
+        return {
+            "support_score": support_score,
+            "exclusion_score": exclusion_score,
+            "missing_check_score": missing_check_score,
+            "quality_score": quality_score,
+            "has_claim_graph": 1.0 if claim_graph else 0.0,
+        }
+
     async def ab_evaluate(self, strategy_a: str, strategy_b: str) -> Dict[str, Any]:
         """基于最近两份 baseline 做简化版 A/B 对比。"""
         baselines = self._load_baselines(limit=2)
@@ -464,9 +484,19 @@ class GovernanceOpsService:
                     "estimated_total_tokens": 0,
                     "estimated_model_cost": 0.0,
                     "avg_confidence": 0.0,
+                    "avg_claim_graph_quality_score": 0.0,
+                    "claim_graph_support_rate": 0.0,
+                    "claim_graph_exclusion_rate": 0.0,
+                    "claim_graph_missing_check_rate": 0.0,
+                    "claim_graph_session_rate": 0.0,
                     "depth_mode_distribution": {"quick": 0, "standard": 0, "deep": 0},
                     "_confidence_sum": 0.0,
                     "_confidence_count": 0,
+                    "_claim_graph_quality_sum": 0.0,
+                    "_claim_graph_support_hits": 0,
+                    "_claim_graph_exclusion_hits": 0,
+                    "_claim_graph_missing_check_hits": 0,
+                    "_claim_graph_sessions": 0,
                     "session_ids": [],
                     "updated_at": datetime.utcnow().isoformat(),
                 },
@@ -496,6 +526,16 @@ class GovernanceOpsService:
             if confidence >= 0:
                 metrics["_confidence_sum"] += confidence
                 metrics["_confidence_count"] += 1
+            claim_graph_metrics = self._claim_graph_metrics(result if isinstance(result, dict) else {})
+            if claim_graph_metrics["has_claim_graph"] > 0:
+                metrics["_claim_graph_sessions"] += 1
+                metrics["_claim_graph_quality_sum"] += claim_graph_metrics["quality_score"]
+                if claim_graph_metrics["support_score"] >= 0.6:
+                    metrics["_claim_graph_support_hits"] += 1
+                if claim_graph_metrics["exclusion_score"] >= 0.6:
+                    metrics["_claim_graph_exclusion_hits"] += 1
+                if claim_graph_metrics["missing_check_score"] >= 0.6:
+                    metrics["_claim_graph_missing_check_hits"] += 1
 
             # 从 runtime 事件文件聚合超时 / 工具失败 / token 成本估算
             events = self._load_runtime_events(session_id)
@@ -608,9 +648,33 @@ class GovernanceOpsService:
                     / self._safe_int(metrics.get("_confidence_count"), 1),
                     4,
                 )
+            claim_graph_sessions = self._safe_int(metrics.get("_claim_graph_sessions"), 0)
+            if claim_graph_sessions > 0:
+                metrics["avg_claim_graph_quality_score"] = round(
+                    self._safe_float(metrics.get("_claim_graph_quality_sum"), 0.0) / claim_graph_sessions,
+                    4,
+                )
+                metrics["claim_graph_support_rate"] = round(
+                    self._safe_int(metrics.get("_claim_graph_support_hits"), 0) / claim_graph_sessions,
+                    4,
+                )
+                metrics["claim_graph_exclusion_rate"] = round(
+                    self._safe_int(metrics.get("_claim_graph_exclusion_hits"), 0) / claim_graph_sessions,
+                    4,
+                )
+                metrics["claim_graph_missing_check_rate"] = round(
+                    self._safe_int(metrics.get("_claim_graph_missing_check_hits"), 0) / claim_graph_sessions,
+                    4,
+                )
+            metrics["claim_graph_session_rate"] = round(claim_graph_sessions / sessions_count, 4)
             metrics["window_days"] = window_days
             metrics.pop("_confidence_sum", None)
             metrics.pop("_confidence_count", None)
+            metrics.pop("_claim_graph_quality_sum", None)
+            metrics.pop("_claim_graph_support_hits", None)
+            metrics.pop("_claim_graph_exclusion_hits", None)
+            metrics.pop("_claim_graph_missing_check_hits", None)
+            metrics.pop("_claim_graph_sessions", None)
             rows.append(metrics)
 
         rows.sort(

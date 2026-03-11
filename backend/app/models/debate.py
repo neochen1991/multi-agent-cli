@@ -315,6 +315,7 @@ class DebateResult(BaseModel):
 
     # 证据链
     evidence_chain: List[EvidenceItem] = Field(default_factory=list, description="证据链")
+    claim_graph: Dict[str, Any] = Field(default_factory=dict, description="最小证据图")
 
     # 修复建议
     fix_recommendation: Optional[FixRecommendation] = Field(None, description="修复建议")

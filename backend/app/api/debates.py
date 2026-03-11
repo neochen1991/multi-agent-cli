@@ -115,6 +115,7 @@ class DebateResultResponse(BaseModel):
     confidence: float
     root_cause_candidates: List[RootCauseCandidateResponse]
     evidence_chain: List[EvidenceItemResponse]
+    claim_graph: Dict[str, Any]
     fix_recommendation: Optional[FixRecommendationResponse]
     impact_analysis: Optional[ImpactAnalysisResponse]
     risk_assessment: Optional[RiskAssessmentResponse]
@@ -943,6 +944,7 @@ def _build_result_response(result: DebateResult) -> DebateResultResponse:
             for item in (result.root_cause_candidates or [])
         ],
         evidence_chain=evidence_chain,
+        claim_graph=dict(result.claim_graph or {}),
         fix_recommendation=fix_rec,
         impact_analysis=impact,
         risk_assessment=risk,

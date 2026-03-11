@@ -21,7 +21,7 @@ import asyncio
 import re
 import uuid
 from contextlib import suppress
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 
 import structlog
@@ -55,6 +55,7 @@ from app.runtime.evidence import normalize_evidence_items
 from app.runtime.langgraph.parsers import extract_readable_text
 from app.runtime.judgement import causal_score, has_cross_source_evidence, score_topology_propagation
 from app.runtime.langgraph.deployment_center import deployment_center
+from app.runtime.langgraph.services.review_boundary import ReviewBoundary
 from app.runtime_serve import normalize_execution_mode
 from app.runtime.langgraph.strategy_center import runtime_strategy_center
 from app.repositories.debate_repository import (
@@ -64,6 +65,7 @@ from app.repositories.debate_repository import (
 )
 
 logger = structlog.get_logger()
+review_boundary = ReviewBoundary()
 
 
 class HumanReviewRequired(RuntimeError):
@@ -1132,13 +1134,11 @@ class DebateService:
         resume_from_step: str,
     ) -> None:
         """在进入人工审核前保存恢复断点和中间快照。"""
-        review_state = {
-            "status": "pending",
-            "reason": str(review_reason or ""),
-            "payload": dict(review_payload or {}),
-            "resume_from_step": str(resume_from_step or "report_generation"),
-            "requested_at": datetime.utcnow().isoformat(),
-        }
+        review_state = review_boundary.build_review_state(
+            reason=str(review_reason or ""),
+            payload=dict(review_payload or {}),
+            resume_from_step=str(resume_from_step or "report_generation"),
+        )
         session.context["human_review"] = review_state
         session.context["pending_review_checkpoint"] = {
             "debate_result": debate_result,
@@ -1166,7 +1166,7 @@ class DebateService:
                 },
             ),
         )
-        session.updated_at = datetime.utcnow()
+        session.updated_at = datetime.now(UTC)
         await self._repository.save_session(session)
         raise HumanReviewRequired(
             session.id,
@@ -2398,6 +2398,8 @@ class DebateService:
             if judge_turn:
                 confidence = self._coerce_confidence(judge_turn.confidence, default=0.0)
         confidence = max(0.0, min(1.0, confidence))
+        claim_graph = final_judgment.get("claim_graph")
+        claim_graph = claim_graph if isinstance(claim_graph, dict) else {}
 
         scoring = causal_score(
             root_cause=root_cause_summary,
@@ -2452,6 +2454,7 @@ class DebateService:
             cross_source_passed=cross_source_passed,
             root_cause_candidates=root_cause_candidates,
             evidence_chain=evidence_chain,
+            claim_graph=claim_graph,
             fix_recommendation=fix_recommendation,
             impact_analysis=impact_analysis,
             risk_assessment=risk_assessment,

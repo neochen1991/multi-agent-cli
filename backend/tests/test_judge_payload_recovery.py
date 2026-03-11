@@ -585,3 +585,68 @@ def test_build_final_payload_keeps_route_miss_judgment_above_low_confidence_floo
     assert payload["final_judgment"]["root_cause"]["category"] == "infrastructure.gateway-route-miss"
     risk_factors = payload["final_judgment"]["risk_assessment"]["risk_factors"]
     assert not any("关键证据不足" in item for item in risk_factors)
+
+
+def test_build_final_payload_attaches_minimal_claim_graph():
+    """最终裁决应补充最小 claim graph，便于后续结果层和治理层结构化消费。"""
+
+    orchestrator = _orchestrator()
+    now = datetime.utcnow()
+    judge_output = {
+        "final_judgment": {
+            "root_cause": {
+                "summary": "网关路由表未同步 order-service，导致 POST /api/v1/orders 在网关层直接返回 404。",
+                "category": "infrastructure.gateway-route-miss",
+                "confidence": 0.71,
+            },
+            "evidence_chain": [
+                {"type": "log", "description": "gateway route not found path=/api/v1/orders", "source": "LogAgent", "strength": "strong"},
+                {"type": "domain", "description": "接口映射确认订单端点存在于 OrderController#createOrder", "source": "DomainAgent", "strength": "strong"},
+                {"type": "metrics", "description": "数据库 CPU 平稳，数据库不是原发根因", "source": "MetricsAgent", "strength": "strong"},
+            ],
+            "risk_assessment": {"risk_level": "medium", "risk_factors": []},
+        },
+        "decision_rationale": {
+            "reasoning": "日志与接口映射一致，且数据库不是原发根因。",
+            "key_factors": ["待验证网关路由刷新是否已经恢复"],
+        },
+        "confidence": 0.71,
+    }
+    orchestrator.turns = [
+        DebateTurn(
+            round_number=1,
+            phase="judgment",
+            agent_name="JudgeAgent",
+            agent_role="技术委员会主席",
+            model={"name": "glm-5"},
+            input_message="",
+            output_content=judge_output,
+            confidence=0.71,
+            started_at=now,
+            completed_at=now,
+        ),
+    ]
+    history_cards = [
+        AgentEvidence(
+            agent_name="CriticAgent",
+            phase="critique",
+            summary="需要确认网关配置是否已刷新",
+            conclusion="如果网关配置已刷新但仍 404，则需要排查注册中心同步链路。",
+            evidence_chain=[],
+            confidence=0.55,
+            raw_output={},
+        )
+    ]
+
+    payload = orchestrator._build_final_payload(
+        history_cards=history_cards,
+        consensus_reached=False,
+        executed_rounds=1,
+    )
+
+    claim_graph = payload["final_judgment"]["claim_graph"]
+    assert claim_graph["primary_claim"]["category"] == "infrastructure.gateway-route-miss"
+    assert len(claim_graph["supports"]) >= 3
+    assert any("数据库不是原发根因" in item for item in claim_graph["eliminated_alternatives"])
+    assert any("待验证网关路由刷新" in item for item in claim_graph["missing_checks"])
+    assert claim_graph["contradicts"][0]["agent"] == "CriticAgent"

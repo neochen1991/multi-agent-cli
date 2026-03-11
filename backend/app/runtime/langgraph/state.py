@@ -709,18 +709,21 @@ def create_initial_state(
     Returns:
         初始化的 DebateExecState
     """
-    return DebateExecState(
-        messages=[],
-        context=context,
-        context_summary={},
-        phase_state={
+    # 中文注释：初始化时只显式组装结构化权威状态，
+    # 再统一通过 sync_structured_state 镜像出兼容 flat 视图。
+    # 这样后续若默认值有调整，只需要维护一份结构化来源。
+    seed = {
+        "messages": [],
+        "context": context,
+        "context_summary": {},
+        "phase_state": {
             "current_round": 1,
             "executed_rounds": 0,
             "consensus_reached": False,
             "continue_next_round": True,
             "debate_stability_score": 0.0,
         },
-        routing_state={
+        "routing_state": {
             "next_step": "",
             "agent_commands": {},
             "discussion_step_count": 0,
@@ -737,7 +740,7 @@ def create_initial_state(
             "round_objectives": [],
             "round_gap_summary": [],
         },
-        output_state={
+        "output_state": {
             "history_cards": [],
             "agent_outputs": {},
             "evidence_chain": [],
@@ -748,36 +751,8 @@ def create_initial_state(
             "evidence_coverage": {},
             "agent_local_state": {},
         },
-        history_cards=[],
-        agent_outputs={},
-        evidence_chain=[],
-        claims=[],
-        open_questions=[],
-        current_round=1,
-        executed_rounds=0,
-        consensus_reached=False,
-        continue_next_round=True,
-        debate_stability_score=0.0,
-        agent_commands={},
-        next_step="",
-        round_start_turn_index=0,
-        agent_mailbox={},
-        discussion_step_count=0,
-        max_discussion_steps=max_discussion_steps,
-        supervisor_stop_requested=False,
-        supervisor_stop_reason="",
-        supervisor_notes=[],
-        awaiting_human_review=False,
-        human_review_reason="",
-        human_review_payload={},
-        resume_from_step="",
-        round_objectives=[],
-        round_gap_summary=[],
-        final_payload={},
-        top_k_hypotheses=[],
-        evidence_coverage={},
-        agent_local_state={},
-    )
+    }
+    return DebateExecState(**sync_structured_state(seed))
 
 
 def get_state_summary(state: DebateExecState) -> Dict[str, Any]:
@@ -935,14 +910,15 @@ class StateAccessor:
 
     @staticmethod
     def set_current_round(state: Dict[str, Any], value: int) -> Dict[str, Any]:
-        """Set current round number in both locations."""
-        return {
-            "current_round": value,
-            "phase_state": {
-                **(state.get("phase_state") or {}),
-                "current_round": value,
-            },
-        }
+        """Set current round number using structured state as the authority."""
+        return sync_structured_state(
+            {
+                "phase_state": {
+                    **(state.get("phase_state") or {}),
+                    "current_round": value,
+                }
+            }
+        )
 
     @staticmethod
     def get_discussion_step(state: Dict[str, Any]) -> int:
@@ -958,14 +934,15 @@ class StateAccessor:
 
     @staticmethod
     def set_discussion_step(state: Dict[str, Any], value: int) -> Dict[str, Any]:
-        """Set discussion step count in both locations."""
-        return {
-            "discussion_step_count": value,
-            "routing_state": {
-                **(state.get("routing_state") or {}),
-                "discussion_step_count": value,
-            },
-        }
+        """Set discussion step count using structured state as the authority."""
+        return sync_structured_state(
+            {
+                "routing_state": {
+                    **(state.get("routing_state") or {}),
+                    "discussion_step_count": value,
+                }
+            }
+        )
 
     @staticmethod
     def get_next_step(state: Dict[str, Any]) -> str:
@@ -981,14 +958,15 @@ class StateAccessor:
 
     @staticmethod
     def set_next_step(state: Dict[str, Any], value: str) -> Dict[str, Any]:
-        """Set next step in both locations."""
-        return {
-            "next_step": value,
-            "routing_state": {
-                **(state.get("routing_state") or {}),
-                "next_step": value,
-            },
-        }
+        """Set next step using structured state as the authority."""
+        return sync_structured_state(
+            {
+                "routing_state": {
+                    **(state.get("routing_state") or {}),
+                    "next_step": value,
+                }
+            }
+        )
 
     @staticmethod
     def get_should_stop(state: Dict[str, Any]) -> bool:
@@ -1088,65 +1066,49 @@ class StateAccessor:
         agent_mailbox: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         consensus_reached: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Build a state update that writes to both flat and nested locations.
-
-        This method ensures backward compatibility by updating both
-        the flat fields and the nested structures.
-        """
+        """Build a state update with structured state as the only write source."""
         result: Dict[str, Any] = {}
+        phase_state = dict(state.get("phase_state") or {})
+        routing_state = dict(state.get("routing_state") or {})
+        output_state = dict(state.get("output_state") or {})
 
         if current_round is not None:
-            result["current_round"] = current_round
-            result["phase_state"] = {
-                **(state.get("phase_state") or {}),
-                "current_round": current_round,
-            }
+            phase_state["current_round"] = current_round
 
         if discussion_step is not None:
-            result["discussion_step_count"] = discussion_step
-            result["routing_state"] = {
-                **(state.get("routing_state") or {}),
-                "discussion_step_count": discussion_step,
-            }
+            routing_state["discussion_step_count"] = discussion_step
 
         if next_step is not None:
-            result["next_step"] = next_step
-            routing_state = result.get("routing_state", state.get("routing_state") or {})
-            result["routing_state"] = {**routing_state, "next_step": next_step}
+            routing_state["next_step"] = next_step
 
         if should_stop is not None:
-            result["supervisor_stop_requested"] = should_stop
-            routing_state = result.get("routing_state", state.get("routing_state") or {})
-            result["routing_state"] = {**routing_state, "supervisor_stop_requested": should_stop}
+            routing_state["supervisor_stop_requested"] = should_stop
 
         if stop_reason is not None:
-            result["supervisor_stop_reason"] = stop_reason
-            routing_state = result.get("routing_state", state.get("routing_state") or {})
-            result["routing_state"] = {**routing_state, "supervisor_stop_reason": stop_reason}
+            routing_state["supervisor_stop_reason"] = stop_reason
 
         if history_cards is not None:
-            result["history_cards"] = history_cards
-            result["output_state"] = {
-                **(state.get("output_state") or {}),
-                "history_cards": history_cards,
-            }
+            output_state["history_cards"] = history_cards
 
         if agent_outputs is not None:
-            result["agent_outputs"] = agent_outputs
-            output_state = result.get("output_state", state.get("output_state") or {})
-            result["output_state"] = {**output_state, "agent_outputs": agent_outputs}
+            output_state["agent_outputs"] = agent_outputs
 
         if agent_mailbox is not None:
-            result["agent_mailbox"] = agent_mailbox
-            routing_state = result.get("routing_state", state.get("routing_state") or {})
-            result["routing_state"] = {**routing_state, "agent_mailbox": agent_mailbox}
+            routing_state["agent_mailbox"] = agent_mailbox
 
         if consensus_reached is not None:
-            result["consensus_reached"] = consensus_reached
-            phase_state = result.get("phase_state", state.get("phase_state") or {})
-            result["phase_state"] = {**phase_state, "consensus_reached": consensus_reached}
+            phase_state["consensus_reached"] = consensus_reached
 
-        return result
+        if phase_state:
+            result["phase_state"] = phase_state
+        if routing_state:
+            result["routing_state"] = routing_state
+        if output_state:
+            result["output_state"] = output_state
+
+        # 中文注释：兼容期仍然需要 flat 字段供旧调用路径读取，
+        # 但 flat 不再由调用方直接维护，而是从结构化权威状态统一镜像。
+        return sync_structured_state(result)
 
 
 __all__ = [

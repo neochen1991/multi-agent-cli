@@ -32,6 +32,12 @@ const latestQualityInterpretation = (top1Rate: number) => {
   return { tone: 'risk', text: '最近质量偏弱，建议先看评测结果与关键 session 回放' };
 };
 
+const claimGraphInterpretation = (qualityScore: number) => {
+  if (qualityScore >= 0.7) return { tone: 'healthy', text: '结构化证据图质量稳定，支持证据和排除项较完整' };
+  if (qualityScore >= 0.5) return { tone: 'watch', text: '结构化证据图可用，但支持证据或待验证项仍有缺口' };
+  return { tone: 'risk', text: '结构化证据图偏弱，建议优先复盘 supports / exclusions / missing checks' };
+};
+
 const activeRiskInterpretation = (pendingRemediation: number, timeoutRate: number) => {
   if (pendingRemediation > 0) return { tone: 'risk', text: '存在待处理修复动作，建议优先确认风险级别和审批状态' };
   if (timeoutRate >= 0.15) return { tone: 'watch', text: '最近超时率偏高，建议先查看团队治理指标和热点' };
@@ -268,7 +274,12 @@ const GovernanceCenterPage: React.FC = () => {
 
   const latestQuality = quality[0] || {};
   const latestQualityTop1 = Number((latestQuality.summary || {}).top1_rate || 0);
+  const latestClaimGraphQuality = Number((latestQuality.summary || {}).avg_claim_graph_quality_score || 0);
+  const latestClaimGraphSupportRate = Number((latestQuality.summary || {}).claim_graph_support_rate || 0);
+  const latestClaimGraphExclusionRate = Number((latestQuality.summary || {}).claim_graph_exclusion_rate || 0);
+  const latestClaimGraphMissingCheckRate = Number((latestQuality.summary || {}).claim_graph_missing_check_rate || 0);
   const qualityState = latestQualityInterpretation(latestQualityTop1);
+  const claimGraphState = claimGraphInterpretation(latestClaimGraphQuality);
   const pendingRemediationItems = remediationItems.filter((item) => {
     const state = String(item.state || '').toLowerCase();
     return !['executed', 'rolled_back', 'closed'].includes(state);
@@ -363,6 +374,13 @@ const GovernanceCenterPage: React.FC = () => {
         description: '最近质量趋势偏弱，建议从“回放与审计”复盘关键 session，再决定是否切换运行策略。',
       };
     }
+    if (latestClaimGraphQuality > 0 && latestClaimGraphQuality < 0.5) {
+      return {
+        tone: 'watch',
+        title: '先补结构化证据图质量',
+        description: '最近 benchmark 的 claim graph 偏弱，建议优先看支持证据、排除项和待验证项是否成形。',
+      };
+    }
     return {
       tone: 'healthy',
       title: '当前可以按默认策略继续值班',
@@ -373,6 +391,7 @@ const GovernanceCenterPage: React.FC = () => {
     metricsWindowDays,
     pendingHumanReviewCount,
     pendingRemediationCount,
+    latestClaimGraphQuality,
     worstEvidenceGapRate,
     worstLimitedAnalysisRate,
     worstTeamQueueTimeoutRate,
@@ -391,6 +410,12 @@ const GovernanceCenterPage: React.FC = () => {
       value: latestQualityTop1 ? percent(latestQualityTop1) : '暂无',
       hint: qualityState.text,
       tone: qualityState.tone,
+    },
+    {
+      title: 'Claim Graph 质量',
+      value: latestClaimGraphQuality ? latestClaimGraphQuality.toFixed(3) : '暂无',
+      hint: claimGraphState.text,
+      tone: claimGraphState.tone,
     },
     {
       title: '待人工审核会话',
@@ -699,6 +724,10 @@ const GovernanceCenterPage: React.FC = () => {
                             timeout={percent(item.timeout_rate)} · tool_fail={percent(item.tool_failure_rate)} · 估算成本=
                             {currency(item.estimated_model_cost)}
                           </Text>
+                          <Text type="secondary">
+                            claim_graph={Number(item.avg_claim_graph_quality_score || 0).toFixed(3)} · supports=
+                            {percent(item.claim_graph_support_rate)} · exclusions={percent(item.claim_graph_exclusion_rate)}
+                          </Text>
                         </Space>
                       </List.Item>
                     )}
@@ -986,11 +1015,28 @@ const GovernanceCenterPage: React.FC = () => {
                   <List.Item>
                     <Text type="secondary">
                       {formatBeijingDateTime(String(item.generated_at || ''))} · Top1 {percent((item.summary || {}).top1_rate)} · timeout{' '}
-                      {percent((item.summary || {}).timeout_rate)}
+                      {percent((item.summary || {}).timeout_rate)} · claim graph{' '}
+                      {Number((item.summary || {}).avg_claim_graph_quality_score || 0).toFixed(3)}
                     </Text>
                   </List.Item>
                 )}
               />
+              <Card size="small" className="ops-subtle-block mini-chart-card">
+                <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  <Text strong>最近结构化证据图指标</Text>
+                  <List
+                    size="small"
+                    className="ops-list-tight"
+                    dataSource={[
+                      `平均质量分：${latestClaimGraphQuality.toFixed(3)}`,
+                      `支持证据达标率：${percent(latestClaimGraphSupportRate)}`,
+                      `排除项达标率：${percent(latestClaimGraphExclusionRate)}`,
+                      `待验证项达标率：${percent(latestClaimGraphMissingCheckRate)}`,
+                    ]}
+                    renderItem={(entry) => <List.Item>{entry}</List.Item>}
+                  />
+                </Space>
+              </Card>
             </Space>
           </Card>
         </Space>

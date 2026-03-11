@@ -16,6 +16,7 @@ from app.runtime.langgraph.state import (
     sync_structured_state,
     flatten_structured_state_view,
     flatten_structured_overrides,
+    StateAccessor,
 )
 from app.runtime.messages import AgentEvidence
 
@@ -244,6 +245,19 @@ class TestCreateInitialState:
         assert state["routing_state"]["next_step"] == ""
         assert state["output_state"]["history_cards"] == []
 
+    def test_creates_state_from_structured_authoritative_seed(self):
+        """初始化应由结构化状态统一镜像出兼容 flat 字段。"""
+
+        state = create_initial_state({}, max_discussion_steps=16)
+
+        assert state["phase_state"]["current_round"] == 1
+        assert state["routing_state"]["max_discussion_steps"] == 16
+        assert state["output_state"]["agent_outputs"] == {}
+        flat = flatten_structured_state_view(state)
+        assert flat["current_round"] == 1
+        assert flat["max_discussion_steps"] == 16
+        assert flat["agent_outputs"] == {}
+
 
 class TestStructuredState:
     """归档StructuredState相关测试场景。"""
@@ -349,6 +363,52 @@ class TestStructuredState:
         assert overrides["next_step"] == "judge_agent_node"
         assert "agent_outputs" in overrides
         assert "current_round" not in overrides
+
+
+class TestStateAccessor:
+    """归档StateAccessor相关测试场景。"""
+
+    def test_build_update_prefers_structured_state_as_authority(self):
+        """build_update 应先写结构化状态，再镜像 flat 字段。"""
+
+        state = {
+            "phase_state": {"current_round": 1, "consensus_reached": False},
+            "routing_state": {"next_step": "analysis_parallel", "discussion_step_count": 0},
+            "output_state": {"history_cards": [], "agent_outputs": {}},
+        }
+
+        update = StateAccessor.build_update(
+            state,
+            current_round=3,
+            next_step="speak:JudgeAgent",
+            discussion_step=2,
+            consensus_reached=True,
+        )
+
+        assert update["phase_state"]["current_round"] == 3
+        assert update["phase_state"]["consensus_reached"] is True
+        assert update["routing_state"]["next_step"] == "speak:JudgeAgent"
+        assert update["routing_state"]["discussion_step_count"] == 2
+        flat = flatten_structured_state_view(update)
+        assert flat["current_round"] == 3
+        assert flat["next_step"] == "speak:JudgeAgent"
+        assert flat["discussion_step_count"] == 2
+
+    def test_setters_mirror_flat_fields_from_structured_source(self):
+        """单字段 setter 也应通过结构化状态镜像兼容 flat 字段。"""
+
+        state = {
+            "phase_state": {"current_round": 1},
+            "routing_state": {"next_step": "", "discussion_step_count": 0},
+        }
+
+        next_step_update = StateAccessor.set_next_step(state, "judge_agent_node")
+        discussion_update = StateAccessor.set_discussion_step(state, 4)
+
+        assert next_step_update["routing_state"]["next_step"] == "judge_agent_node"
+        assert next_step_update["next_step"] == "judge_agent_node"
+        assert discussion_update["routing_state"]["discussion_step_count"] == 4
+        assert discussion_update["discussion_step_count"] == 4
 
 
 class TestGetStateSummary:

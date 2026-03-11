@@ -199,3 +199,64 @@ def test_team_metrics_tracks_depth_mode_and_multistep_investigation(tmp_path, mo
     assert item["expert_investigation_sessions"] == 1
     assert item["expert_investigation_rate"] == 0.5
     assert item["expert_investigation_steps"] == 1
+
+
+def test_team_metrics_aggregates_claim_graph_quality(tmp_path, monkeypatch):
+    """团队治理指标应聚合 claim_graph 的质量分与命中率。"""
+
+    service = GovernanceOpsService()
+    monkeypatch.setattr(service, "_debates_file", tmp_path / "debates.json")
+    monkeypatch.setattr(service, "_runtime_events_dir", tmp_path / "runtime_events")
+    service._runtime_events_dir.mkdir(parents=True, exist_ok=True)
+
+    service._write_json(
+        service._debates_file,
+        {
+            "sessions": [
+                {
+                    "id": "deb_claim_graph",
+                    "incident_id": "inc_claim_graph",
+                    "status": "completed",
+                    "tenant_id": "gateway-sre",
+                    "created_at": "2026-03-07T10:00:00+00:00",
+                    "context": {"analysis_depth_mode": "standard"},
+                },
+                {
+                    "id": "deb_plain",
+                    "incident_id": "inc_plain",
+                    "status": "completed",
+                    "tenant_id": "gateway-sre",
+                    "created_at": "2026-03-07T11:00:00+00:00",
+                    "context": {"analysis_depth_mode": "standard"},
+                },
+            ],
+            "results": [
+                {
+                    "session_id": "deb_claim_graph",
+                    "confidence": 0.78,
+                    "claim_graph": {
+                        "supports": [
+                            {"summary": "gateway route not found"},
+                            {"summary": "controller endpoint exists"},
+                            {"summary": "database not root cause"},
+                        ],
+                        "eliminated_alternatives": ["数据库不是原发根因"],
+                        "missing_checks": ["验证网关路由刷新是否恢复"],
+                    },
+                },
+                {
+                    "session_id": "deb_plain",
+                    "confidence": 0.55,
+                },
+            ],
+        },
+    )
+
+    payload = asyncio.run(service.team_metrics(days=30, limit=10))
+    item = payload["items"][0]
+
+    assert item["claim_graph_session_rate"] == 0.5
+    assert item["avg_claim_graph_quality_score"] == 1.0
+    assert item["claim_graph_support_rate"] == 1.0
+    assert item["claim_graph_exclusion_rate"] == 1.0
+    assert item["claim_graph_missing_check_rate"] == 1.0

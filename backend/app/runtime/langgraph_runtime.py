@@ -50,6 +50,9 @@ from app.runtime.langgraph.prompt_builder import PromptBuilder
 from app.runtime.langgraph.phase_executor import PhaseExecutor
 from app.runtime.langgraph.routing_strategy import HybridRouter
 from app.runtime.langgraph.services.state_transition_service import StateTransitionService
+from app.runtime.langgraph.services.finalization_service import FinalizationService
+from app.runtime.langgraph.services.judgment_boundary import JudgmentBoundary
+from app.runtime.langgraph.services.review_boundary import ReviewBoundary
 from app.runtime.langgraph.services.routing_service import RoutingService
 from app.runtime.langgraph.phase_manager import PhaseManager
 from app.runtime.langgraph.session_compaction import SessionCompaction
@@ -245,6 +248,20 @@ class LangGraphRuntimeOrchestrator:
         self._phase_manager = PhaseManager()
         self._session_compaction = SessionCompaction()
         self._doom_loop_guard = DoomLoopGuard(threshold=3)
+        self._review_boundary = ReviewBoundary()
+        self._judgment_boundary = JudgmentBoundary(
+            normalize_agent_output_impl=lambda agent_name, raw_content: normalize_agent_output_parser(
+                agent_name,
+                raw_content,
+                judge_fallback_summary=self.JUDGE_FALLBACK_SUMMARY,
+            ),
+            normalize_judge_output_impl=lambda parsed, raw_content: normalize_judge_output(
+                parsed,
+                raw_content,
+                fallback_summary=self.JUDGE_FALLBACK_SUMMARY,
+            ),
+            build_final_payload_impl=self._build_final_payload,
+        )
         self._state_transition_service = StateTransitionService(
             dedupe_new_messages=self._dedupe_new_messages,
             message_deltas_from_cards=self._message_deltas_from_cards,
@@ -256,6 +273,11 @@ class LangGraphRuntimeOrchestrator:
                 limit=20,
             ),
             structured_snapshot=structured_state_snapshot,
+        )
+        self._finalization_service = FinalizationService(
+            build_final_payload=self._judgment_boundary.build_final_payload,
+            review_boundary=self._review_boundary,
+            normalize_final_payload=self._judgment_boundary.normalize_final_payload,
         )
 
         logger.info(
@@ -2058,53 +2080,25 @@ class LangGraphRuntimeOrchestrator:
         history_cards = self._history_cards_for_state(state, limit=24)
         consensus_reached = bool(state.get("consensus_reached") or False)
         executed_rounds = int(state.get("executed_rounds") or state.get("current_round") or 0)
-        awaiting_human_review = bool(state.get("awaiting_human_review") or False)
-        human_review_reason = str(state.get("human_review_reason") or "").strip()
-        human_review_payload = dict(state.get("human_review_payload") or {})
-        resume_from_step = str(state.get("resume_from_step") or "report_generation").strip()
-        final_payload = dict(state.get("final_payload") or {})
-        if not final_payload:
-            # finalize 是最后一道兜底门。即便中间节点没有显式写入 final_payload，
-            # 这里也必须补出完整结果对象，避免前端和报告页拿到空结果。
-            final_payload = self._build_final_payload(
-                history_cards=history_cards,
-                consensus_reached=consensus_reached,
-                executed_rounds=executed_rounds,
-            )
-        if awaiting_human_review:
-            final_payload["awaiting_human_review"] = True
-            final_payload["human_review"] = {
-                "reason": human_review_reason,
-                "payload": human_review_payload,
-                "resume_from_step": resume_from_step,
-            }
+        decision = self._finalization_service.resolve(
+            state=dict(state or {}),
+            history_cards=history_cards,
+            consensus_reached=consensus_reached,
+            executed_rounds=executed_rounds,
+        )
+        final_payload = dict(decision.final_payload or {})
+        if decision.awaiting_human_review:
             await runtime_session_store.mark_waiting_review(
                 str(self.session_id),
                 FinalVerdict.model_validate(final_payload.get("final_judgment") or {}),
             )
-            await self._emit_event(
-                {
-                    "type": "runtime_human_review_requested",
-                    "confidence": final_payload.get("confidence", 0.0),
-                    "consensus_reached": consensus_reached,
-                    "mode": "langgraph_runtime",
-                    "review_reason": human_review_reason,
-                    "resume_from_step": resume_from_step,
-                }
-            )
+            await self._emit_event(decision.runtime_event)
         else:
             await runtime_session_store.complete(
                 str(self.session_id),
                 FinalVerdict.model_validate(final_payload.get("final_judgment") or {}),
             )
-            await self._emit_event(
-                {
-                    "type": "runtime_debate_completed",
-                    "confidence": final_payload.get("confidence", 0.0),
-                    "consensus_reached": consensus_reached,
-                    "mode": "langgraph_runtime",
-                }
-            )
+            await self._emit_event(decision.runtime_event)
         next_state = {"final_payload": final_payload}
         merged_preview = {**dict(state), **next_state}
         return {**next_state, **structured_state_snapshot(merged_preview)}
@@ -2726,6 +2720,91 @@ class LangGraphRuntimeOrchestrator:
             and (len(source_types) >= 2 or len(source_agents) >= 3)
             and exclusion_signal
         )
+
+    @staticmethod
+    def _build_minimal_claim_graph(
+        *,
+        final_judgment: Any,
+        history_cards: List[AgentEvidence],
+        decision_rationale: Any,
+        verification_plan: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """为最终裁决补一份最小可消费的 claim graph。"""
+        if not isinstance(final_judgment, dict):
+            return {}
+        root_cause = final_judgment.get("root_cause")
+        if not isinstance(root_cause, dict):
+            return {}
+
+        evidence_chain = final_judgment.get("evidence_chain")
+        if not isinstance(evidence_chain, list):
+            evidence_chain = []
+        supports: List[Dict[str, Any]] = []
+        eliminated_alternatives: List[str] = []
+        exclusion_markers = ("不是原发根因", "不是根因", "排除", "not root cause")
+        for item in evidence_chain[:8]:
+            if not isinstance(item, dict):
+                continue
+            supports.append(
+                {
+                    "type": str(item.get("type") or "unknown"),
+                    "summary": str(item.get("description") or "")[:220],
+                    "source": str(item.get("source") or ""),
+                    "strength": str(item.get("strength") or "medium"),
+                    "source_ref": str(item.get("source_ref") or item.get("location") or "") or None,
+                }
+            )
+            description = str(item.get("description") or "").strip()
+            if any(marker in description.lower() for marker in [m.lower() for m in exclusion_markers]):
+                eliminated_alternatives.append(description[:220])
+
+        contradicts: List[Dict[str, Any]] = []
+        for card in history_cards:
+            if card.agent_name not in {"CriticAgent", "RebuttalAgent"}:
+                continue
+            conclusion = str(card.conclusion or "").strip()
+            if not conclusion:
+                continue
+            contradicts.append(
+                {
+                    "agent": card.agent_name,
+                    "phase": card.phase,
+                    "summary": conclusion[:220],
+                    "confidence": float(card.confidence or 0.0),
+                }
+            )
+
+        missing_checks: List[str] = []
+        for item in verification_plan[:6]:
+            if not isinstance(item, dict):
+                continue
+            objective = str(item.get("objective") or item.get("summary") or "").strip()
+            if objective:
+                missing_checks.append(objective[:220])
+            for step in list(item.get("steps") or [])[:2]:
+                text = str(step or "").strip()
+                if text:
+                    missing_checks.append(text[:220])
+        if isinstance(decision_rationale, dict):
+            for item in list(decision_rationale.get("key_factors") or [])[:6]:
+                text = str(item or "").strip()
+                lowered = text.lower()
+                if text and any(marker in lowered for marker in ("待验证", "需确认", "缺少", "待补充", "to verify")):
+                    missing_checks.append(text[:220])
+                if text and any(marker in lowered for marker in [m.lower() for m in exclusion_markers]):
+                    eliminated_alternatives.append(text[:220])
+
+        return {
+            "primary_claim": {
+                "summary": str(root_cause.get("summary") or "").strip(),
+                "category": str(root_cause.get("category") or "").strip(),
+                "confidence": float(root_cause.get("confidence") or 0.0),
+            },
+            "supports": supports,
+            "contradicts": contradicts[:4],
+            "missing_checks": list(dict.fromkeys(item for item in missing_checks if item))[:6],
+            "eliminated_alternatives": list(dict.fromkeys(item for item in eliminated_alternatives if item))[:6],
+        }
 
     @staticmethod
     def _build_top_k_hypotheses(history_cards: List[AgentEvidence], k: int = 3) -> List[Dict[str, Any]]:
@@ -4123,11 +4202,7 @@ class LangGraphRuntimeOrchestrator:
     # app.runtime.langgraph.parsers to keep runtime focused on graph orchestration.
     def _normalize_agent_output(self, agent_name: str, raw_content: str) -> Dict[str, Any]:
         """把普通 Agent 原始输出解析成统一结构。"""
-        return normalize_agent_output_parser(
-            agent_name,
-            raw_content,
-            judge_fallback_summary=self.JUDGE_FALLBACK_SUMMARY,
-        )
+        return self._judgment_boundary.normalize_agent_output(agent_name, raw_content)
 
     def _normalize_commander_output(self, parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
         """把主 Agent 原始输出解析成统一结构。"""
@@ -4139,11 +4214,7 @@ class LangGraphRuntimeOrchestrator:
 
     def _normalize_judge_output(self, parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
         """把 Judge 输出解析成最终裁决格式。"""
-        return normalize_judge_output(
-            parsed,
-            raw_content,
-            fallback_summary=self.JUDGE_FALLBACK_SUMMARY,
-        )
+        return self._judgment_boundary.normalize_judge_output(parsed, raw_content)
 
     def _is_placeholder_summary(self, summary: str) -> bool:
         """判断摘要是否仍处于占位态，不能作为最终结论。"""
@@ -4425,6 +4496,15 @@ class LangGraphRuntimeOrchestrator:
             for card in history_cards
             if card.agent_name in {"CriticAgent", "RebuttalAgent"}
         ]
+        if isinstance(final_judgment, dict):
+            # 中文注释：先把 claim graph 挂在 final_judgment 下，保持与现有 evidence_chain
+            # 同层，后续服务层和 benchmark 可以逐步切到更结构化的消费方式。
+            final_judgment["claim_graph"] = self._build_minimal_claim_graph(
+                final_judgment=final_judgment,
+                history_cards=history_cards,
+                decision_rationale=decision_rationale,
+                verification_plan=verification_plan,
+            )
 
         return {
             "confidence": max(0.0, min(1.0, confidence)),

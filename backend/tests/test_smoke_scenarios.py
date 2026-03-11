@@ -50,3 +50,14 @@ def test_smoke_script_prints_report_id_in_summary():
     content = SMOKE_SCRIPT.read_text()
 
     assert "report_id:" in content
+
+
+def test_smoke_script_allows_completed_session_with_partial_artifact_snapshot():
+    """会话已 completed 时，脚本应输出最后拿到的 detail/result/report，而不是一直卡到总超时。"""
+
+    content = SMOKE_SCRIPT.read_text()
+
+    assert "return {\n      detail: lastDetail,\n      debateResult: lastResult,\n      report: lastReport,\n      partial: true," in content
+    assert "const effective = isEffectiveRootCause(debateResult?.root_cause);" in content
+    assert "const reportGenerated = Boolean(report?.report_id);" in content
+    assert "if (detail.status === 'completed' && !effective) {" in content

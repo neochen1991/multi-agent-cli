@@ -23,4 +23,11 @@
 - `distractor_root_causes`
 
 说明：
-- benchmark loader 目前只消费核心字段，扩展字段主要用于人工评审和后续 richer scoring。
+- benchmark loader 现在也会消费：
+  - `expected_causal_chain`
+  - `must_include`
+  - `must_exclude`
+- 这些字段当前用于 `claim_graph` richer scoring：
+  - `must_include` 对应 `supports`
+  - `must_exclude` 对应 `eliminated_alternatives`
+  - `expected_causal_chain` 会影响 `missing_checks` 的期望分

@@ -258,6 +258,22 @@ Service 层会先做责任田映射，包括：
 - `focused_context`
 - `tool_context`
 - `peer_context`
+
+### 6.5.1 Judgment / Review 边界
+
+当前 runtime 已把最容易漂移的两块抽成稳定 helper：
+
+- `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/services/judgment_boundary.py`
+  - 统一 Judge 输出恢复入口
+  - 为最终载荷补最小合同：`final_judgment / evidence_chain / claim_graph`
+- `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/services/review_boundary.py`
+  - 统一人工审核状态结构
+  - 让 `session.context.human_review` 和 `final_payload.human_review` 保持同构
+
+这样做的直接收益是：
+- 测试不再必须深挖 orchestrator 私有细节
+- result / report / resume 读取同一套 review 结构
+- 后续把 judgment / review 子图再继续拆细时，边界不会重长一套新协议
 - `mailbox_context`
 - `work_log_context`
 
@@ -273,6 +289,11 @@ Service 层会先做责任田映射，包括：
 2. 工具受限时不再简单等同于“无效输出”
    - 若共享日志、代码、数据库证据已足够，运行时会把专家输出标成 `context_grounded_without_tool`
    - 这样 Judge 和路由层可以保留“受限但可用”的中等置信度，而不是机械降级
+
+3. 状态写口已经开始收敛到结构化 state
+   - `create_initial_state()` 先组装 `phase_state / routing_state / output_state`
+   - `StateAccessor.build_update()` 和单字段 setter 也先写结构化 state
+   - flat 字段仍然保留，但由 `sync_structured_state()` 统一镜像，不再要求调用方手工双写
 
 ### 6.6 裁决与报告生成
 
@@ -297,6 +318,19 @@ Service 层会先做责任田映射，包括：
 3. `quick` 模式下对网关本地 404 现在有专门的快速收口规则
    - 命中条件是：日志确认 `route not found`、代码/资产确认端点存在、数据库已被排除为主因
    - 这条规则会优先于“继续定向补数据库证据”，直接切到 `JudgeAgent`
+
+4. finalize 阶段已经拆出显式边界
+   - `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/services/finalization_service.py`
+   - 它负责三件事：补 `final_payload`、封装 `human_review`、生成终态事件
+   - `LangGraphRuntimeOrchestrator._graph_finalize()` 现在只负责写 store 和发事件
+
+5. Judge 最终裁决现在会额外挂最小 `claim_graph`
+   - `primary_claim`
+   - `supports`
+   - `contradicts`
+   - `missing_checks`
+   - `eliminated_alternatives`
+   - 这是从线性 `evidence_chain` 向结构化证据图演进的第一步
 
 ### 6.7 前端流式展示
 
@@ -637,6 +671,14 @@ curl http://127.0.0.1:8000/api/v1/debates/output-refs/{ref_id}
 - 待验证问题
 - 已知证据边界
 
+另一个值得注意的点是：当前状态模块不再鼓励“flat + nested 同时手写”。
+
+推荐写法：
+- 先写 `phase_state / routing_state / output_state`
+- 再让 `sync_structured_state()` 统一镜像兼容 flat 视图
+
+这能显著降低状态漂移和快照回写时被旧 flat 字段反向覆盖的风险。
+
 ### 9.4 Node 与执行链
 
 节点目录：
@@ -665,6 +707,7 @@ curl http://127.0.0.1:8000/api/v1/debates/output-refs/{ref_id}
 - `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/routing/rule_engine.py`
 - `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/routing/rules_impl.py`
 - `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/services/state_transition_service.py`
+- `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/services/finalization_service.py`
 
 ### 9.5 可靠性组件
 

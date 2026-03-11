@@ -451,6 +451,10 @@ export interface BenchmarkSummary {
   timeout_rate: number;
   empty_conclusion_rate: number;
   cross_source_evidence_rate?: number;
+  avg_claim_graph_quality_score?: number;
+  claim_graph_support_rate?: number;
+  claim_graph_exclusion_rate?: number;
+  claim_graph_missing_check_rate?: number;
 }
 
 export interface BenchmarkRunResult {
@@ -951,8 +955,8 @@ export const governanceApi = {
     const { data } = await api.get<Record<string, unknown>>('/governance/system-card');
     return data;
   },
-  async qualityTrend(limit = 20): Promise<{ items: Array<Record<string, unknown>> }> {
-    const { data } = await api.get<{ items: Array<Record<string, unknown>> }>('/governance/quality-trend', {
+  async qualityTrend(limit = 20): Promise<{ items: BaselineFile[] }> {
+    const { data } = await api.get<{ items: BaselineFile[] }>('/governance/quality-trend', {
       params: { limit },
     });
     return data;

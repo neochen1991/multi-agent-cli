@@ -390,6 +390,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
         impact = self._safe_dict(final_judgment.get("impact_analysis", {}))
         risk = self._safe_dict(final_judgment.get("risk_assessment", {}))
         fix = self._safe_dict(final_judgment.get("fix_recommendation", {}))
+        claim_graph = self._safe_dict(final_judgment.get("claim_graph", {}))
         evidence = self._safe_list(final_judgment.get("evidence_chain", []))
         action_items = self._safe_list(debate_result.get("action_items", []))
         root_summary = extract_readable_text(root_cause.get("summary"), fallback=str(root_cause.get("summary") or "待进一步确认"), max_len=300)
@@ -540,6 +541,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
         risk = self._safe_dict(final_judgment.get("risk_assessment", {}))
         impact = self._safe_dict(final_judgment.get("impact_analysis", {}))
         fix = self._safe_dict(final_judgment.get("fix_recommendation", {}))
+        claim_graph = self._safe_dict(final_judgment.get("claim_graph", {}))
 
         if not merged["executive_summary"].get("title"):
             merged["executive_summary"]["title"] = f"故障分析报告 - {incident.get('title', '未知故障')}"
@@ -597,6 +599,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
             "design_ref": interface_mapping.get("design_ref"),
             "guidance": interface_mapping.get("guidance", []),
         }
+        merged["appendix"]["claim_graph"] = claim_graph
 
         return merged
 
@@ -881,6 +884,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
         assets: Dict[str, Any],
     ) -> str:
         """格式化为 JSON"""
+        normalized_content = self._normalize_report_structure(report_content, incident, debate_result, assets)
         report = {
             "report_metadata": {
                 "generated_at": self._utc_now().isoformat(),
@@ -894,7 +898,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
                 "design_assets_count": len(assets.get("design_assets", [])) if isinstance(assets, dict) else 0,
                 "interface_mapping": (assets.get("interface_mapping", {}) if isinstance(assets, dict) else {}),
             },
-            **report_content
+            **normalized_content
         }
         return json.dumps(report, ensure_ascii=False, indent=2)
     

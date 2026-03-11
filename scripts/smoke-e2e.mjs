@@ -161,6 +161,17 @@ async function waitForDebateArtifacts(sessionId, incidentId, token = '', timeout
     await sleep(2000);
   }
 
+  // 中文注释：如果会话已经 completed，但 result/report 因瞬时接口失败没同时拿到，
+  // 也要把最后一份快照返回给上层，由上层决定是判失败还是输出更明确的错误摘要。
+  if (String(lastDetail?.status || '') === 'completed') {
+    return {
+      detail: lastDetail,
+      debateResult: lastResult,
+      report: lastReport,
+      partial: true,
+    };
+  }
+
   throw new Error(
     `artifact_poll_timeout: session=${sessionId} detail=${JSON.stringify(lastDetail || {})}`,
   );
@@ -285,10 +296,21 @@ async function runScenario(scenario, token) {
 
   const artifacts = await artifactPromise;
   const detail = artifacts.detail;
-  const debateResult = artifacts.debateResult;
-  const report = artifacts.report;
+  const debateResult = artifacts.debateResult || {};
+  const report = artifacts.report || {};
 
-  const effective = isEffectiveRootCause(debateResult.root_cause);
+  const effective = isEffectiveRootCause(debateResult?.root_cause);
+  const reportGenerated = Boolean(report?.report_id);
+  if (detail.status === 'completed' && !effective) {
+    throw new Error(
+      `completed_without_effective_root_cause: session=${session.id} result=${JSON.stringify(debateResult)}`,
+    );
+  }
+  if (detail.status === 'completed' && !reportGenerated) {
+    throw new Error(
+      `completed_without_report: session=${session.id} detail=${JSON.stringify(detail)}`,
+    );
+  }
   return {
     scenario: scenario.id,
     incident_id: incident.id,
@@ -298,11 +320,12 @@ async function runScenario(scenario, token) {
     root_cause: debateResult.root_cause,
     report_id: report.report_id || '',
     effective_root_cause: effective,
-    report_generated: Boolean(report.report_id),
+    report_generated: reportGenerated,
     ws_events: realtime.events,
     ws_fallback: Boolean(realtime.fallback),
     ws_error: realtime.ws_error || '',
-    passed: detail.status === 'completed' && effective && Boolean(report.report_id),
+    partial_artifacts: Boolean(artifacts.partial),
+    passed: detail.status === 'completed' && effective && reportGenerated,
   };
 }
 

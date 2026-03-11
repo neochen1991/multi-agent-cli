@@ -8,6 +8,9 @@
 - 已完成底层编排从旧方案迁移到 **LangGraph Runtime**。
 - 主 Agent（`ProblemAnalysisAgent`）负责任务拆解、命令分发、收敛决策。
 - 运行时已落地结构化状态、`agent_local_state` 私有工作记忆和 checkpoint / resume 基础能力。
+- 状态模块当前采用“结构化状态权威写口 + flat 兼容镜像”：
+  - `create_initial_state()` 和 `StateAccessor.build_update()` 已改成先写 `phase_state / routing_state / output_state`
+  - flat 字段只作为兼容视图，由 `sync_structured_state()` 统一镜像
 - 专家 Prompt 已统一切换到 context envelope：
   - `shared_context`
   - `focused_context`
@@ -31,6 +34,18 @@
   - `辩论过程`
   - `辩论结果`
 - 历史记录页已展示每个任务的 `开始时间`，优先使用分析会话真正启动时间。
+- finalize 收口链路已下沉为显式边界：
+  - `FinalizationService` 负责最终载荷补全、人工审核封装和终态事件决策
+  - runtime 主类只负责调用 session store 和事件派发
+- `judgment_boundary.py / review_boundary.py` 已补齐为稳定 helper：
+  - `JudgmentBoundary` 负责 Judge 输出恢复与 final payload 最小合同兜底
+  - `ReviewBoundary` 负责等待人工审核状态与 `final_payload.human_review` 的统一结构
+- `JudgeAgent` 的最终裁决已附带最小 `claim_graph`：
+  - `primary_claim`
+  - `supports`
+  - `contradicts`
+  - `missing_checks`
+  - `eliminated_alternatives`
 - 工具调用已支持：
   - 开关控制
   - 命令驱动（由主 Agent 指令决定是否调用）
@@ -116,6 +131,8 @@ sequenceDiagram
 - `backend/app/services/debate_service.py`：会话执行与事件沉淀
 - `backend/app/services/agent_tool_context_service.py`：Agent 工具上下文、门禁、审计
 - `backend/app/runtime/langgraph/services/state_transition_service.py`：阶段状态回写与快照合并
+- `backend/app/runtime/langgraph/services/judgment_boundary.py`：Judge 边界 helper
+- `backend/app/runtime/langgraph/services/review_boundary.py`：人工审核边界 helper
 
 ### 2.3 前端
 

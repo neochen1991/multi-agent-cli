@@ -23,6 +23,9 @@ class IncidentFixture:
     owner: str
     tags: List[str]
     golden: bool
+    expected_causal_chain: List[str]
+    must_include: List[str]
+    must_exclude: List[str]
 
 
 def _fixtures_dir() -> Path:
@@ -62,6 +65,21 @@ def load_fixtures(limit: int = 0) -> List[IncidentFixture]:
                     if str(item).strip()
                 ],
                 golden=bool(payload.get("golden", False)),
+                expected_causal_chain=[
+                    str(item).strip()
+                    for item in list(payload.get("expected_causal_chain") or [])
+                    if str(item).strip()
+                ],
+                must_include=[
+                    str(item).strip()
+                    for item in list(payload.get("must_include") or [])
+                    if str(item).strip()
+                ],
+                must_exclude=[
+                    str(item).strip()
+                    for item in list(payload.get("must_exclude") or [])
+                    if str(item).strip()
+                ],
             )
         )
     return fixtures
