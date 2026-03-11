@@ -14,7 +14,7 @@ Incident Service
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 
 import structlog
@@ -69,6 +69,21 @@ class IncidentService:
             else InMemoryIncidentRepository()
         )
         self._log_parser = LogParserTool()
+
+    @staticmethod
+    def _created_at_sort_key(incident: Incident) -> datetime:
+        """
+        统一 incident.created_at 的排序口径。
+
+        中文注释：历史本地文件里可能混有无时区时间；这里在排序入口统一补成 UTC，
+        避免列表接口因为 naive/aware 混排直接崩掉。
+        """
+        created_at = incident.created_at
+        if isinstance(created_at, datetime):
+            if created_at.tzinfo is None:
+                return created_at.replace(tzinfo=UTC)
+            return created_at.astimezone(UTC)
+        return datetime.min.replace(tzinfo=UTC)
     
     async def create_incident(self, data: IncidentCreate) -> Incident:
         """
@@ -225,7 +240,7 @@ class IncidentService:
             incidents = [i for i in incidents if i.service_name == service_name]
 
         # 按创建时间倒序排列
-        incidents.sort(key=lambda x: x.created_at, reverse=True)
+        incidents.sort(key=self._created_at_sort_key, reverse=True)
 
         # 分页处理
         total = len(incidents)

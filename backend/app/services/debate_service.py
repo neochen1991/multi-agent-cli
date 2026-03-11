@@ -244,6 +244,30 @@ class DebateService:
             "recoverable": False,
             "retry_hint": "请查看后端日志定位异常后重试",
         }
+
+    @staticmethod
+    def _should_degrade_missing_effective_conclusion(error_text: str) -> bool:
+        """判断“无有效结论”是否由超时/限流等可恢复故障触发，应降级产出结果而非直接失败。"""
+        text = str(error_text or "").strip()
+        lowered = text.lower()
+        if "未获得有效大模型结论" not in text:
+            return False
+        timeout_markers = (
+            "timeout",
+            "timed out",
+            "session timeout",
+            "llm queue timeout",
+            "llm invoke timeout",
+        )
+        rate_limit_markers = (
+            "llm_rate_limited",
+            "429",
+            "rate limit",
+            "accountquotaexceeded",
+            "toomanyrequests",
+            "serveroverloaded",
+        )
+        return any(marker in lowered for marker in (*timeout_markers, *rate_limit_markers))
     
     async def create_session(
         self,
@@ -627,8 +651,36 @@ class DebateService:
                         if "timeout" in lowered_error:
                             timeout_failure = True
                         no_effective_conclusion = "未获得有效大模型结论" in error_text
+                        degradable_missing_conclusion = self._should_degrade_missing_effective_conclusion(error_text)
                         if no_effective_conclusion and settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION:
                             invalid_conclusion_failure = True
+                        if degradable_missing_conclusion and attempt >= max_attempts:
+                            debate_result = self._build_degraded_debate_result(
+                                context=session.context,
+                                assets=assets,
+                                error_text=error_text,
+                            )
+                            await _emit_and_record(
+                                {
+                                    "type": "ai_debate_degraded",
+                                    "phase": "debating",
+                                    "attempt": attempt,
+                                    "max_attempts": max_attempts,
+                                    "error": error_text,
+                                    "reason": "missing_effective_conclusion_due_to_timeout_or_rate_limit",
+                                }
+                            )
+                            logger.warning(
+                                "ai_debate_degraded_after_missing_effective_conclusion",
+                                session_id=session_id,
+                                error=error_text,
+                            )
+                            break
+                        if (
+                            no_effective_conclusion
+                            and settings.DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION
+                            and not degradable_missing_conclusion
+                        ):
                             await _emit_and_record(
                                 {
                                     "type": "debate_failed_no_effective_llm_conclusion",

@@ -116,6 +116,8 @@ type PersistedRunningTask = {
 };
 
 const RUNNING_ANALYSIS_STORAGE_KEY = 'incident_running_analysis_task';
+const ACTIVE_SESSION_STATUSES = ['pending', 'running', 'analyzing', 'debating', 'waiting', 'retrying'];
+const TERMINAL_SESSION_STATUSES = ['completed', 'failed', 'cancelled', 'closed', 'resolved'];
 
 const IncidentPage: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -167,6 +169,9 @@ const IncidentPage: React.FC = () => {
   const seenEventFingerprintsRef = useRef<Set<string>>(new Set());
   const pendingEventRecordsRef = useRef<EventRecord[]>([]);
   const eventFlushTimerRef = useRef<number | null>(null);
+  const artifactPollingTimerRef = useRef<number | null>(null);
+  const artifactLoadInFlightRef = useRef(false);
+  const lastMappingToastIdRef = useRef<string>('');
 
   const readPersistedRunningTask = (): PersistedRunningTask | null => {
     try {
@@ -287,6 +292,45 @@ const IncidentPage: React.FC = () => {
     } catch {
       return String(value);
     }
+  };
+
+  const getEventTimestampMs = (row: EventRecord): number => {
+    const data = asRecord(row.data);
+    const raw = String(data.timestamp || '').trim();
+    if (!raw) return 0;
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const buildPersistedEventRecord = (
+    item: Record<string, unknown>,
+    idx: number,
+  ): EventRecord | null => {
+    const event = asRecord(item.event);
+    const kind = typeof event.type === 'string' ? event.type : 'event';
+    if (isLowLevelRealtimeNoise(kind)) {
+      return null;
+    }
+    const ts = typeof item.timestamp === 'string' ? item.timestamp : '';
+    const eventId = typeof event.event_id === 'string' ? event.event_id : '';
+    const dedupeKey = typeof event.dedupe_key === 'string' ? event.dedupe_key : '';
+    return {
+      id: dedupeKey || eventId || `persisted_${idx}_${ts || kind}`,
+      timeText: ts ? formatBeijingTime(ts) : '--:--:--',
+      kind,
+      text: formatEventText(kind, event),
+      data: event,
+    };
+  };
+
+  const mergeEventRecords = (existing: EventRecord[], incoming: EventRecord[]): EventRecord[] => {
+    const merged = new Map<string, EventRecord>();
+    [...existing, ...incoming].forEach((row) => {
+      merged.set(row.id, row);
+    });
+    return Array.from(merged.values())
+      .sort((left, right) => getEventTimestampMs(right) - getEventTimestampMs(left))
+      .slice(0, 180);
   };
 
   const formatToolDataPreview = (
@@ -1460,11 +1504,11 @@ const IncidentPage: React.FC = () => {
     const data = asRecord(row.data);
     const phase = String(data.phase || '').toLowerCase();
     const kind = row.kind.toLowerCase();
-    if (isAssetMappingEvent(row)) return false;
     if (kind === 'session_created_local' || kind === 'ws_open' || kind === 'ws_close' || kind === 'snapshot') {
       return false;
     }
     return (
+      kind === 'asset_interface_mapping_completed' ||
       kind === 'agent_chat_message' ||
       kind === 'agent_round' ||
       kind === 'agent_command_issued' ||
@@ -1555,9 +1599,11 @@ const IncidentPage: React.FC = () => {
   };
 
   const loadSessionArtifacts = async (sid: string) => {
+    artifactLoadInFlightRef.current = true;
+    try {
     const detail = await debateApi.get(sid);
     const status = String(detail.status || '').toLowerCase();
-    if (['completed', 'failed', 'cancelled'].includes(status)) {
+    if (TERMINAL_SESSION_STATUSES.includes(status)) {
       clearPersistedRunningTask(sid);
     }
     const shouldLoadFinalResult = status === 'completed';
@@ -1595,32 +1641,11 @@ const IncidentPage: React.FC = () => {
       ) {
         assetMappingReadyRef.current = true;
       }
-      setEventRecords((prev) => {
-      if (prev.length > 0) return prev;
-        return persisted
-          .filter((item) => {
-            const row = (item || {}) as Record<string, unknown>;
-            const event = (row.event || {}) as Record<string, unknown>;
-            return !isLowLevelRealtimeNoise(String(event.type || ''));
-          })
-          .slice(0, 180)
-          .map((item, idx) => {
-            const row = (item || {}) as Record<string, unknown>;
-            const event = (row.event || {}) as Record<string, unknown>;
-            const ts = typeof row.timestamp === 'string' ? row.timestamp : '';
-            const kind = typeof event.type === 'string' ? event.type : 'event';
-            const eventId = typeof event.event_id === 'string' ? event.event_id : '';
-            const dedupeKey = typeof event.dedupe_key === 'string' ? event.dedupe_key : '';
-            return {
-              id: dedupeKey || eventId || `persisted_${idx}_${ts || kind}`,
-              timeText: ts ? formatBeijingTime(ts) : '--:--:--',
-              kind,
-              text: formatEventText(kind, event),
-              data: event,
-            } as EventRecord;
-          })
-          .reverse();
-      });
+      const persistedRecords = persisted
+        .map((item, idx) => buildPersistedEventRecord((item || {}) as Record<string, unknown>, idx))
+        .filter((item): item is EventRecord => Boolean(item));
+      // 当前页需要把 detail 里的 event_log 当作补偿数据源增量合并，不能只在空列表时恢复。
+      setEventRecords((prev) => mergeEventRecords(prev, persistedRecords));
       persisted.forEach((item) => {
         const row = (item || {}) as Record<string, unknown>;
         const event = (row.event || {}) as Record<string, unknown>;
@@ -1640,7 +1665,17 @@ const IncidentPage: React.FC = () => {
         if (fingerprint) seenEventFingerprintsRef.current.add(fingerprint);
       });
     }
+    const persistedTask = readPersistedRunningTask();
+    const hasCurrentPersistedTask = persistedTask?.sessionId === sid;
+    if (ACTIVE_SESSION_STATUSES.includes(status) || hasCurrentPersistedTask) {
+      setRunning(true);
+    } else if (TERMINAL_SESSION_STATUSES.includes(status)) {
+      setRunning(false);
+    }
     return detail;
+    } finally {
+      artifactLoadInFlightRef.current = false;
+    }
   };
 
   const createIncidentAndSession = async (): Promise<{ incidentId: string; sessionId: string } | null> => {
@@ -1665,6 +1700,7 @@ const IncidentPage: React.FC = () => {
       seenEventIdsRef.current.clear();
       seenEventDedupeKeysRef.current.clear();
       seenEventFingerprintsRef.current.clear();
+      lastMappingToastIdRef.current = '';
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
@@ -1697,6 +1733,7 @@ const IncidentPage: React.FC = () => {
       seenEventIdsRef.current.clear();
       seenEventDedupeKeysRef.current.clear();
       seenEventFingerprintsRef.current.clear();
+      lastMappingToastIdRef.current = '';
       setEventRecords([]);
       setStreamedMessageText({});
       setExpandedDialogueIds({});
@@ -2130,6 +2167,7 @@ const IncidentPage: React.FC = () => {
     seenEventIdsRef.current.clear();
     seenEventDedupeKeysRef.current.clear();
     seenEventFingerprintsRef.current.clear();
+    lastMappingToastIdRef.current = '';
     setEventRecords([]);
     setStreamedMessageText({});
     setExpandedDialogueIds({});
@@ -2191,6 +2229,51 @@ const IncidentPage: React.FC = () => {
   }, [running]);
 
   useEffect(() => {
+    if (artifactPollingTimerRef.current !== null) {
+      window.clearInterval(artifactPollingTimerRef.current);
+      artifactPollingTimerRef.current = null;
+    }
+    if (!sessionId) {
+      return;
+    }
+    const normalizedStatus = String(sessionDetail?.status || '').toLowerCase();
+    const persistedTask = readPersistedRunningTask();
+    const hasCurrentPersistedTask = persistedTask?.sessionId === sessionId;
+    const shouldPoll =
+      running ||
+      hasCurrentPersistedTask ||
+      ACTIVE_SESSION_STATUSES.includes(normalizedStatus) ||
+      (!normalizedStatus && !bootstrapping);
+    if (!shouldPoll) {
+      return;
+    }
+
+    const refreshArtifacts = async () => {
+      if (artifactLoadInFlightRef.current) {
+        return;
+      }
+      try {
+        await loadSessionArtifacts(sessionId);
+      } catch {
+        // 补偿轮询只负责追平当前页状态，瞬时失败时交给下一轮重试即可。
+      }
+    };
+
+    // 当前页停留在分析界面时，也要像历史页一样主动追平责任田、过程和结果。
+    void refreshArtifacts();
+    artifactPollingTimerRef.current = window.setInterval(() => {
+      void refreshArtifacts();
+    }, 5000);
+
+    return () => {
+      if (artifactPollingTimerRef.current !== null) {
+        window.clearInterval(artifactPollingTimerRef.current);
+        artifactPollingTimerRef.current = null;
+      }
+    };
+  }, [bootstrapping, running, sessionDetail?.status, sessionId]);
+
+  useEffect(() => {
     return () => {
       if (wsRef.current) wsRef.current.close();
       Object.values(streamTimersRef.current).forEach((timerId) => window.clearInterval(timerId));
@@ -2198,6 +2281,10 @@ const IncidentPage: React.FC = () => {
       if (eventFlushTimerRef.current) {
         window.clearTimeout(eventFlushTimerRef.current);
         eventFlushTimerRef.current = null;
+      }
+      if (artifactPollingTimerRef.current !== null) {
+        window.clearInterval(artifactPollingTimerRef.current);
+        artifactPollingTimerRef.current = null;
       }
       pollingRef.current = false;
     };
@@ -3121,6 +3208,24 @@ const IncidentPage: React.FC = () => {
         };
       });
   }, [mappingEvents]);
+
+  useEffect(() => {
+    if (mappingItems.length === 0) {
+      return;
+    }
+    const latest = mappingItems[mappingItems.length - 1];
+    if (!latest || !latest.id || lastMappingToastIdRef.current === latest.id) {
+      return;
+    }
+    lastMappingToastIdRef.current = latest.id;
+    // 责任田命中后要立刻提示当前页用户，避免只有资产卡片静默变化。
+    message.success(
+      latest.matched === '命中'
+        ? `责任田映射完成：${latest.domain}/${latest.aggregate} -> ${latest.ownerTeam}/${latest.owner}`
+        : '责任田映射完成：未命中，请补充更具体的接口、traceId 或错误日志',
+      3,
+    );
+  }, [mappingItems]);
 
   const mappingEmptyHint = useMemo(() => {
     if (mappingItems.length > 0) return '';

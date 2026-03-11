@@ -578,6 +578,45 @@ def test_execute_debate_failure_closes_incident(monkeypatch):
     assert "未获得有效大模型结论" in str(incident_detail.json().get("fix_suggestion") or "")
 
 
+def test_execute_debate_returns_degraded_result_when_timeout_blocks_effective_conclusion(monkeypatch):
+    """验证子Agent超时导致无有效结论时，系统仍返回降级结果而不是直接关闭incident。"""
+
+    _reset_state()
+    client = TestClient(app)
+    monkeypatch.setattr(settings, "DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION", True)
+    monkeypatch.setattr(
+        report_service_module.report_generation_service,
+        "generate_report",
+        _create_fake_report_generator(),
+    )
+
+    async def _timeout_without_effective_conclusion(*args, **kwargs):
+        _ = args, kwargs
+        raise RuntimeError("未获得有效大模型结论: TimeoutError")
+
+    monkeypatch.setattr(debate_service, "_execute_ai_debate", _timeout_without_effective_conclusion)
+
+    created = client.post("/api/v1/incidents/", json={"title": "timeout degraded incident"})
+    assert created.status_code == 201
+    incident_id = created.json()["id"]
+
+    session_resp = client.post(f"/api/v1/debates/?incident_id={incident_id}")
+    assert session_resp.status_code == 201
+    session_id = session_resp.json()["id"]
+
+    execute_resp = client.post(f"/api/v1/debates/{session_id}/execute")
+    assert execute_resp.status_code == 200
+    payload = execute_resp.json()
+    assert payload["session_id"] == session_id
+    assert "LLM 服务繁忙" in payload["root_cause"]
+    assert payload["confidence"] > 0
+
+    incident_detail = client.get(f"/api/v1/incidents/{incident_id}")
+    assert incident_detail.status_code == 200
+    assert incident_detail.json()["status"] == "resolved"
+    assert "LLM 服务繁忙" in str(incident_detail.json().get("root_cause") or "")
+
+
 def test_interface_locate_endpoint_maps_to_domain_aggregate():
     """验证interfacelocateendpoint映射todomainaggregate。"""
     

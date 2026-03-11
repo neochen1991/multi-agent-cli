@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Card, Col, Descriptions, Empty, Row, Space, Statistic, Tag, Typography } from 'antd';
+import { Alert, Card, Col, Descriptions, Empty, Row, Space, Statistic, Tag, Typography } from 'antd';
 
 export type MappingItem = {
   id: string;
@@ -61,6 +61,11 @@ const AssetMappingPanel: React.FC<Props> = ({
     return { total, hit, miss, uniqueTeams, hitRate };
   }, [mappingItems]);
 
+  const latestMapping = useMemo(() => {
+    if (mappingItems.length === 0) return null;
+    return mappingItems[mappingItems.length - 1];
+  }, [mappingItems]);
+
   const leadSections = useMemo(
     () => [
       { label: '接口', items: investigationLeads?.apiEndpoints || [] },
@@ -79,6 +84,23 @@ const AssetMappingPanel: React.FC<Props> = ({
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Card className="module-card" title="责任田映射结果" extra={<Tag color="blue">资产阶段</Tag>}>
+        {latestMapping ? (
+          <Alert
+            showIcon
+            type={latestMapping.matched === '命中' ? 'success' : 'warning'}
+            style={{ marginBottom: 16 }}
+            message={
+              latestMapping.matched === '命中'
+                ? `资产阶段完成：已命中 ${latestMapping.domain}/${latestMapping.aggregate}`
+                : '资产阶段完成：责任田未命中'
+            }
+            description={
+              latestMapping.matched === '命中'
+                ? `责任团队 ${latestMapping.ownerTeam}，责任人 ${latestMapping.owner}，映射置信度 ${latestMapping.confidence}。`
+                : `${latestMapping.reason || '当前输入还不足以稳定定位责任田。'} 建议补充接口 URL、traceId 或错误日志后重新分析。`
+            }
+          />
+        ) : null}
         <Row gutter={[12, 12]}>
           <Col xs={12} md={6}>
             <Statistic title="映射记录" value={summary.total} />
