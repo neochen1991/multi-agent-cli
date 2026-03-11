@@ -38,12 +38,12 @@ type Props = {
   incidentId: string;
   sessionId: string;
   debateMaxRounds: number;
-  executionMode: 'standard' | 'quick' | 'background' | 'async';
+  executionMode: 'standard' | 'quick' | 'background';
   logUploadMeta: LogUploadMeta;
   onFillDemoIncident: () => void;
   onChangeIncidentForm: (patch: Partial<IncidentFormState>) => void;
   onDebateMaxRoundsChange: (value: number) => void;
-  onExecutionModeChange: (value: 'standard' | 'quick' | 'background' | 'async') => void;
+  onExecutionModeChange: (value: 'standard' | 'quick' | 'background') => void;
   onLogFileUpload: UploadProps['beforeUpload'];
   onClearLogUploadMeta: () => void;
   onStartAnalysis: () => void;
@@ -151,12 +151,14 @@ const IncidentOverviewPanel: React.FC<Props> = ({
               style={{ width: '100%' }}
               onChange={onExecutionModeChange}
               options={[
-                { label: 'Standard（后台持续分析）', value: 'standard' },
-                { label: 'Quick（后台快速分析）', value: 'quick' },
-                { label: 'Background（后台持续分析）', value: 'background' },
-                { label: 'Async（后台异步分析）', value: 'async' },
+                { label: 'Standard（强模型，完整分析）', value: 'standard' },
+                { label: 'Quick（弱模型友好，快速收敛）', value: 'quick' },
+                { label: 'Background（后台运行方式）', value: 'background' },
               ]}
             />
+            <Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+              Standard：适合能力强、并发高的模型服务，支持更完整的多轮根因分析；Quick：适合能力较弱或并发较小的模型服务，优先减少调用次数并尽快收敛；Background：表示后台执行方式，页面关闭后任务仍可继续。
+            </Text>
           </div>
         </div>
 

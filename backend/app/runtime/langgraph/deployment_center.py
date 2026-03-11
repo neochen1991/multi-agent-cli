@@ -149,8 +149,6 @@ class DeploymentCenter:
             return self.get_profile("baseline")
         if severity_text in {"critical", "p0"}:
             return self.get_profile("production_governed")
-        if mode_text in {"background", "async"}:
-            return self.get_profile("investigation_full")
         return self.get_profile("skill_enabled")
 
 

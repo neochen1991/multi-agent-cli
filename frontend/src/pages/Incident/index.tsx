@@ -154,7 +154,7 @@ const IncidentPage: React.FC = () => {
   const [debateMaxRounds, setDebateMaxRounds] = useState<number>(() =>
     getDefaultMaxRoundsForDepthMode(getStoredAnalysisDepthMode()),
   );
-  const [executionMode, setExecutionMode] = useState<'standard' | 'quick' | 'background' | 'async'>('standard');
+  const [executionMode, setExecutionMode] = useState<'standard' | 'quick' | 'background'>('standard');
   const [logUploadMeta, setLogUploadMeta] = useState<{ name: string; size: number; lines: number } | null>(null);
   const [bootstrapping, setBootstrapping] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -1625,9 +1625,13 @@ const IncidentPage: React.FC = () => {
     if (typeof maxRoundsRaw === 'number' && Number.isFinite(maxRoundsRaw)) {
       setDebateMaxRounds(Math.max(1, Math.min(8, Math.trunc(maxRoundsRaw))));
     }
-    const modeRaw = String((detail.context as Record<string, unknown> | undefined)?.execution_mode || '').trim();
-    if (modeRaw === 'standard' || modeRaw === 'quick' || modeRaw === 'background' || modeRaw === 'async') {
+    const detailContext = (detail.context as Record<string, unknown> | undefined) || {};
+    const modeRaw = String(detailContext.requested_execution_mode || detailContext.execution_mode || '').trim();
+    if (modeRaw === 'standard' || modeRaw === 'quick' || modeRaw === 'background') {
       setExecutionMode(modeRaw);
+    } else if (modeRaw === 'async') {
+      // 兼容旧链接里的 async，但不再向用户暴露；统一折叠为 background。
+      setExecutionMode('background');
     }
 
     const persisted = (detail.context as Record<string, unknown> | undefined)?.event_log;
@@ -2148,8 +2152,10 @@ const IncidentPage: React.FC = () => {
     const iid = routeIncidentId || searchParams.get('incident_id');
     const querySessionId = String(searchParams.get('session_id') || '').trim();
     const modeParam = String(searchParams.get('mode') || '').trim().toLowerCase();
-    if (modeParam === 'standard' || modeParam === 'quick' || modeParam === 'background' || modeParam === 'async') {
+    if (modeParam === 'standard' || modeParam === 'quick' || modeParam === 'background') {
       setExecutionMode(modeParam);
+    } else if (modeParam === 'async') {
+      setExecutionMode('background');
     }
     const preferredView = (searchParams.get('view') || '').toLowerCase();
     if (!iid) {

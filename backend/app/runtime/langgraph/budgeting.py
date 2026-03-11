@@ -6,7 +6,8 @@ from typing import Any, Iterable, List
 
 
 def is_fast_execution_mode(execution_mode_name: str) -> bool:
-    return str(execution_mode_name or "").strip().lower() in {"quick", "background", "async"}
+    # quick 明确面向弱模型/低并发场景；background 是执行方式，不再等同于快模式策略。
+    return str(execution_mode_name or "").strip().lower() == "quick"
 
 
 def has_expert_turns(turns: Iterable[Any]) -> bool:

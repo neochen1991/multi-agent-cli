@@ -100,8 +100,8 @@ def test_agent_max_tokens_preserves_fast_mode_and_judge_budgets():
     ) == 480
 
 
-def test_timeout_rules_preserve_relaxed_fast_mode_budget():
-    assert agent_timeout_plan(
+def test_timeout_rules_make_quick_mode_more_conservative_than_standard():
+    quick_plan = agent_timeout_plan(
         agent_name="ProblemAnalysisAgent",
         llm_judge_timeout=75,
         llm_judge_retry_timeout=60,
@@ -111,7 +111,23 @@ def test_timeout_rules_preserve_relaxed_fast_mode_budget():
         require_verification_plan=False,
         execution_mode_name="quick",
         turns=[],
-    ) == [60.0]
+    )
+
+    standard_plan = agent_timeout_plan(
+        agent_name="ProblemAnalysisAgent",
+        llm_judge_timeout=75,
+        llm_judge_retry_timeout=60,
+        llm_analysis_timeout=55,
+        llm_review_timeout=60,
+        analysis_depth_mode_name="standard",
+        require_verification_plan=True,
+        execution_mode_name="standard",
+        turns=[],
+    )
+
+    assert quick_plan == [60.0]
+    assert standard_plan[0] < quick_plan[0]
+    assert len(standard_plan) >= 2
 
     assert agent_http_timeout(
         agent_name="LogAgent",
@@ -136,3 +152,5 @@ def test_timeout_rules_preserve_relaxed_fast_mode_budget():
         require_verification_plan=True,
         turns=[_turn("ProblemAnalysisAgent")],
     ) == 90.0
+
+    assert is_fast_execution_mode("background") is False

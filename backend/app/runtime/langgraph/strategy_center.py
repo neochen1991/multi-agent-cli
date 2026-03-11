@@ -132,8 +132,6 @@ class RuntimeStrategyCenter:
         active_profile = str(manual.get("active_profile") or "balanced")
         if active_profile and active_profile != "balanced":
             return self.get_profile(active_profile)
-        if mode_text in {"background", "async"}:
-            return self.get_profile("high_concurrency")
         if severity_text in {"critical", "p0"}:
             return self.get_profile("timeout_sensitive")
         if mode_text == "quick":

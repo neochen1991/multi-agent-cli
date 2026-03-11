@@ -187,7 +187,8 @@ const HistoryPage: React.FC = () => {
           if (!detail) return;
           const sid = sessionIdsToRefresh[idx];
           const result = results[idx];
-          const mode = String((detail.context || {}).execution_mode || 'standard');
+          const context = (detail.context || {}) as Record<string, unknown>;
+          const mode = String(context.requested_execution_mode || context.execution_mode || 'standard');
           const currentPhase = String(detail.current_phase || '');
           const humanReview =
             detail.context && typeof detail.context.human_review === 'object' && !Array.isArray(detail.context.human_review)

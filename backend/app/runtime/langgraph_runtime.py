@@ -1207,7 +1207,9 @@ class LangGraphRuntimeOrchestrator:
             dialogue_items=dialogue_items,
             existing_agent_outputs=existing_agent_outputs,
         )
-        if loop_round == 1 and self._execution_mode_name in {"quick", "background", "async"}:
+        # 中文注释：quick 模式专门面向弱模型/低并发场景，首轮 commander 需要更激进压缩；
+        # background 只是执行方式，不应再被视为“快策略”分析模式。
+        if loop_round == 1 and self._execution_mode_name in {"quick", "async"}:
             max_chars = 1700 if self._execution_mode_name == "quick" else 2200
             return self._compact_prompt_for_retry(prompt, max_chars=max_chars)
         return prompt
@@ -3639,7 +3641,7 @@ class LangGraphRuntimeOrchestrator:
             return "{}"
 
     def _is_fast_execution_mode(self) -> bool:
-        """判断当前是否处于 quick/background/async 这类强调吞吐与稳定性的模式。"""
+        """判断当前是否处于 quick/async 这类需要显著压缩上下文的模式。"""
         return is_fast_execution_mode_rule(self._execution_mode_name)
 
     def _is_fast_first_round(self) -> bool:

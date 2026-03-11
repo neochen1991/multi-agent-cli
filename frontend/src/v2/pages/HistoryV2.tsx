@@ -56,8 +56,9 @@ const HistoryV2: React.FC = () => {
         const detail = details[idx];
         const result = results[idx];
         if (!detail) return;
+        const context = (detail.context || {}) as Record<string, unknown>;
         next[sid] = {
-          mode: String((detail.context || {}).execution_mode || 'standard'),
+          mode: String(context.requested_execution_mode || context.execution_mode || 'standard'),
           currentPhase: String(detail.current_phase || '-'),
           confidence: typeof result?.confidence === 'number' ? result.confidence : null,
           updatedAt: String(detail.updated_at || ''),

@@ -126,7 +126,7 @@ const HomeV2: React.FC = () => {
         service_name: String(quickStartForm.service_name || '').trim(),
         log_content: String(quickStartForm.log_content || '').trim(),
       });
-      const mode = String(quickStartForm.mode || 'standard') as 'standard' | 'quick' | 'background' | 'async';
+      const mode = String(quickStartForm.mode || 'standard') as 'standard' | 'quick' | 'background';
       const session = await debateApi.createSession(incident.id, { maxRounds: 1, mode });
       message.success(`会话已创建：${session.id}`);
       navigate(`/v2/incident/${incident.id}?session_id=${session.id}&auto_start=1&mode=${mode}`);
@@ -205,7 +205,8 @@ const HomeV2: React.FC = () => {
             <div className="field"><label>故障标题</label><input className="input v2-input" value={quickStartForm.title} onChange={(e) => setQuickStartForm((prev) => ({ ...prev, title: e.target.value }))} placeholder="例如：/orders 接口 502，CPU 飙升" /></div>
             <div className="field"><label>服务名称</label><input className="input v2-input" value={quickStartForm.service_name} onChange={(e) => setQuickStartForm((prev) => ({ ...prev, service_name: e.target.value }))} placeholder="order-service" /></div>
             <div className="field"><label>严重级别</label><select className="input v2-input" value={quickStartForm.severity} onChange={(e) => setQuickStartForm((prev) => ({ ...prev, severity: e.target.value }))}><option value="critical">critical</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option></select></div>
-            <div className="field"><label>会话模式</label><select className="input v2-input" value={quickStartForm.mode} onChange={(e) => setQuickStartForm((prev) => ({ ...prev, mode: e.target.value }))}><option value="standard">standard</option><option value="quick">quick</option><option value="background">background</option><option value="async">async</option></select></div>
+            <div className="field"><label>会话模式</label><select className="input v2-input" value={quickStartForm.mode} onChange={(e) => setQuickStartForm((prev) => ({ ...prev, mode: e.target.value }))}><option value="standard">Standard（强模型，完整分析）</option><option value="quick">Quick（弱模型友好，快速收敛）</option><option value="background">Background（后台运行方式）</option></select></div>
+            <div className="field" style={{ gridColumn: '1 / -1' }}><div className="status-meta">Standard 适合能力强、并发高的模型服务；Quick 会显著减少专家调用和上下文体积，适合能力较弱或并发较小的模型服务；Background 只表示任务在后台持续运行。</div></div>
             <div className="field" style={{ gridColumn: '1 / -1' }}><label>故障日志 / 现象摘要</label><textarea className="textarea v2-textarea" value={quickStartForm.log_content} onChange={(e) => setQuickStartForm((prev) => ({ ...prev, log_content: e.target.value }))} placeholder="可选：粘贴关键日志、报错堆栈或现象摘要" /></div>
           </div>
         </Panel>

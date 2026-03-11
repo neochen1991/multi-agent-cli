@@ -1137,11 +1137,11 @@ def test_investigation_full_first_round_commander_gets_extra_queue_time_and_lowe
     assert later_round_tokens >= 520
 
 
-def test_fast_mode_first_round_commander_uses_compact_budget():
-    """验证 quick/background 首轮主Agent使用更紧凑的初始预算。"""
+def test_quick_mode_first_round_commander_uses_compact_budget():
+    """验证 quick 首轮主Agent使用更紧凑的初始预算。"""
 
     orchestrator = _orchestrator()
-    orchestrator._execution_mode_name = "background"
+    orchestrator._execution_mode_name = "quick"
     orchestrator._require_verification_plan = False
     orchestrator.turns = []
 
@@ -1152,11 +1152,11 @@ def test_fast_mode_first_round_commander_uses_compact_budget():
     assert first_round_timeout_plan == [60.0]
 
 
-def test_fast_mode_first_round_analysis_agents_use_compact_budget():
-    """验证 quick/background 首轮关键分析Agent使用更紧凑预算。"""
+def test_quick_mode_first_round_analysis_agents_use_compact_budget():
+    """验证 quick 首轮关键分析Agent使用更紧凑预算。"""
 
     orchestrator = _orchestrator()
-    orchestrator._execution_mode_name = "background"
+    orchestrator._execution_mode_name = "quick"
     orchestrator._require_verification_plan = False
     orchestrator.turns = [type("Turn", (), {"agent_name": "ProblemAnalysisAgent"})()]
 
@@ -1164,6 +1164,19 @@ def test_fast_mode_first_round_analysis_agents_use_compact_budget():
         assert orchestrator._agent_max_tokens(agent_name) <= 480
         assert orchestrator._agent_timeout_plan(agent_name) == [60.0]
         assert orchestrator._agent_queue_timeout(agent_name) >= 60.0
+
+
+def test_background_mode_keeps_standard_opening_budget():
+    """验证 background 只影响执行方式，不再使用 quick 的首轮紧缩预算。"""
+
+    orchestrator = _orchestrator()
+    orchestrator._execution_mode_name = "background"
+    orchestrator._deployment_profile_name = "skill_enabled"
+    orchestrator._require_verification_plan = True
+    orchestrator.turns = []
+
+    assert orchestrator._agent_max_tokens("ProblemAnalysisAgent") >= 520
+    assert orchestrator._agent_timeout_plan("ProblemAnalysisAgent") != [60.0]
 
 
 def test_analysis_depth_mode_assigns_default_rounds_when_not_overridden():

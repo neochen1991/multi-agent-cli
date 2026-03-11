@@ -444,7 +444,11 @@ async def resume_human_review(session_id: str, payload: HumanReviewResumeRequest
         )
 
     context = dict(session.context or {})
-    context["execution_mode"] = "background"
+    context.setdefault(
+        "requested_execution_mode",
+        str(context.get("execution_mode") or "standard"),
+    )
+    context["execution_delivery_mode"] = "background"
     session.context = context
     await debate_service.update_session(session)
     await incident_service.update_incident(

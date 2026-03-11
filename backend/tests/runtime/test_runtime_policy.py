@@ -19,7 +19,27 @@ def test_resolve_runtime_policy_for_quick_mode_uses_core_agents():
     assert policy.require_verification_plan is False
 
 
-def test_resolve_runtime_policy_for_background_mode_uses_fast_track_agents():
+def test_resolve_runtime_policy_for_standard_mode_uses_full_analysis_policy():
+    policy = resolve_runtime_policy(
+        {"execution_mode": "standard"},
+        debate_enable_critique=True,
+        debate_enable_collaboration=True,
+    )
+
+    assert policy.parallel_analysis_agents == (
+        "LogAgent",
+        "DomainAgent",
+        "CodeAgent",
+        "DatabaseAgent",
+        "MetricsAgent",
+    )
+    assert policy.max_discussion_steps == 8
+    assert policy.enable_collaboration is True
+    assert policy.enable_critique is True
+    assert policy.require_verification_plan is True
+
+
+def test_resolve_runtime_policy_for_background_mode_keeps_standard_analysis_shape():
     policy = resolve_runtime_policy(
         {"execution_mode": "background"},
         debate_enable_critique=True,
@@ -32,10 +52,11 @@ def test_resolve_runtime_policy_for_background_mode_uses_fast_track_agents():
         "CodeAgent",
         "DatabaseAgent",
         "MetricsAgent",
-        "ChangeAgent",
     )
-    assert policy.max_discussion_steps == 10
-    assert policy.require_verification_plan is False
+    assert policy.max_discussion_steps == 8
+    assert policy.enable_collaboration is True
+    assert policy.enable_critique is True
+    assert policy.require_verification_plan is True
 
 
 def test_resolve_runtime_policy_honors_deployment_profile_overrides():

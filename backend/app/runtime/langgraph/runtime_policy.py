@@ -34,7 +34,6 @@ def resolve_runtime_policy(context: Dict[str, Any], *, debate_enable_critique: b
 
     core_agents = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent")
     balanced_agents = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent")
-    fast_agents = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent", "ChangeAgent")
     deep_agents = (
         "LogAgent",
         "DomainAgent",
@@ -49,12 +48,6 @@ def resolve_runtime_policy(context: Dict[str, Any], *, debate_enable_critique: b
     if phase_mode in {"economy", "failfast"} or execution_mode == "quick":
         selected_agents = core_agents
         max_discussion_steps = 4
-        enable_critique = False
-        enable_collaboration = False
-        require_verification_plan = False
-    elif phase_mode == "fast_track" or execution_mode in {"background", "async"}:
-        selected_agents = fast_agents
-        max_discussion_steps = 10
         enable_critique = False
         enable_collaboration = False
         require_verification_plan = False

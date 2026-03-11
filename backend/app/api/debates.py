@@ -468,7 +468,12 @@ async def execute_debate_background(
         )
 
     context = dict(session.context or {})
-    context["execution_mode"] = normalize_execution_mode("background").value
+    # 中文注释：后台执行只改变“投递方式”，不应覆盖用户原始选择的分析模式。
+    context.setdefault(
+        "requested_execution_mode",
+        str(context.get("execution_mode") or normalize_execution_mode("standard").value),
+    )
+    context["execution_delivery_mode"] = normalize_execution_mode("background").value
     session.context = context
     await debate_service.update_session(session)
 

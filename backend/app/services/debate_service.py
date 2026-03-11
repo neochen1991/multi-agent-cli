@@ -323,7 +323,11 @@ class DebateService:
             "exception_stack": incident.exception_stack,
             "parsed_data": incident.parsed_data,
             "_event_sequence": 0,  # 事件序号计数器
+            # 中文注释：execution_mode 表示用户选择的分析策略模式，不再被后台投递方式覆盖。
             "execution_mode": normalized_mode,
+            "requested_execution_mode": normalized_mode,
+            # 中文注释：execution_delivery_mode 单独表示当前任务是前台直执还是后台投递。
+            "execution_delivery_mode": "foreground",
             "analysis_depth_mode": effective_depth_mode,
             "runtime_strategy": selected_strategy,
             "deployment_profile": selected_deployment,

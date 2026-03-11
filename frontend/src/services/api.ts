@@ -618,7 +618,7 @@ export const incidentApi = {
 export const debateApi = {
   async createSession(
     incidentId: string,
-    options?: { maxRounds?: number; mode?: 'standard' | 'quick' | 'background' | 'async' },
+    options?: { maxRounds?: number; mode?: 'standard' | 'quick' | 'background' },
   ): Promise<{ id: string; incident_id: string; status: string }> {
     // 新建辩论会话时总是把当前深度模式传给后端，确保默认轮次和策略可复现。
     const analysisDepthMode = getStoredAnalysisDepthMode();

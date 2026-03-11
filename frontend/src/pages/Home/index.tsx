@@ -199,7 +199,7 @@ const HomePage: React.FC = () => {
         service_name: String(quickStartForm.service_name || '').trim(),
         log_content: String(quickStartForm.log_content || '').trim(),
       });
-      const mode = String(quickStartForm.mode || 'standard') as 'standard' | 'quick' | 'background' | 'async';
+      const mode = String(quickStartForm.mode || 'standard') as 'standard' | 'quick' | 'background';
       const session = await debateApi.createSession(incident.id, { maxRounds: 1, mode });
       message.success(`会话已创建：${session.id}`);
       void loadDashboard();
@@ -311,10 +311,9 @@ const HomePage: React.FC = () => {
                 value={quickStartForm.mode}
                 style={{ width: '100%' }}
                 options={[
-                  { label: 'Standard', value: 'standard' },
-                  { label: 'Quick', value: 'quick' },
-                  { label: 'Background', value: 'background' },
-                  { label: 'Async', value: 'async' },
+                  { label: 'Standard（强模型，完整分析）', value: 'standard' },
+                  { label: 'Quick（弱模型友好，快速收敛）', value: 'quick' },
+                  { label: 'Background（后台运行方式）', value: 'background' },
                 ]}
                 onChange={(value) => setQuickStartForm((prev) => ({ ...prev, mode: value }))}
               />

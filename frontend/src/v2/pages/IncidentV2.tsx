@@ -101,7 +101,13 @@ const IncidentV2: React.FC = () => {
   const autoStartedRef = useRef<Set<string>>(new Set());
 
   const sessionId = String(searchParams.get('session_id') || incident?.debate_session_id || '').trim();
-  const executionMode = String(searchParams.get('mode') || 'standard').trim() || 'standard';
+  const rawExecutionMode = String(searchParams.get('mode') || 'standard').trim().toLowerCase();
+  const executionMode =
+    rawExecutionMode === 'quick' || rawExecutionMode === 'background' || rawExecutionMode === 'standard'
+      ? rawExecutionMode
+      : rawExecutionMode === 'async'
+        ? 'background'
+        : 'standard';
   const autoStart = searchParams.get('auto_start') === '1';
   const reviewState = asRecord(asRecord(sessionDetail?.context).human_review);
   const reviewStatus = String(reviewState.status || '').toLowerCase();
@@ -168,8 +174,7 @@ const IncidentV2: React.FC = () => {
     autoStartedRef.current.add(sessionId);
     setRunRequestedAt(new Date().toISOString());
     setActionLoading(true);
-    const runner = executionMode === 'async' ? debateApi.executeAsync : debateApi.executeBackground;
-    runner(sessionId)
+    debateApi.executeBackground(sessionId)
       .then(() => {
         message.success('已启动实时分析');
         setSearchParams((prev) => {
@@ -211,7 +216,7 @@ const IncidentV2: React.FC = () => {
       });
       const session = await debateApi.createSession(created.id, {
         maxRounds: debateMaxRounds,
-        mode: executionMode as 'standard' | 'quick' | 'background' | 'async',
+        mode: executionMode as 'standard' | 'quick' | 'background',
       });
       navigate(`/v2/incident/${created.id}?session_id=${session.id}&auto_start=1&mode=${executionMode}`);
     } catch (error: any) {
@@ -230,7 +235,7 @@ const IncidentV2: React.FC = () => {
     try {
       const session = await debateApi.createSession(incident.id, {
         maxRounds: debateMaxRounds,
-        mode: executionMode as 'standard' | 'quick' | 'background' | 'async',
+        mode: executionMode as 'standard' | 'quick' | 'background',
       });
       const sid = String(session.id || '').trim();
       if (!sid) throw new Error('初始化会话失败：session_id 为空');
@@ -259,8 +264,7 @@ const IncidentV2: React.FC = () => {
         }
         return;
       }
-      const runner = executionMode === 'async' ? debateApi.executeAsync : debateApi.executeBackground;
-      await runner(sid);
+      await debateApi.executeBackground(sid);
       message.success('已启动实时分析');
       if (routeIncidentId) {
         await hydrate(routeIncidentId, sid);
@@ -293,8 +297,7 @@ const IncidentV2: React.FC = () => {
         setRunRequestedAt(null);
       } else {
         setRunRequestedAt(new Date().toISOString());
-        const runner = executionMode === 'async' ? debateApi.executeAsync : debateApi.executeBackground;
-        await runner(sessionId);
+        await debateApi.executeBackground(sessionId);
         message.success('已恢复分析');
       }
       if (routeIncidentId) await hydrate(routeIncidentId, sessionId);
@@ -312,8 +315,7 @@ const IncidentV2: React.FC = () => {
     }
     setActionLoading(true);
     try {
-      const runner = executionMode === 'async' ? debateApi.executeAsync : debateApi.executeBackground;
-      await runner(sessionId, { retryFailedOnly: true });
+      await debateApi.executeBackground(sessionId, { retryFailedOnly: true });
       message.success('已请求仅重试失败 Agent');
       if (routeIncidentId) await hydrate(routeIncidentId, sessionId);
     } catch (error: any) {
@@ -530,7 +532,7 @@ const IncidentV2: React.FC = () => {
               <div className="field"><label>事件标题</label><input className="v2-input" value={incident?.title || incidentForm.title} onChange={(e) => setIncidentForm((prev) => ({ ...prev, title: e.target.value }))} placeholder="例如：/orders 接口 502，CPU 飙升" disabled={Boolean(incident)} /></div>
               <div className="field"><label>服务名称</label><input className="v2-input" value={incident?.service_name || incidentForm.service_name} onChange={(e) => setIncidentForm((prev) => ({ ...prev, service_name: e.target.value }))} placeholder="order-service" disabled={Boolean(incident)} /></div>
               <div className="field"><label>严重级别</label><select className="v2-input" value={incident?.severity || incidentForm.severity} onChange={(e) => setIncidentForm((prev) => ({ ...prev, severity: e.target.value }))} disabled={Boolean(incident)}><option value="critical">critical</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option></select></div>
-              <div className="field"><label>会话模式</label><div className="pill-row"><button className={`pill${executionMode === 'standard' ? ' active' : ''}`} onClick={() => setModeInQuery('standard')}>standard</button><button className={`pill${executionMode === 'quick' ? ' active' : ''}`} onClick={() => setModeInQuery('quick')}>quick</button><button className={`pill${executionMode === 'background' ? ' active' : ''}`} onClick={() => setModeInQuery('background')}>background</button><button className={`pill${executionMode === 'async' ? ' active' : ''}`} onClick={() => setModeInQuery('async')}>async</button></div></div>
+              <div className="field"><label>会话模式</label><div className="pill-row"><button className={`pill${executionMode === 'standard' ? ' active' : ''}`} onClick={() => setModeInQuery('standard')}>Standard（完整分析）</button><button className={`pill${executionMode === 'quick' ? ' active' : ''}`} onClick={() => setModeInQuery('quick')}>Quick（快速收敛）</button><button className={`pill${executionMode === 'background' ? ' active' : ''}`} onClick={() => setModeInQuery('background')}>Background（后台）</button></div><div className="status-meta">Standard 面向能力更强的模型服务，允许更完整的多轮分析；Quick 会压缩专家数量和上下文，优先避免弱模型超时；Background 表示后台执行，不额外提升分析深度。</div></div>
               <div className="field"><label>辩论轮次</label><input className="v2-input" type="number" min={1} max={8} value={debateMaxRounds} onChange={(e) => setDebateMaxRounds(Math.max(1, Math.min(8, Number(e.target.value || 1))))} disabled={Boolean(incident && sessionId)} /></div>
               <div className="field"><label>日志摘要</label><textarea className="v2-textarea" value={incidentForm.log_content} onChange={(e) => setIncidentForm((prev) => ({ ...prev, log_content: e.target.value }))} placeholder="粘贴真实报错日志、堆栈或现象摘要" disabled={Boolean(incident)} /></div>
               {!incident ? (

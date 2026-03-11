@@ -617,6 +617,69 @@ def test_execute_debate_returns_degraded_result_when_timeout_blocks_effective_co
     assert "LLM 服务繁忙" in str(incident_detail.json().get("root_cause") or "")
 
 
+def test_execute_background_preserves_requested_execution_mode(monkeypatch):
+    """验证后台执行不会覆盖用户原始选择的分析模式。"""
+
+    _reset_state()
+    client = TestClient(app)
+
+    async def _fake_execute_debate(session_id: str, retry_failed_only: bool = False):
+        _ = retry_failed_only
+        session = await debate_service.get_session(session_id)
+        assert session is not None
+        return DebateResult(
+            session_id=session_id,
+            root_cause="连接池耗尽",
+            confidence=0.61,
+            evidence_chain=[
+                EvidenceItem(
+                    evidence_id="ev_1",
+                    type="log",
+                    description="日志显示连接池耗尽",
+                    source="log",
+                )
+            ],
+            fix_recommendation={
+                "summary": "扩容连接池并检查长事务",
+                "steps": [],
+                "code_changes_required": False,
+                "rollback_recommended": False,
+                "testing_requirements": [],
+            },
+            impact_analysis={
+                "summary": "下单链路受影响",
+                "affected_services": ["order-service"],
+                "user_impact": "下单失败",
+                "business_impact": "订单转化下降",
+            },
+            risk_assessment={
+                "level": "medium",
+                "summary": "需要继续治理",
+                "risk_factors": [],
+            },
+        )
+
+    monkeypatch.setattr(debate_service, "execute_debate", _fake_execute_debate)
+
+    created = client.post("/api/v1/incidents/", json={"title": "background mode preserve"})
+    assert created.status_code == 201
+    incident_id = created.json()["id"]
+
+    session_resp = client.post(f"/api/v1/debates/?incident_id={incident_id}&mode=quick")
+    assert session_resp.status_code == 201
+    session_id = session_resp.json()["id"]
+
+    execute_resp = client.post(f"/api/v1/debates/{session_id}/execute-background")
+    assert execute_resp.status_code == 200
+
+    detail_resp = client.get(f"/api/v1/debates/{session_id}")
+    assert detail_resp.status_code == 200
+    context = (detail_resp.json().get("context") or {})
+    assert context.get("execution_mode") == "quick"
+    assert context.get("requested_execution_mode") == "quick"
+    assert context.get("execution_delivery_mode") == "background"
+
+
 def test_interface_locate_endpoint_maps_to_domain_aggregate():
     """验证interfacelocateendpoint映射todomainaggregate。"""
     
