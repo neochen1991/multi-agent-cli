@@ -228,3 +228,360 @@ def test_build_final_payload_caps_confidence_when_key_evidence_is_degraded():
     assert payload["confidence"] <= 0.45
     risk_factors = payload["final_judgment"]["risk_assessment"]["risk_factors"]
     assert any("关键证据不足" in item for item in risk_factors)
+
+
+def test_build_final_payload_keeps_medium_confidence_when_judge_has_strong_shared_evidence():
+    """验证当 Judge 已拿到完整共享证据链时，不因部分专家降级而机械压到低置信。"""
+
+    orchestrator = _orchestrator()
+    now = datetime.utcnow()
+    judge_output = {
+        "chat_message": "我确认主因是 RiskService 同步调用重试耗尽主链路预算。",
+        "final_judgment": {
+            "root_cause": {
+                "summary": "PaymentAppService 同步调用 RiskService，只有单次超时没有总超时预算与熔断，三次重试耗尽 30s 主链路预算。",
+                "category": "upstream_timeout_budget_missing",
+                "confidence": 0.76,
+            },
+            "evidence_chain": [
+                {"type": "log", "description": "三次 RiskService timeout + 200ms backoff 累积约 30.4s", "source": "LogAgent", "strength": "strong"},
+                {"type": "code", "description": "stacktrace 指向 RiskClient.check -> PaymentAppService.confirm", "source": "CodeAgent", "strength": "strong"},
+                {"type": "metrics", "description": "Hikari active 4/30、DB CPU 18%、slow SQL 0，数据库不是原发根因", "source": "MetricsAgent", "strength": "strong"},
+            ],
+            "fix_recommendation": {
+                "summary": "为 RiskService 调用增加总超时预算与熔断",
+                "steps": ["限制重试总预算", "补熔断与快速失败"],
+                "code_changes_required": True,
+            },
+            "impact_analysis": {"affected_services": ["payment-service"], "business_impact": "支付确认超时"},
+            "risk_assessment": {"risk_level": "high", "risk_factors": ["上游同步调用超时放大"]},
+        },
+        "decision_rationale": {
+            "reasoning": "stacktrace、重试时间线与数据库平稳指标相互印证，足以排除数据库主因。"
+        },
+        "action_items": [],
+        "responsible_team": {"team": "payment", "owner": "neo"},
+        "confidence": 0.76,
+    }
+    log_output = {
+        "conclusion": "支付链路存在 3 次 10s 超时重试，累计时间接近 30s。",
+        "confidence": 0.68,
+        "evidence_status": "context_grounded_without_tool",
+        "degraded": False,
+    }
+    metrics_output = {
+        "conclusion": "数据库和连接池指标平稳，可排除数据库原发根因。",
+        "confidence": 0.71,
+        "evidence_status": "context_grounded_without_tool",
+        "degraded": False,
+    }
+    code_timeout_output = {
+        "conclusion": "CodeAgent 调用超时，已降级继续",
+        "confidence": 0.45,
+        "degraded": True,
+        "evidence_status": "degraded",
+    }
+    db_missing_output = {
+        "conclusion": "DatabaseAgent 证据未采集完成：数据库工具未启用",
+        "confidence": 0.22,
+        "degraded": True,
+        "evidence_status": "missing",
+        "tool_status": "disabled",
+    }
+    orchestrator.turns = [
+        DebateTurn(
+            round_number=1,
+            phase="analysis",
+            agent_name="LogAgent",
+            agent_role="日志分析专家",
+            model={"name": "glm-5"},
+            input_message="",
+            output_content=log_output,
+            confidence=0.68,
+            started_at=now,
+            completed_at=now,
+        ),
+        DebateTurn(
+            round_number=2,
+            phase="analysis",
+            agent_name="MetricsAgent",
+            agent_role="指标分析专家",
+            model={"name": "glm-5"},
+            input_message="",
+            output_content=metrics_output,
+            confidence=0.71,
+            started_at=now,
+            completed_at=now,
+        ),
+        DebateTurn(
+            round_number=3,
+            phase="analysis",
+            agent_name="CodeAgent",
+            agent_role="代码分析专家",
+            model={"name": "glm-5"},
+            input_message="",
+            output_content=code_timeout_output,
+            confidence=0.45,
+            started_at=now,
+            completed_at=now,
+        ),
+        DebateTurn(
+            round_number=4,
+            phase="analysis",
+            agent_name="DatabaseAgent",
+            agent_role="数据库分析专家",
+            model={"name": "glm-5"},
+            input_message="",
+            output_content=db_missing_output,
+            confidence=0.22,
+            started_at=now,
+            completed_at=now,
+        ),
+        DebateTurn(
+            round_number=5,
+            phase="judgment",
+            agent_name="JudgeAgent",
+            agent_role="技术委员会主席",
+            model={"name": "glm-5"},
+            input_message="",
+            output_content=judge_output,
+            confidence=0.76,
+            started_at=now,
+            completed_at=now,
+        ),
+    ]
+    history_cards = [
+        AgentEvidence(
+            agent_name="LogAgent",
+            phase="analysis",
+            summary="日志还原出 30s 重试时间线",
+            conclusion=log_output["conclusion"],
+            evidence_chain=["attempt1=10s", "attempt2=10s+200ms", "attempt3=10s+200ms"],
+            confidence=0.68,
+            raw_output=log_output,
+        ),
+        AgentEvidence(
+            agent_name="MetricsAgent",
+            phase="analysis",
+            summary="数据库指标平稳",
+            conclusion=metrics_output["conclusion"],
+            evidence_chain=["Hikari 4/30", "DB CPU 18%", "slow SQL 0"],
+            confidence=0.71,
+            raw_output=metrics_output,
+        ),
+        AgentEvidence(
+            agent_name="CodeAgent",
+            phase="analysis",
+            summary="代码分析超时",
+            conclusion=code_timeout_output["conclusion"],
+            evidence_chain=[],
+            confidence=0.45,
+            raw_output=code_timeout_output,
+        ),
+        AgentEvidence(
+            agent_name="DatabaseAgent",
+            phase="analysis",
+            summary="数据库工具缺失",
+            conclusion=db_missing_output["conclusion"],
+            evidence_chain=[],
+            confidence=0.22,
+            raw_output=db_missing_output,
+        ),
+    ]
+
+    payload = orchestrator._build_final_payload(
+        history_cards=history_cards,
+        consensus_reached=False,
+        executed_rounds=1,
+    )
+
+    assert payload["confidence"] >= 0.6
+    assert payload["final_judgment"]["root_cause"]["summary"].startswith("PaymentAppService 同步调用 RiskService")
+    risk_factors = payload["final_judgment"]["risk_assessment"]["risk_factors"]
+    assert not any("关键证据不足" in item for item in risk_factors)
+
+
+def test_build_final_payload_keeps_route_miss_judgment_above_low_confidence_floor():
+    """网关本地 404 场景下，Judge 已有跨源强证据时不应再被压回 0.45。"""
+
+    orchestrator = _orchestrator()
+    now = datetime.utcnow()
+    judge_output = {
+        "chat_message": "我确认这是网关本地路由缺失，不是数据库或服务业务异常。",
+        "final_judgment": {
+            "root_cause": {
+                "summary": "网关路由表未包含 POST /api/v1/orders，或服务注册中心未同步 order-service 实例，导致网关层直接返回 404。",
+                "category": "infrastructure.gateway-route-miss",
+                "confidence": 0.68,
+            },
+            "evidence_chain": [
+                {
+                    "type": "log",
+                    "description": "网关日志显示 route not found path=/api/v1/orders method=POST return=404",
+                    "source": "LogAgent",
+                    "strength": "strong",
+                },
+                {
+                    "type": "domain",
+                    "description": "接口映射确认 POST /api/v1/orders 属于 OrderController#createOrder，说明服务契约存在。",
+                    "source": "interface_mapping",
+                    "strength": "strong",
+                },
+                {
+                    "type": "code",
+                    "description": "CodeAgent 确认 Controller 存在但运行时路由未注册到网关，可排除数据库不是原发根因。",
+                    "source": "CodeAgent",
+                    "strength": "strong",
+                },
+            ],
+            "fix_recommendation": {
+                "summary": "优先检查网关路由配置与服务注册状态",
+                "steps": ["核对 gateway routes", "检查注册中心 order-service 健康状态"],
+                "code_changes_required": False,
+            },
+            "impact_analysis": {"affected_services": ["gateway", "order-service"], "business_impact": "订单创建入口 404"},
+            "risk_assessment": {"risk_level": "high", "risk_factors": ["缺少注册中心实时状态补证"]},
+        },
+        "decision_rationale": {
+            "reasoning": "网关 route not found 日志、接口映射存在性与代码路径分析互相印证，足以排除数据库主因。"
+        },
+        "action_items": [],
+        "responsible_team": {"team": "gateway-team", "owner": "alice"},
+        "confidence": 0.68,
+    }
+    log_output = {
+        "conclusion": "404 发生在 gateway route lookup 阶段，请求未转发到下游。",
+        "confidence": 0.62,
+        "evidence_status": "context_grounded_without_tool",
+        "degraded": False,
+    }
+    code_output = {
+        "conclusion": "OrderController#createOrder 存在，但运行时路由未正确注册到网关。",
+        "confidence": 0.62,
+        "evidence_status": "context_grounded_without_tool",
+        "degraded": False,
+    }
+    domain_output = {
+        "conclusion": "POST /api/v1/orders 归属 order-domain-team，但领域服务未被网关正确感知。",
+        "confidence": 0.45,
+        "degraded": True,
+        "evidence_status": "degraded",
+    }
+    db_missing_output = {
+        "conclusion": "数据库不是本次 404 的直接根因，但实时数据库证据未采集完成。",
+        "confidence": 0.22,
+        "degraded": True,
+        "evidence_status": "missing",
+        "tool_status": "disabled",
+    }
+    orchestrator.turns = [
+        DebateTurn(
+            round_number=1,
+            phase="analysis",
+            agent_name="LogAgent",
+            agent_role="日志分析专家",
+            model={"name": "glm-5"},
+            input_message="",
+            output_content=log_output,
+            confidence=0.62,
+            started_at=now,
+            completed_at=now,
+        ),
+        DebateTurn(
+            round_number=2,
+            phase="analysis",
+            agent_name="CodeAgent",
+            agent_role="代码分析专家",
+            model={"name": "glm-5"},
+            input_message="",
+            output_content=code_output,
+            confidence=0.62,
+            started_at=now,
+            completed_at=now,
+        ),
+        DebateTurn(
+            round_number=3,
+            phase="analysis",
+            agent_name="DomainAgent",
+            agent_role="领域分析专家",
+            model={"name": "glm-5"},
+            input_message="",
+            output_content=domain_output,
+            confidence=0.45,
+            started_at=now,
+            completed_at=now,
+        ),
+        DebateTurn(
+            round_number=4,
+            phase="analysis",
+            agent_name="DatabaseAgent",
+            agent_role="数据库分析专家",
+            model={"name": "glm-5"},
+            input_message="",
+            output_content=db_missing_output,
+            confidence=0.22,
+            started_at=now,
+            completed_at=now,
+        ),
+        DebateTurn(
+            round_number=5,
+            phase="judgment",
+            agent_name="JudgeAgent",
+            agent_role="技术委员会主席",
+            model={"name": "glm-5"},
+            input_message="",
+            output_content=judge_output,
+            confidence=0.68,
+            started_at=now,
+            completed_at=now,
+        ),
+    ]
+    history_cards = [
+        AgentEvidence(
+            agent_name="LogAgent",
+            phase="analysis",
+            summary="日志确认 404 发生在网关本地路由查找阶段",
+            conclusion=log_output["conclusion"],
+            evidence_chain=["route not found", "return=404", "无下游 trace"],
+            confidence=0.62,
+            raw_output=log_output,
+        ),
+        AgentEvidence(
+            agent_name="CodeAgent",
+            phase="analysis",
+            summary="代码与接口映射都说明端点存在",
+            conclusion=code_output["conclusion"],
+            evidence_chain=["OrderController#createOrder", "endpoint exists"],
+            confidence=0.62,
+            raw_output=code_output,
+        ),
+        AgentEvidence(
+            agent_name="DomainAgent",
+            phase="analysis",
+            summary="领域侧需要注册中心补证",
+            conclusion=domain_output["conclusion"],
+            evidence_chain=[],
+            confidence=0.45,
+            raw_output=domain_output,
+        ),
+        AgentEvidence(
+            agent_name="DatabaseAgent",
+            phase="analysis",
+            summary="数据库实时证据缺失",
+            conclusion=db_missing_output["conclusion"],
+            evidence_chain=[],
+            confidence=0.22,
+            raw_output=db_missing_output,
+        ),
+    ]
+
+    payload = orchestrator._build_final_payload(
+        history_cards=history_cards,
+        consensus_reached=False,
+        executed_rounds=1,
+    )
+
+    assert payload["confidence"] >= 0.6
+    assert payload["final_judgment"]["root_cause"]["category"] == "infrastructure.gateway-route-miss"
+    risk_factors = payload["final_judgment"]["risk_assessment"]["risk_factors"]
+    assert not any("关键证据不足" in item for item in risk_factors)

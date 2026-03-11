@@ -131,12 +131,18 @@ class Settings(BaseSettings):
     LLM_LOG_FULL_RESPONSE: bool = False
 
     # 辩论配置
+    # 分析深度模式：quick | standard | deep
+    DEBATE_ANALYSIS_DEPTH_MODE: str = "standard"
+    # 按分析深度模式给出的默认轮次
+    DEBATE_DEFAULT_MAX_ROUNDS_QUICK: int = 1
+    DEBATE_DEFAULT_MAX_ROUNDS_STANDARD: int = 2
+    DEBATE_DEFAULT_MAX_ROUNDS_DEEP: int = 4
     # 最大辩论轮次，默认 1 轮
     DEBATE_MAX_ROUNDS: int = 1
     # 共识阈值（0-1），当 JudgeAgent 置信度超过此值时认为达成共识
     DEBATE_CONSENSUS_THRESHOLD: float = 0.75
-    # 辩论超时时间（秒），默认 10 分钟
-    DEBATE_TIMEOUT: int = 600  # 10 minutes
+    # 辩论超时时间（秒），默认 15 分钟
+    DEBATE_TIMEOUT: int = 900  # 15 minutes
     # 是否启用质疑阶段（CriticAgent）
     DEBATE_ENABLE_CRITIQUE: bool = True
     # 是否启用协作模式
@@ -248,6 +254,24 @@ class Settings(BaseSettings):
             return "file"
         return value
 
+    @field_validator("DEBATE_ANALYSIS_DEPTH_MODE", mode="before")
+    @classmethod
+    def normalize_debate_analysis_depth_mode(cls, v):
+        """标准化分析深度模式，仅允许 quick/standard/deep。"""
+        value = str(v or "standard").strip().lower()
+        if value not in {"quick", "standard", "deep"}:
+            return "standard"
+        return value
+
+    @property
+    def debate_default_max_rounds_by_mode(self) -> Dict[str, int]:
+        """返回按分析深度模式划分的默认轮次。"""
+        return {
+            "quick": max(1, min(8, int(self.DEBATE_DEFAULT_MAX_ROUNDS_QUICK or 1))),
+            "standard": max(1, min(8, int(self.DEBATE_DEFAULT_MAX_ROUNDS_STANDARD or 2))),
+            "deep": max(1, min(8, int(self.DEBATE_DEFAULT_MAX_ROUNDS_DEEP or 4))),
+        }
+
     @property
     def is_development(self) -> bool:
         """检查是否为开发环境"""
@@ -330,8 +354,8 @@ class Settings(BaseSettings):
 
     @property
     def llm_timeout(self) -> int:
-        """获取通用 LLM 超时时间（秒），默认为 120 秒"""
-        return self.LLM_TIMEOUT or 120
+        """获取通用 LLM 超时时间（秒），默认为 180 秒。"""
+        return self.LLM_TIMEOUT or 180
 
     @property
     def llm_connect_timeout(self) -> int:
@@ -340,73 +364,73 @@ class Settings(BaseSettings):
 
     @property
     def llm_request_timeout(self) -> int:
-        """获取请求超时时间（秒），不超过 120 秒"""
-        return self.LLM_REQUEST_TIMEOUT or min(self.llm_timeout, 120)
+        """获取请求超时时间（秒），默认允许到 180 秒。"""
+        return self.LLM_REQUEST_TIMEOUT or min(self.llm_timeout, 180)
 
     @property
     def llm_total_timeout(self) -> int:
-        """获取总超时时间（秒），范围 25-60 秒"""
-        return self.LLM_TOTAL_TIMEOUT or max(25, min(self.llm_timeout, 60))
+        """获取总超时时间（秒），范围 45-90 秒。"""
+        return self.LLM_TOTAL_TIMEOUT or max(45, min(self.llm_timeout, 90))
 
     @property
     def llm_queue_timeout(self) -> int:
-        """获取通用队列等待超时时间（秒），默认放宽到 30 秒。"""
-        return self.LLM_QUEUE_TIMEOUT or max(12, min(self.llm_total_timeout, 30))
+        """获取通用队列等待超时时间（秒），默认放宽到 45 秒。"""
+        return self.LLM_QUEUE_TIMEOUT or max(20, min(self.llm_total_timeout, 45))
 
     @property
     def llm_analysis_queue_timeout(self) -> int:
-        """获取分析阶段队列等待超时时间（秒），默认放宽到 45 秒。"""
-        return self.LLM_ANALYSIS_QUEUE_TIMEOUT or max(int(self.llm_queue_timeout), 45)
+        """获取分析阶段队列等待超时时间（秒），默认放宽到 60 秒。"""
+        return self.LLM_ANALYSIS_QUEUE_TIMEOUT or max(int(self.llm_queue_timeout), 60)
 
     @property
     def llm_metrics_queue_timeout(self) -> int:
-        """获取 MetricsAgent 队列等待超时时间（秒），默认不低于 60 秒。"""
-        return self.LLM_METRICS_QUEUE_TIMEOUT or max(int(self.llm_analysis_queue_timeout), 60)
+        """获取 MetricsAgent 队列等待超时时间（秒），默认不低于 90 秒。"""
+        return self.LLM_METRICS_QUEUE_TIMEOUT or max(int(self.llm_analysis_queue_timeout), 90)
 
     @property
     def llm_judge_queue_timeout(self) -> int:
-        """获取裁决阶段队列等待超时时间（秒），默认放宽到 60 秒。"""
-        return self.LLM_JUDGE_QUEUE_TIMEOUT or max(int(self.llm_analysis_queue_timeout), 60)
+        """获取裁决阶段队列等待超时时间（秒），默认放宽到 90 秒。"""
+        return self.LLM_JUDGE_QUEUE_TIMEOUT or max(int(self.llm_analysis_queue_timeout), 90)
 
     @property
     def llm_report_queue_timeout(self) -> int:
-        """获取报告阶段队列等待超时时间（秒），默认与分析阶段一致。"""
-        return self.LLM_REPORT_QUEUE_TIMEOUT or max(int(self.llm_queue_timeout), 45)
+        """获取报告阶段队列等待超时时间（秒），默认放宽到 60 秒。"""
+        return self.LLM_REPORT_QUEUE_TIMEOUT or max(int(self.llm_queue_timeout), 60)
 
     @property
     def llm_asset_timeout(self) -> int:
-        """获取资产处理超时时间（秒），范围 20-60 秒"""
-        return self.LLM_ASSET_TIMEOUT or max(20, min(self.llm_request_timeout, 60))
+        """获取资产处理超时时间（秒），范围 30-90 秒。"""
+        return self.LLM_ASSET_TIMEOUT or max(30, min(self.llm_request_timeout, 90))
 
     @property
     def llm_analysis_timeout(self) -> int:
-        """获取分析阶段超时时间（秒），范围 20-35 秒"""
-        return self.LLM_ANALYSIS_TIMEOUT or max(20, min(self.llm_total_timeout, 35))
+        """获取分析阶段超时时间（秒），范围 30-55 秒。"""
+        return self.LLM_ANALYSIS_TIMEOUT or max(30, min(self.llm_total_timeout, 55))
 
     @property
     def llm_review_timeout(self) -> int:
-        """获取审查阶段超时时间（秒），范围 24-40 秒"""
-        return self.LLM_REVIEW_TIMEOUT or max(24, min(self.llm_total_timeout, 40))
+        """获取审查阶段超时时间（秒），范围 35-60 秒。"""
+        return self.LLM_REVIEW_TIMEOUT or max(35, min(self.llm_total_timeout, 60))
 
     @property
     def llm_judge_timeout(self) -> int:
-        """获取裁决阶段超时时间（秒），范围 35-60 秒"""
-        return self.LLM_JUDGE_TIMEOUT or max(35, min(self.llm_total_timeout, 60))
+        """获取裁决阶段超时时间（秒），范围 45-75 秒。"""
+        return self.LLM_JUDGE_TIMEOUT or max(45, min(self.llm_total_timeout, 75))
 
     @property
     def llm_judge_retry_timeout(self) -> int:
-        """获取裁决重试超时时间（秒），至少 45 秒"""
-        return self.LLM_JUDGE_RETRY_TIMEOUT or max(self.llm_judge_timeout, 45)
+        """获取裁决重试超时时间（秒），至少 60 秒。"""
+        return self.LLM_JUDGE_RETRY_TIMEOUT or max(self.llm_judge_timeout, 60)
 
     @property
     def llm_report_timeout_first(self) -> int:
-        """获取报告首次生成超时时间（秒），范围 16-35 秒"""
-        return self.LLM_REPORT_TIMEOUT_FIRST or max(16, min(self.llm_total_timeout, 35))
+        """获取报告首次生成超时时间（秒），范围 24-50 秒。"""
+        return self.LLM_REPORT_TIMEOUT_FIRST or max(24, min(self.llm_total_timeout, 50))
 
     @property
     def llm_report_timeout_retry(self) -> int:
-        """获取报告重试生成超时时间（秒），至少 50 秒"""
-        return self.LLM_REPORT_TIMEOUT_RETRY or max(self.llm_report_timeout_first, 50)
+        """获取报告重试生成超时时间（秒），至少 70 秒。"""
+        return self.LLM_REPORT_TIMEOUT_RETRY or max(self.llm_report_timeout_first, 70)
 
     @property
     def llm_provider_id(self) -> str:

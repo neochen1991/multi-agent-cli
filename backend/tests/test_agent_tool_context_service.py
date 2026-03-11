@@ -264,6 +264,103 @@ def test_build_code_focused_context_includes_method_level_call_chain(tmp_path):
     assert any(item["method"] == "saveOrder" for item in chain)
 
 
+def test_build_code_focused_context_includes_topology_summaries(tmp_path):
+    """验证 CodeAgent focused context 会输出调用图、SQL、RPC、事务与资源风险摘要。"""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "src" / "order"
+    src.mkdir(parents=True)
+    (src / "OrderController.java").write_text(
+        (
+            "@RestController\n"
+            "public class OrderController {\n"
+            "  private final OrderService orderService;\n"
+            "  public void createOrder() { orderService.createOrder(); }\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    (src / "OrderService.java").write_text(
+        (
+            "public class OrderService {\n"
+            "  private final OrderRepository orderRepository;\n"
+            "  private final InventoryClient inventoryClient;\n"
+            "  @Transactional\n"
+            "  public void createOrder() {\n"
+            "    inventoryClient.deduct();\n"
+            "    orderRepository.saveOrder();\n"
+            "  }\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    (src / "OrderRepository.java").write_text(
+        (
+            "public class OrderRepository {\n"
+            "  @Query(\"update t_order set status='OK' where id=?\")\n"
+            "  public void saveOrder() {}\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    (src / "InventoryClient.java").write_text(
+        (
+            "@FeignClient(name = \"inventory-service\")\n"
+            "public interface InventoryClient {\n"
+            "  void deduct();\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="CodeAgent",
+        compact_context={
+            "interface_mapping": {
+                "endpoint": {
+                    "method": "POST",
+                    "path": "/api/v1/orders",
+                    "service": "order-service",
+                    "interface": "OrderController#createOrder",
+                },
+                "code_artifacts": ["src/order/OrderController.java"],
+                "dependency_services": ["inventory-service"],
+                "database_tables": ["t_order"],
+            },
+            "investigation_leads": {
+                "class_names": ["OrderController", "OrderService", "OrderRepository", "InventoryClient"],
+                "code_artifacts": ["src/order/OrderController.java"],
+                "dependency_services": ["inventory-service"],
+                "database_tables": ["t_order"],
+            },
+        },
+        incident_context={"description": "/orders 502"},
+        tool_context={
+            "data": {
+                "repo_path": str(repo),
+                "hits": [
+                    {
+                        "file": "src/order/OrderController.java",
+                        "line": 4,
+                        "keyword": "createorder",
+                        "snippet": "orderService.createOrder();",
+                    }
+                ]
+            }
+        },
+        assigned_command={"task": "分析接口拓扑闭包", "focus": "controller -> service -> dao -> rpc"},
+    )
+
+    assert focused["call_graph_summary"]["entry_method"] == "OrderController#createOrder"
+    assert "OrderRepository#saveOrder" in focused["call_graph_summary"]["call_path"]
+    assert "t_order" in focused["sql_binding_summary"]["matched_tables"]
+    assert focused["downstream_rpc_summary"]["dependency_services"] == ["inventory-service"]
+    assert "同步下游调用可能阻塞" in focused["resource_risk_points"]
+    assert focused["transaction_boundary_summary"]["boundary_hints"]
+
+
 def test_build_database_focused_context_includes_sql_and_tables():
     """验证 DatabaseAgent focused context 会包含目标表和 SQL 摘要。"""
 
@@ -340,6 +437,33 @@ def test_build_domain_focused_context_includes_causal_summary():
     assert "public.t_order" in summary["impact_scope"]["database_tables"]
     assert len(summary["impact_scope"]["dependency_services"]) >= 1
     assert len(summary["evidence_points"]) >= 2
+
+
+def test_build_domain_focused_context_includes_constraint_checks():
+    """验证 DomainAgent focused context 会输出聚合约束与领域检查项。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="DomainAgent",
+        compact_context={
+            "interface_mapping": {
+                "matched": True,
+                "domain": "交易域",
+                "aggregate": "订单聚合",
+                "owner_team": "order-domain-team",
+                "feature": "订单创建",
+                "database_tables": ["public.t_order"],
+                "dependency_services": ["inventory-service"],
+                "endpoint": {"method": "POST", "path": "/api/v1/orders", "service": "order-service"},
+            }
+        },
+        incident_context={"description": "/orders 502"},
+        tool_context={"data": {"matches": [{"feature": "订单创建"}]}},
+        assigned_command={"task": "检查领域约束", "focus": "聚合不变量与事务顺序"},
+    )
+
+    assert focused["aggregate_invariants"]
+    assert any(item["name"] == "transaction_order" for item in focused["domain_constraint_checks"])
 
 
 def test_build_problem_analysis_focused_context_includes_coordination_summary():
@@ -565,6 +689,41 @@ def test_build_database_focused_context_includes_causal_summary():
     assert len(summary["evidence_points"]) >= 2
 
 
+def test_build_database_focused_context_includes_execution_and_lock_views():
+    """验证 DatabaseAgent focused context 会输出执行计划、锁图和 SQL 聚类。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="DatabaseAgent",
+        compact_context={"interface_mapping": {"database_tables": ["public.t_order"]}},
+        incident_context={"description": "/orders 502 with db lock"},
+        tool_context={
+            "data": {
+                "execution_plans": [
+                    {"operator": "Index Scan", "summary": "Index Scan on t_order using idx_order_status"}
+                ],
+                "session_status": [
+                    {
+                        "pid": "101",
+                        "blocking_pid": "88",
+                        "state": "active",
+                        "wait_event_type": "Lock",
+                        "wait_event": "transactionid",
+                    }
+                ],
+                "slow_sql": [{"query": "UPDATE public.t_order SET status='OK' WHERE id=$1"}],
+                "top_sql": [{"query": "SELECT * FROM public.t_order WHERE id=$1"}],
+            }
+        },
+        assigned_command={"task": "分析数据库执行与锁等待", "database_tables": ["public.t_order"]},
+    )
+
+    assert focused["execution_plan_summary"]["available"] is True
+    assert focused["execution_plan_summary"]["dominant_operators"] == ["Index Scan"]
+    assert focused["lock_wait_graph"]["edges"][0]["to"] == "88"
+    assert focused["sql_pattern_clusters"]
+
+
 def test_build_log_focused_context_includes_causal_timeline():
     """验证 LogAgent focused context 会输出首错到用户故障的时间线归因链。"""
 
@@ -598,6 +757,54 @@ def test_build_log_focused_context_includes_causal_timeline():
     assert any(item["stage"] == "first_error" for item in timeline)
     assert any(item["stage"] == "resource_exhaustion" for item in timeline)
     assert timeline[-1]["stage"] == "user_visible_failure"
+
+
+def test_build_log_focused_context_includes_trace_alignment():
+    """验证 LogAgent focused context 会输出 trace 对齐和传播链。"""
+
+    service = AgentToolContextService()
+    excerpt = "\n".join(
+        [
+            "2026-02-20T14:01:07.911+08:00 INFO gateway TraceIdFilter traceId=trc-1 uri=POST /api/v1/orders",
+            "2026-02-20T14:01:38.095+08:00 ERROR order-service HikariPool-1 - Connection is not available, request timed out after 30000ms.",
+            "2026-02-20T14:01:38.124+08:00 ERROR gateway ErrorLogFilter upstream timeout, status=502",
+        ]
+    )
+
+    focused = service.build_focused_context(
+        agent_name="LogAgent",
+        compact_context={
+            "log_excerpt": excerpt,
+            "investigation_leads": {"service_names": ["order-service"], "trace_ids": ["trc-1"]},
+        },
+        incident_context={"description": "/orders 502"},
+        tool_context={
+            "data": {
+                "excerpt": excerpt,
+                "keywords": ["orders", "timeout"],
+                "remote_telemetry": {
+                    "payload": {
+                        "spans": [
+                            {"timestamp": "2026-02-20T14:01:20.000+08:00", "service": "order-service", "span": "OrderAppService", "summary": "createOrder span"}
+                        ]
+                    }
+                },
+                "remote_prometheus": {
+                    "payload": {
+                        "signals": [
+                            {"timestamp": "2026-02-20T14:01:30.000+08:00", "metric": "db.pool.pending", "summary": "pending threads high"}
+                        ]
+                    }
+                },
+            }
+        },
+        assigned_command={"task": "做统一时序对齐", "focus": "trace 与 metric 放大链"},
+    )
+
+    assert focused["trace_timeline"]
+    assert any(item["source"] == "trace" for item in focused["trace_timeline"])
+    assert any(item["source"] == "metric" for item in focused["trace_timeline"])
+    assert any(item["stage"] == "resource_contention" for item in focused["propagation_chain"])
 
 
 def test_build_metrics_focused_context_includes_causal_metric_chain():

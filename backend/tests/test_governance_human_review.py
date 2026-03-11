@@ -133,3 +133,69 @@ def test_team_metrics_breaks_out_queue_timeout_hotspots(tmp_path, monkeypatch):
     assert item["evidence_gap_rate"] == 1.0
     assert payload["queue_timeout_hotspots"][0]["key"] == "ProblemAnalysisAgent::llm_queue_timeout"
     assert payload["limited_analysis_hotspots"][0]["key"] == "DatabaseAgent::inferred_without_tool"
+
+
+def test_team_metrics_tracks_depth_mode_and_multistep_investigation(tmp_path, monkeypatch):
+    """治理指标应输出分析深度分布和多步调查命中率。"""
+
+    service = GovernanceOpsService()
+    monkeypatch.setattr(service, "_debates_file", tmp_path / "debates.json")
+    monkeypatch.setattr(service, "_runtime_events_dir", tmp_path / "runtime_events")
+    service._runtime_events_dir.mkdir(parents=True, exist_ok=True)
+
+    service._write_json(
+        service._debates_file,
+        {
+            "sessions": [
+                {
+                    "id": "deb_deep",
+                    "incident_id": "inc_deep",
+                    "status": "completed",
+                    "tenant_id": "order-sre",
+                    "created_at": "2026-03-07T10:00:00+00:00",
+                    "context": {"analysis_depth_mode": "deep"},
+                },
+                {
+                    "id": "deb_standard",
+                    "incident_id": "inc_standard",
+                    "status": "completed",
+                    "tenant_id": "order-sre",
+                    "created_at": "2026-03-07T11:00:00+00:00",
+                    "context": {"analysis_depth_mode": "standard"},
+                },
+            ],
+            "results": [
+                {"session_id": "deb_deep", "confidence": 0.81},
+                {"session_id": "deb_standard", "confidence": 0.72},
+            ],
+        },
+    )
+
+    (service._runtime_events_dir / "deb_deep.jsonl").write_text(
+        "\n".join(
+            [
+                '{"timestamp":"2026-03-07T10:00:00+00:00","type":"llm_http_request","agent_name":"CodeAgent","prompt_length":800,"max_tokens":300}',
+                '{"timestamp":"2026-03-07T10:00:02+00:00","type":"expert_investigation_started","agent_name":"CodeAgent","analysis_depth_mode":"deep"}',
+                '{"timestamp":"2026-03-07T10:00:03+00:00","type":"expert_investigation_step_completed","agent_name":"CodeAgent","stage":"plan"}',
+                '{"timestamp":"2026-03-07T10:00:04+00:00","type":"expert_investigation_completed","agent_name":"CodeAgent","analysis_depth_mode":"deep"}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (service._runtime_events_dir / "deb_standard.jsonl").write_text(
+        "\n".join(
+            [
+                '{"timestamp":"2026-03-07T11:00:00+00:00","type":"llm_http_request","agent_name":"LogAgent","prompt_length":500,"max_tokens":200}'
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    payload = asyncio.run(service.team_metrics(days=30, limit=10))
+    item = payload["items"][0]
+
+    assert item["depth_mode_distribution"]["deep"] == 1
+    assert item["depth_mode_distribution"]["standard"] == 1
+    assert item["expert_investigation_sessions"] == 1
+    assert item["expert_investigation_rate"] == 0.5
+    assert item["expert_investigation_steps"] == 1

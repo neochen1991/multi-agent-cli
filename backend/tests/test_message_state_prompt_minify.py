@@ -86,6 +86,7 @@ def test_agent_prompt_includes_tool_limited_instruction() -> None:
     assert "工具受限说明" in prompt
     assert "继续基于已有证据推理" in prompt
     assert "不要假装已经完成实时取证" in prompt
+    assert "基于已提供证据的受限但可用结论" in prompt
 
 
 def test_agent_prompt_includes_focused_context_block() -> None:

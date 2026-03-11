@@ -13,6 +13,11 @@ from app.runtime.langgraph.routing.rules import (
     RoutingDecision,
     RoutingRule,
 )
+from app.runtime.langgraph.routing_helpers import (
+    _agent_has_effective_evidence,
+    _gap_target_agent,
+    infer_relevant_agents_from_texts,
+)
 from app.runtime.messages import AgentEvidence
 
 
@@ -53,6 +58,39 @@ def _recent_agent_card(round_cards: List[AgentEvidence], agent_name: str) -> Opt
 def step_for_agent(agent_name: str) -> str:
     """Convert an agent name to a step string."""
     return f"speak:{str(agent_name or '').strip()}"
+
+
+def _has_effective_parallel_coverage(ctx: RoutingContext) -> bool:
+    """判断当前并行分析专家是否已经形成足够的有效覆盖。"""
+    parallel_agents = [str(name or "").strip() for name in list(ctx.parallel_analysis_agents or []) if str(name or "").strip()]
+    if not parallel_agents:
+        return False
+
+    agent_outputs = ctx.state.get("agent_outputs", {}) if isinstance(ctx.state.get("agent_outputs"), dict) else {}
+    effective_count = 0
+    for agent_name in parallel_agents:
+        # 先从 round card 读最新证据；没有就退回 state 里的结构化输出。
+        card = _recent_agent_card(ctx.round_cards, agent_name)
+        payload = getattr(card, "raw_output", {}) if card else {}
+        if not isinstance(payload, dict) or not payload:
+            payload = agent_outputs.get(agent_name, {}) if isinstance(agent_outputs.get(agent_name), dict) else {}
+        if not isinstance(payload, dict) or not payload:
+            return False
+        conclusion = str(payload.get("conclusion") or getattr(card, "conclusion", "") or "").strip()
+        evidence_chain = payload.get("evidence_chain")
+        has_evidence = isinstance(evidence_chain, list) and len(evidence_chain) > 0
+        confidence = _output_confidence(payload, default=float(getattr(card, "confidence", 0.0) or 0.0))
+        degraded = bool(payload.get("degraded")) or str(payload.get("evidence_status") or "").strip().lower() in {
+            "degraded",
+            "missing",
+            "inferred_without_tool",
+        }
+        if degraded or confidence < 0.55 or not (conclusion or has_evidence):
+            return False
+        effective_count += 1
+
+    # 至少要有 3 个分析专家形成有效结论，才值得直接交给 Judge。
+    return effective_count >= min(3, len(parallel_agents))
 
 
 class ConsensusRule(RoutingRule):
@@ -436,6 +474,177 @@ class NoCritiqueRevisitRule(RoutingRule):
         return None
 
 
+class NoCritiqueGapTargetRule(RoutingRule):
+    """无批判模式下，优先把重复并行改写成定向补证。"""
+
+    def __init__(self, min_steps: int = 5, priority: int = 56):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
+        self._min_steps = min_steps
+        self._priority = priority
+
+    @property
+    def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
+        return "no_critique_gap_target"
+
+    @property
+    def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
+        return self._priority
+
+    def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
+        if ctx.debate_enable_critique:
+            return None
+        if ctx.judge_card is not None:
+            return None
+        if ctx.discussion_step < self._min_steps:
+            return None
+        if ctx.next_step not in ("analysis_parallel", "parallel_analysis"):
+            return None
+
+        available_agents = [str(name or "").strip() for name in list(ctx.parallel_analysis_agents or []) if str(name or "").strip()]
+        open_questions = [str(item or "") for item in list(ctx.state.get("open_questions") or [])]
+        round_gap_summary = [str(item or "") for item in list(ctx.state.get("round_gap_summary") or [])]
+        top_k_hypotheses = [
+            str(item.get("conclusion") or "")
+            for item in list(ctx.state.get("top_k_hypotheses") or [])
+            if isinstance(item, dict)
+        ]
+        hinted_agents = infer_relevant_agents_from_texts(
+            [*open_questions, *round_gap_summary, *top_k_hypotheses],
+            available_agents=available_agents,
+        )
+        gap_target = ""
+        for agent_name in hinted_agents:
+            if not _agent_has_effective_evidence(ctx.round_cards, ctx.state, agent_name):
+                gap_target = agent_name
+                break
+        if not gap_target:
+            gap_target = _gap_target_agent(
+                state=ctx.state,
+                round_cards=ctx.round_cards,
+                parallel_analysis_agents=ctx.parallel_analysis_agents,
+            )
+        if not gap_target:
+            return None
+
+        # commander 想再次整轮并行时，若缺口已明确归属到单个专家，就改成定向补证，
+        # 避免把四个分析专家全部再跑一遍。
+        return RoutingDecision(
+            next_step=step_for_agent(gap_target),
+            should_stop=False,
+            reason=f"无批判模式下已定位明确证据缺口，改为定向追问 {gap_target}",
+            metadata={
+                "gap_target": gap_target,
+                "discussion_step": ctx.discussion_step,
+            },
+        )
+
+
+class NoCritiqueTargetedSettleRule(RoutingRule):
+    """无批判模式下，若定向追问对象已形成有效覆盖，则直接切 Judge。"""
+
+    def __init__(self, min_steps: int = 4, min_effective_key_agents: int = 3, priority: int = 56):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
+        self._min_steps = min_steps
+        self._min_effective_key_agents = min_effective_key_agents
+        self._priority = priority
+
+    @property
+    def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
+        return "no_critique_targeted_settle"
+
+    @property
+    def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
+        return self._priority
+
+    def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
+        if ctx.debate_enable_critique:
+            return None
+        if ctx.judge_card is not None:
+            return None
+        if ctx.discussion_step < self._min_steps:
+            return None
+        target_agent = str(ctx.target_agent or "").strip()
+        parallel_agents = {str(name or "").strip() for name in list(ctx.parallel_analysis_agents or []) if str(name or "").strip()}
+        if not target_agent or target_agent not in parallel_agents:
+            return None
+        if not all(agent in ctx.seen_agents for agent in parallel_agents):
+            return None
+        if not _agent_has_effective_evidence(ctx.round_cards, ctx.state, target_agent):
+            return None
+
+        effective_key_agents = sum(
+            1
+            for agent_name in ("LogAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent")
+            if _agent_has_effective_evidence(ctx.round_cards, ctx.state, agent_name)
+        )
+        if effective_key_agents < self._min_effective_key_agents:
+            return None
+
+        # 中文注释：这里拦截的是“工具补证型追问”。
+        # 当并行专家已经完成发言，且至少 3 个关键证据专家都给出有效覆盖时，
+        # 再回头追问一个已形成结论的专家，通常只会把 trace/SQL/代码行号补得更细，
+        # 不会改变主因归属。此时直接切 Judge 更符合收敛目标。
+        return RoutingDecision(
+            next_step=step_for_agent("JudgeAgent"),
+            should_stop=False,
+            reason=f"{target_agent} 已形成有效覆盖，且关键专家证据已足够，切换JudgeAgent裁决",
+            metadata={
+                "target_agent": target_agent,
+                "effective_key_agents": effective_key_agents,
+                "discussion_step": ctx.discussion_step,
+            },
+        )
+
+
+class NoCritiqueParallelSettleRule(RoutingRule):
+    """无批判模式下，避免在已有充分分析覆盖后重复整轮并行分析。"""
+
+    def __init__(self, min_steps: int = 4, priority: int = 57):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
+        self._min_steps = min_steps
+        self._priority = priority
+
+    @property
+    def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
+        return "no_critique_parallel_settle"
+
+    @property
+    def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
+        return self._priority
+
+    def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
+        if ctx.debate_enable_critique:
+            return None
+        if ctx.judge_card is not None:
+            return None
+        if ctx.discussion_step < self._min_steps:
+            return None
+        if ctx.next_step not in ("analysis_parallel", "parallel_analysis"):
+            return None
+        if not _has_effective_parallel_coverage(ctx):
+            return None
+
+        # 当前轮已经有足够证据，再做整轮并行分析通常只会重复同一批结论。
+        return RoutingDecision(
+            next_step=step_for_agent("JudgeAgent"),
+            should_stop=False,
+            reason="无批判模式下分析专家已形成充分覆盖，停止重复并行分析并切换JudgeAgent",
+            metadata={
+                "discussion_step": ctx.discussion_step,
+                "parallel_agents": list(ctx.parallel_analysis_agents),
+            },
+        )
+
+
 class JudgeCoverageRule(RoutingRule):
     """Rule that ensures judge is called when all agents have participated."""
 
@@ -494,5 +703,7 @@ __all__ = [
     "PostRebuttalSettleRule",
     "CommanderSettleRule",
     "NoCritiqueRevisitRule",
+    "NoCritiqueTargetedSettleRule",
+    "NoCritiqueParallelSettleRule",
     "JudgeCoverageRule",
 ]

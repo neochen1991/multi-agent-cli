@@ -42,6 +42,7 @@ class AgentRunner:
         round_number: int,
         loop_round: int,
         history_cards_context: Optional[list[Any]] = None,
+        execution_context: Optional[dict[str, Any]] = None,
     ) -> DebateTurn:
         """
         执行单个 Agent 的一轮调用。
@@ -59,6 +60,7 @@ class AgentRunner:
                 round_number=round_number,
                 loop_round=loop_round,
                 history_cards_context=history_cards_context,
+                execution_context=execution_context,
             )
         except FatalLLMError:
             # 致命错误直接抛出，交给更上层决定是否中止整场会话。

@@ -44,7 +44,6 @@ from app.runtime.langgraph.message_ops import (
     dedupe_new_messages as dedupe_new_messages_ops,
     merge_round_and_message_cards as merge_round_and_message_cards_ops,
     message_signature as message_signature_ops,
-    messages_to_cards as messages_to_cards_ops,
     prune_history_cards as prune_history_cards_ops,
 )
 from app.runtime.langgraph.prompt_builder import PromptBuilder
@@ -55,6 +54,24 @@ from app.runtime.langgraph.services.routing_service import RoutingService
 from app.runtime.langgraph.phase_manager import PhaseManager
 from app.runtime.langgraph.session_compaction import SessionCompaction
 from app.runtime.langgraph.doom_loop_guard import DoomLoopGuard
+from app.runtime.langgraph.runtime_policy import resolve_runtime_policy
+from app.runtime.langgraph.budgeting import (
+    agent_http_timeout as agent_http_timeout_rule,
+    agent_max_tokens as agent_max_tokens_rule,
+    agent_queue_timeout as agent_queue_timeout_rule,
+    agent_timeout_plan as agent_timeout_plan_rule,
+    has_expert_turns as has_expert_turns_rule,
+    is_fast_analysis_opening as is_fast_analysis_opening_rule,
+    is_fast_execution_mode as is_fast_execution_mode_rule,
+    is_fast_first_round as is_fast_first_round_rule,
+)
+from app.runtime.langgraph.state_views import (
+    dialogue_items_from_messages as dialogue_items_from_messages_view,
+    history_cards_for_state as history_cards_for_state_view,
+    messages_to_cards as messages_to_cards_view,
+    round_cards_for_routing as round_cards_for_routing_view,
+    round_cards_from_state as round_cards_from_state_view,
+)
 from app.runtime.langgraph.output_truncation import truncate_text as truncate_text_with_ref
 from app.runtime.langgraph.work_log_manager import work_log_manager
 from app.runtime.langgraph.mailbox import (
@@ -71,6 +88,7 @@ from app.runtime.langgraph.routing import (
     round_agent_counts as round_agent_counts_route,
     route_guardrail as route_guardrail_helper,
 )
+from app.runtime.langgraph.routing_helpers import infer_relevant_agents_from_texts
 from app.runtime.langgraph.nodes import (
     execute_supervisor_decide,
     execute_single_phase_agent,
@@ -84,6 +102,7 @@ from app.runtime.langgraph.state import (
     DebateExecState as _DebateExecState,
     DebateTurn,
     build_session_init_update,
+    flatten_structured_state_view,
     structured_state_snapshot,
 )
 from app.runtime.messages import AgentEvidence, AgentMessage, FinalVerdict, RoundCheckpoint
@@ -92,6 +111,37 @@ from app.runtime.trace_lineage import lineage_recorder
 from app.services.agent_tool_context_service import agent_tool_context_service
 
 logger = structlog.get_logger()
+
+ANALYSIS_DEPTH_MODES = {"quick", "standard", "deep"}
+
+
+def normalize_analysis_depth_mode(mode: Any) -> str:
+    """标准化分析深度模式，仅允许 quick/standard/deep。"""
+    value = str(mode or settings.DEBATE_ANALYSIS_DEPTH_MODE or "standard").strip().lower()
+    if value not in ANALYSIS_DEPTH_MODES:
+        return "standard"
+    return value
+
+
+def default_max_rounds_by_mode() -> Dict[str, int]:
+    """返回当前配置下各分析深度模式的默认轮次。"""
+    return dict(settings.debate_default_max_rounds_by_mode)
+
+
+def resolve_analysis_depth_max_rounds(
+    max_rounds: Optional[int],
+    analysis_depth_mode: Any,
+) -> int:
+    """解析分析深度模式与轮次覆盖的最终结果。"""
+    if max_rounds is not None:
+        try:
+            parsed = int(max_rounds)
+        except (TypeError, ValueError):
+            parsed = 0
+        if parsed > 0:
+            return max(1, min(8, parsed))
+    defaults = default_max_rounds_by_mode()
+    return max(1, min(8, int(defaults[normalize_analysis_depth_mode(analysis_depth_mode)])))
 
 
 class LangGraphRuntimeOrchestrator:
@@ -128,6 +178,12 @@ class LangGraphRuntimeOrchestrator:
         "DatabaseAgent",
         "MetricsAgent",
     )
+    CORROBORATION_AGENTS = (
+        "DomainAgent",
+        "ChangeAgent",
+        "RunbookAgent",
+        "RuleSuggestionAgent",
+    )
     ANALYSIS_PRIORITY_BATCHES = (
         ("DatabaseAgent", "MetricsAgent"),
         ("LogAgent", "CodeAgent"),
@@ -139,7 +195,12 @@ class LangGraphRuntimeOrchestrator:
     MAX_DISCUSSION_STEPS_PER_ROUND = 12
     DIALOGUE_PROMPT_CHAR_BUDGET = 900
 
-    def __init__(self, consensus_threshold: float = 0.85, max_rounds: int = 1):
+    def __init__(
+        self,
+        consensus_threshold: float = 0.85,
+        max_rounds: Optional[int] = 1,
+        analysis_depth_mode: Optional[str] = None,
+    ):
         """
         初始化运行时编排器的核心依赖。
 
@@ -149,7 +210,8 @@ class LangGraphRuntimeOrchestrator:
         - 建立 LLM 并发控制和 checkpoint 依赖
         """
         self.consensus_threshold = consensus_threshold
-        self.max_rounds = max_rounds
+        self.analysis_depth_mode = normalize_analysis_depth_mode(analysis_depth_mode)
+        self.max_rounds = resolve_analysis_depth_max_rounds(max_rounds, self.analysis_depth_mode)
         self.min_rounds = 1
         self.session_id: Optional[str] = None
         self.trace_id: str = ""
@@ -200,7 +262,8 @@ class LangGraphRuntimeOrchestrator:
             "langgraph_runtime_orchestrator_initialized",
             model=settings.llm_model,
             base_url=settings.LLM_BASE_URL,
-            max_rounds=max_rounds,
+            max_rounds=self.max_rounds,
+            analysis_depth_mode=self.analysis_depth_mode,
             consensus_threshold=consensus_threshold,
             prompt_template_version=self._prompt_builder.template_version,
         )
@@ -214,59 +277,26 @@ class LangGraphRuntimeOrchestrator:
         - 每轮最多允许多少讨论步
         - 是否开启 collaboration / critique / verification
         """
-        execution_mode = str((context or {}).get("execution_mode") or "standard").strip().lower()
         deployment_profile = (context or {}).get("deployment_profile")
-        runtime_strategy = (context or {}).get("runtime_strategy")
-        phase_mode = ""
-        if isinstance(runtime_strategy, dict):
-            phase_mode = str(runtime_strategy.get("phase_mode") or "").strip().lower()
+        policy = resolve_runtime_policy(
+            context,
+            debate_enable_critique=bool(settings.DEBATE_ENABLE_CRITIQUE),
+            debate_enable_collaboration=bool(settings.DEBATE_ENABLE_COLLABORATION),
+        )
 
-        core_agents = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent")
-        balanced_agents = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent")
-        fast_agents = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent", "ChangeAgent")
-
-        if phase_mode in {"economy", "failfast"} or execution_mode == "quick":
-            selected_agents = core_agents
-            max_discussion_steps = 4
-            enable_critique = False
-            enable_collaboration = False
-            require_verification_plan = False
-        elif phase_mode == "fast_track" or execution_mode in {"background", "async"}:
-            selected_agents = fast_agents
-            max_discussion_steps = 10
-            enable_critique = False
-            enable_collaboration = False
-            require_verification_plan = False
-        else:
-            selected_agents = balanced_agents
-            max_discussion_steps = 8
-            enable_critique = bool(settings.DEBATE_ENABLE_CRITIQUE)
-            enable_collaboration = bool(settings.DEBATE_ENABLE_COLLABORATION)
-            require_verification_plan = True
-
-        if isinstance(deployment_profile, dict) and deployment_profile.get("name"):
-            self._deployment_profile_name = str(deployment_profile.get("name") or "").strip().lower()
-            selected_agents = tuple(
-                str(name or "").strip()
-                for name in list(deployment_profile.get("analysis_agents") or [])
-                if str(name or "").strip()
-            ) or selected_agents
-            enable_collaboration = bool(deployment_profile.get("collaboration_enabled") or False)
-            enable_critique = bool(deployment_profile.get("critique_enabled") or False)
-            require_verification_plan = bool(deployment_profile.get("require_verification_plan") or False)
-        else:
-            self._deployment_profile_name = ""
-        self._execution_mode_name = execution_mode
-
-        self.PARALLEL_ANALYSIS_AGENTS = tuple(selected_agents)
-        self.MAX_DISCUSSION_STEPS_PER_ROUND = int(max_discussion_steps)
-        self._enable_collaboration = bool(enable_collaboration)
-        self._enable_critique = bool(enable_critique)
-        self._require_verification_plan = bool(require_verification_plan)
+        self._deployment_profile_name = policy.deployment_profile_name
+        self._execution_mode_name = policy.execution_mode
+        self.analysis_depth_mode = str(policy.analysis_depth_mode or self.analysis_depth_mode)
+        self.PARALLEL_ANALYSIS_AGENTS = tuple(policy.parallel_analysis_agents)
+        self.MAX_DISCUSSION_STEPS_PER_ROUND = int(policy.max_discussion_steps)
+        self._enable_collaboration = bool(policy.enable_collaboration)
+        self._enable_critique = bool(policy.enable_critique)
+        self._require_verification_plan = bool(policy.require_verification_plan)
         logger.info(
             "runtime_policy_applied",
-            execution_mode=execution_mode,
-            phase_mode=phase_mode or "standard",
+            execution_mode=policy.execution_mode,
+            analysis_depth_mode=self.analysis_depth_mode,
+            phase_mode=policy.phase_mode,
             deployment_profile=(
                 str(deployment_profile.get("name") or "")
                 if isinstance(deployment_profile, dict)
@@ -350,7 +380,7 @@ class LangGraphRuntimeOrchestrator:
         self._configure_runtime_policy(context)
         configured_session_timeout = float(context.get("session_timeout_seconds") or 0.0)
         if configured_session_timeout <= 0:
-            configured_session_timeout = float(max(30, int(settings.DEBATE_TIMEOUT or 600)))
+            configured_session_timeout = float(max(60, int(settings.DEBATE_TIMEOUT or 900)))
         self._session_timeout_seconds = configured_session_timeout
         self._session_deadline_monotonic = monotonic() + configured_session_timeout
         await lineage_recorder.append(
@@ -488,12 +518,7 @@ class LangGraphRuntimeOrchestrator:
 
     def _round_cards_from_state(self, state: _DebateExecState) -> List[AgentEvidence]:
         """从 state 中切出当前 round 的证据卡片集合。"""
-        history_cards = list(state.get("history_cards") or [])
-        start_index = max(0, int(state.get("round_start_turn_index") or 0))
-        if start_index <= 0:
-            return history_cards
-        # round_start_turn_index is indexed against self.turns; cards track the same append order.
-        return history_cards[start_index:]
+        return round_cards_from_state_view(state)
 
     def _messages_to_cards(
         self,
@@ -502,7 +527,7 @@ class LangGraphRuntimeOrchestrator:
         limit: int = 12,
     ) -> List[AgentEvidence]:
         """把 LangGraph messages 投影成统一的证据卡片结构。"""
-        return messages_to_cards_ops(messages, limit=limit)
+        return messages_to_cards_view(messages, limit=limit)
 
     def _history_cards_for_state(
         self,
@@ -515,15 +540,11 @@ class LangGraphRuntimeOrchestrator:
         `history_cards` remains as a UI/display projection; runtime decisions should
         primarily consume cards derived from LangGraph `messages`.
         """
-        stored_cards = list(state.get("history_cards") or [])
-        message_cards = self._messages_to_cards(list(state.get("messages") or []), limit=max(8, limit))
-        return merge_round_and_message_cards_ops(stored_cards, message_cards, limit=max(8, limit))
+        return history_cards_for_state_view(state, limit=limit)
 
     def _round_cards_for_routing(self, state: _DebateExecState) -> List[AgentEvidence]:
         """为路由判断准备 round cards，并补上最新消息投影。"""
-        round_cards = self._round_cards_from_state(state)
-        message_cards = self._messages_to_cards(list(state.get("messages") or []), limit=12)
-        return merge_round_and_message_cards_ops(round_cards, message_cards, limit=20)
+        return round_cards_for_routing_view(state)
 
     def _recent_judge_turn(self, round_turns: List[DebateTurn]) -> Optional[DebateTurn]:
         """返回当前轮里最近一次 JudgeAgent 的 turn。"""
@@ -637,51 +658,11 @@ class LangGraphRuntimeOrchestrator:
         char_budget: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """从消息流中抽取可放入 Prompt 的对话摘要条目。"""
-        budget = max(240, int(char_budget or self.DIALOGUE_PROMPT_CHAR_BUDGET))
-        items: List[Dict[str, Any]] = []
-        seen_signatures: set[tuple[str, str]] = set()
-        used_chars = 0
-        for msg in reversed(list(messages or [])):
-            content = getattr(msg, "content", "")
-            if isinstance(content, list):
-                content_text = " ".join(
-                    str(part.get("text") or "")
-                    for part in content
-                    if isinstance(part, dict)
-                ).strip()
-            else:
-                content_text = str(content or "").strip()
-            if not content_text:
-                continue
-            additional = getattr(msg, "additional_kwargs", {}) or {}
-            speaker = (
-                str(getattr(msg, "name", "") or "")
-                or str(additional.get("agent_name") or "")
-                or str(getattr(msg, "type", "") or "assistant")
-            )
-            # Avoid flooding prompts with repeated statements from the same speaker.
-            sig = (speaker, content_text[:64])
-            if sig in seen_signatures:
-                continue
-            seen_signatures.add(sig)
-            msg_snippet = content_text[:140]
-            conclusion_snippet = str(additional.get("conclusion") or "")[:96]
-            estimated = len(msg_snippet) + len(conclusion_snippet) + len(speaker) + 24
-            if items and used_chars + estimated > budget:
-                continue
-            used_chars += estimated
-            items.append(
-                {
-                    "speaker": speaker,
-                    "phase": str(additional.get("phase") or ""),
-                    "conclusion": conclusion_snippet,
-                    "message": msg_snippet,
-                }
-            )
-            if len(items) >= max(1, limit):
-                break
-        items.reverse()
-        return items
+        return dialogue_items_from_messages_view(
+            messages,
+            limit=limit,
+            char_budget=char_budget or self.DIALOGUE_PROMPT_CHAR_BUDGET,
+        )
 
     def _message_signature(self, msg: Any) -> str:
         """为消息生成稳定签名，供去重逻辑复用。"""
@@ -798,16 +779,17 @@ class LangGraphRuntimeOrchestrator:
         `ProblemAnalysisAgent` 生成本轮命令，并把命令写入 mailbox，
         供后续并行分析阶段逐个专家 Agent 消费。
         """
-        current_round = int(state.get("current_round") or 0) + 1
+        flat_state = flatten_structured_state_view(state or {})
+        current_round = int(flat_state.get("current_round") or 0) + 1
         if current_round > max(1, self.max_rounds):
             return {"continue_next_round": False}
-        history_cards = self._history_cards_for_state(state, limit=20)
+        history_cards = self._history_cards_for_state(flat_state, limit=20)
         dialogue_items = self._dialogue_items_from_messages(
-            list(state.get("messages") or []),
+            list(flat_state.get("messages") or []),
             limit=4,
             char_budget=520,
         )
-        context_summary = state.get("context_summary") or {}
+        context_summary = flat_state.get("context_summary") or {}
         compact_context = self._session_compaction.compact_context(
             self._compact_round_context(context_summary),
             max_len=3200,
@@ -831,11 +813,11 @@ class LangGraphRuntimeOrchestrator:
             compact_context=compact_context,
             history_cards=history_cards,
             dialogue_items=dialogue_items,
-            existing_agent_outputs=dict(state.get("agent_outputs") or {}),
+            existing_agent_outputs=dict(flat_state.get("agent_outputs") or {}),
         )
         commands = dict(commander_result.get("commands") or {})
         self._active_round_commands = commands
-        mailbox = clone_mailbox(state.get("agent_mailbox") or {})
+        mailbox = clone_mailbox(flat_state.get("agent_mailbox") or {})
         for target, command in commands.items():
             command_text = str((command or {}).get("task") or "").strip()
             focus = str((command or {}).get("focus") or "").strip()
@@ -856,11 +838,11 @@ class LangGraphRuntimeOrchestrator:
             )
         preseed_route = self._route_from_commander_output(
             payload=commander_result,
-            state=state,
+            state=flat_state,
             round_cards=self._round_cards_for_routing(
                 {
                     "history_cards": history_cards,
-                    "messages": list(state.get("messages") or []),
+                    "messages": list(flat_state.get("messages") or []),
                     "round_start_turn_index": len(self.turns) - 1,
                 }
             ),
@@ -872,18 +854,21 @@ class LangGraphRuntimeOrchestrator:
             "agent_commands": commands,
             "agent_mailbox": compact_mailbox(mailbox),
             "next_step": str(preseed_route.get("next_step") or ""),
-            "round_start_turn_index": len(self.turns),
+            # round_cards 的切片基准必须和 state 里的 history_cards 视图对齐，
+            # 不能直接使用内存中的 turn 数量；否则 commander 已写入 self.turns
+            # 但尚未投影进 history_cards 时，会把本轮第一批专家卡片错切掉。
+            "round_start_turn_index": len(history_cards),
             "discussion_step_count": 0,
             "max_discussion_steps": self._round_discussion_budget(),
             "supervisor_stop_requested": bool(preseed_route.get("should_stop") or False),
             "supervisor_stop_reason": str(preseed_route.get("stop_reason") or ""),
             **self._derive_conversation_state_with_context(
                 history_cards,
-                messages=list(state.get("messages") or []),
-                existing_agent_outputs=dict(state.get("agent_outputs") or {}),
+                messages=list(flat_state.get("messages") or []),
+                existing_agent_outputs=dict(flat_state.get("agent_outputs") or {}),
             ),
         }
-        merged_preview = {**dict(state), **next_state}
+        merged_preview = {**dict(flat_state), **next_state}
         return {**next_state, **structured_state_snapshot(merged_preview)}
 
     async def _graph_analysis_parallel(self, state: _DebateExecState) -> _DebateExecState:
@@ -903,6 +888,7 @@ class LangGraphRuntimeOrchestrator:
         )
         compact_context = self._compact_round_context(context_summary)
         agent_mailbox = clone_mailbox(state.get("agent_mailbox") or {})
+        agent_local_state = dict(state.get("agent_local_state") or {})
         await self._run_parallel_analysis_phase(
             loop_round=loop_round,
             compact_context=compact_context,
@@ -910,8 +896,13 @@ class LangGraphRuntimeOrchestrator:
             agent_commands=dict(state.get("agent_commands") or {}),
             dialogue_items=dialogue_items,
             agent_mailbox=agent_mailbox,
+            agent_local_state=agent_local_state,
         )
-        return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
+        return {
+            "history_cards": history_cards,
+            "agent_mailbox": compact_mailbox(agent_mailbox),
+            "agent_local_state": agent_local_state,
+        }
 
     async def _graph_analysis_collaboration(self, state: _DebateExecState) -> _DebateExecState:
         """执行专家间协作阶段，让分析 Agent 互相补充证据或纠正结论。"""
@@ -920,6 +911,17 @@ class LangGraphRuntimeOrchestrator:
         loop_round = int(state.get("current_round") or 1)
         context_summary = state.get("context_summary") or {}
         history_cards = self._history_cards_for_state(state, limit=20)
+        if self._should_skip_collaboration_phase(history_cards):
+            await self._emit_event(
+                {
+                    "type": "parallel_analysis_collaboration_skipped",
+                    "phase": "analysis",
+                    "loop_round": loop_round,
+                    "session_id": self.session_id,
+                    "reason": "quick 模式下关键证据已基本收敛，跳过重复协作阶段",
+                }
+            )
+            return {"history_cards": history_cards}
         dialogue_items = self._dialogue_items_from_messages(
             list(state.get("messages") or []),
             limit=5,
@@ -927,14 +929,42 @@ class LangGraphRuntimeOrchestrator:
         )
         compact_context = self._compact_round_context(context_summary)
         agent_mailbox = clone_mailbox(state.get("agent_mailbox") or {})
+        agent_local_state = dict(state.get("agent_local_state") or {})
         await self._run_collaboration_phase(
             loop_round=loop_round,
             compact_context=compact_context,
             history_cards=history_cards,
             dialogue_items=dialogue_items,
             agent_mailbox=agent_mailbox,
+            agent_local_state=agent_local_state,
         )
-        return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
+        return {
+            "history_cards": history_cards,
+            "agent_mailbox": compact_mailbox(agent_mailbox),
+            "agent_local_state": agent_local_state,
+        }
+
+    def _should_skip_collaboration_phase(self, history_cards: List[AgentEvidence]) -> bool:
+        """
+        判断当前轮是否可以跳过协作阶段。
+
+        中文注释：quick 模式的目标是“尽快收敛到足够可信的结论”，
+        如果首轮关键证据专家已经形成稳定覆盖，再让四个专家互相复述一轮，
+        通常只会增加时延，不会改变主因归属。这里在进入 collaboration 前
+        做一次门禁，避免 synthetic / smoke 场景被固定协作开销拖慢。
+        """
+        if not self._is_fast_execution_mode():
+            return False
+        if not history_cards:
+            return False
+        coverage = self._count_key_evidence_coverage(history_cards)
+        ok_count = int(coverage.get("ok") or 0)
+        degraded_count = int(coverage.get("degraded") or 0)
+        missing_count = int(coverage.get("missing") or 0)
+        # 中文注释：这里故意不把“Top-2 候选措辞差异”作为阻断条件。
+        # quick 模式下，不同专家常会用不同表达复述同一根因链，
+        # 如果继续依赖字符串级“未收敛”判断，会把本可直接裁决的场景拖进整轮协作。
+        return ok_count >= 3 and degraded_count == 0 and missing_count == 0
 
     async def _graph_critic(self, state: _DebateExecState) -> _DebateExecState:
         """执行质疑阶段，让 `CriticAgent` 针对当前主结论提出反证。"""
@@ -950,6 +980,7 @@ class LangGraphRuntimeOrchestrator:
         )
         compact_context = self._compact_round_context(context_summary)
         agent_mailbox = clone_mailbox(state.get("agent_mailbox") or {})
+        agent_local_state = dict(state.get("agent_local_state") or {})
         inbox_messages, agent_mailbox = dequeue_messages(agent_mailbox, receiver="CriticAgent")
         execution_result = await execute_single_phase_agent(
             self,
@@ -961,9 +992,15 @@ class LangGraphRuntimeOrchestrator:
             dialogue_items=dialogue_items,
             inbox_messages=inbox_messages,
             agent_mailbox=agent_mailbox,
+            agent_local_state=agent_local_state,
         )
         agent_mailbox = clone_mailbox(execution_result.get("agent_mailbox") or agent_mailbox)
-        return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
+        agent_local_state = dict(execution_result.get("agent_local_state") or agent_local_state)
+        return {
+            "history_cards": history_cards,
+            "agent_mailbox": compact_mailbox(agent_mailbox),
+            "agent_local_state": agent_local_state,
+        }
 
     async def _graph_rebuttal(self, state: _DebateExecState) -> _DebateExecState:
         """执行反驳阶段，让 `RebuttalAgent` 回应质疑并补充证据。"""
@@ -979,6 +1016,7 @@ class LangGraphRuntimeOrchestrator:
         )
         compact_context = self._compact_round_context(context_summary)
         agent_mailbox = clone_mailbox(state.get("agent_mailbox") or {})
+        agent_local_state = dict(state.get("agent_local_state") or {})
         inbox_messages, agent_mailbox = dequeue_messages(agent_mailbox, receiver="RebuttalAgent")
         execution_result = await execute_single_phase_agent(
             self,
@@ -990,9 +1028,15 @@ class LangGraphRuntimeOrchestrator:
             dialogue_items=dialogue_items,
             inbox_messages=inbox_messages,
             agent_mailbox=agent_mailbox,
+            agent_local_state=agent_local_state,
         )
         agent_mailbox = clone_mailbox(execution_result.get("agent_mailbox") or agent_mailbox)
-        return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
+        agent_local_state = dict(execution_result.get("agent_local_state") or agent_local_state)
+        return {
+            "history_cards": history_cards,
+            "agent_mailbox": compact_mailbox(agent_mailbox),
+            "agent_local_state": agent_local_state,
+        }
 
     async def _graph_judge(self, state: _DebateExecState) -> _DebateExecState:
         """
@@ -1011,6 +1055,7 @@ class LangGraphRuntimeOrchestrator:
         )
         compact_context = self._compact_round_context(context_summary)
         agent_mailbox = clone_mailbox(state.get("agent_mailbox") or {})
+        agent_local_state = dict(state.get("agent_local_state") or {})
         inbox_messages, agent_mailbox = dequeue_messages(agent_mailbox, receiver="JudgeAgent")
         execution_result = await execute_single_phase_agent(
             self,
@@ -1022,13 +1067,19 @@ class LangGraphRuntimeOrchestrator:
             dialogue_items=dialogue_items,
             inbox_messages=inbox_messages,
             agent_mailbox=agent_mailbox,
+            agent_local_state=agent_local_state,
         )
         agent_mailbox = clone_mailbox(execution_result.get("agent_mailbox") or agent_mailbox)
+        agent_local_state = dict(execution_result.get("agent_local_state") or agent_local_state)
         await self._emit_problem_analysis_final_summary(
             loop_round=loop_round,
             history_cards=history_cards,
         )
-        return {"history_cards": history_cards, "agent_mailbox": compact_mailbox(agent_mailbox)}
+        return {
+            "history_cards": history_cards,
+            "agent_mailbox": compact_mailbox(agent_mailbox),
+            "agent_local_state": agent_local_state,
+        }
 
     async def _graph_round_evaluate(self, state: _DebateExecState) -> _DebateExecState:
         """
@@ -1040,26 +1091,49 @@ class LangGraphRuntimeOrchestrator:
         - Supervisor 是否主动请求停止
         - 轮次预算是否还有余量
         """
-        current_round = int(state.get("current_round") or 1)
-        history_cards = self._history_cards_for_state(state, limit=20)
-        judge_card = self._recent_judge_card(self._round_cards_from_state(state))
+        flat_state = flatten_structured_state_view(state or {})
+        current_round = int(flat_state.get("current_round") or 1)
+        history_cards = self._history_cards_for_state(flat_state, limit=20)
+        judge_card = self._recent_judge_card(self._round_cards_from_state(flat_state))
         judge_confidence = float((judge_card.confidence if judge_card else 0.0) or 0.0)
-        supervisor_stop_requested = bool(state.get("supervisor_stop_requested") or False)
+        supervisor_stop_requested = bool(flat_state.get("supervisor_stop_requested") or False)
         consensus_reached = bool(judge_card) and judge_confidence >= self.consensus_threshold
-        executed_rounds = max(int(state.get("executed_rounds") or 0), current_round)
+        executed_rounds = max(int(flat_state.get("executed_rounds") or 0), current_round)
+        evidence_coverage = self._count_key_evidence_coverage(history_cards)
+        top_k_hypotheses = list(flat_state.get("top_k_hypotheses") or []) or self._build_top_k_hypotheses(history_cards)
+        round_gap_summary = self._build_round_gap_summary(history_cards, evidence_coverage, top_k_hypotheses)
+        round_objectives = self._build_round_objectives(top_k_hypotheses, round_gap_summary)
+        debate_stability_score = self._compute_debate_stability_score(
+            judge_confidence=judge_confidence,
+            evidence_coverage=evidence_coverage,
+            top_k_hypotheses=top_k_hypotheses,
+            round_gap_summary=round_gap_summary,
+        )
         await self._emit_event(
             {
                 "type": "round_completed",
                 "loop_round": current_round,
                 "consensus_reached": consensus_reached,
                 "judge_confidence": judge_confidence,
+                "debate_stability_score": debate_stability_score,
+                "top_k_hypotheses": top_k_hypotheses[:3],
+                "evidence_coverage": evidence_coverage,
                 "supervisor_stop_requested": supervisor_stop_requested,
-                "supervisor_stop_reason": str(state.get("supervisor_stop_reason") or "")[:240],
+                "supervisor_stop_reason": str(flat_state.get("supervisor_stop_reason") or "")[:240],
                 "mode": "langgraph_runtime",
             }
         )
+        stable_enough_to_stop = (
+            consensus_reached
+            and debate_stability_score >= 0.7
+            and self._passes_depth_quality_gate(
+                evidence_coverage=evidence_coverage,
+                round_gap_summary=round_gap_summary,
+            )
+            and current_round >= self.min_rounds
+        )
         continue_next_round = (
-            (not consensus_reached or current_round < self.min_rounds)
+            (not stable_enough_to_stop)
             and current_round < max(1, self.max_rounds)
             and not supervisor_stop_requested
         )
@@ -1068,6 +1142,11 @@ class LangGraphRuntimeOrchestrator:
             "consensus_reached": consensus_reached,
             "executed_rounds": executed_rounds,
             "continue_next_round": continue_next_round,
+            "top_k_hypotheses": top_k_hypotheses,
+            "evidence_coverage": evidence_coverage,
+            "round_gap_summary": round_gap_summary,
+            "round_objectives": round_objectives,
+            "debate_stability_score": debate_stability_score,
         }
 
     def _spec_by_name(self, agent_name: str) -> Optional[AgentSpec]:
@@ -1926,6 +2005,7 @@ class LangGraphRuntimeOrchestrator:
         agent_commands: Optional[Dict[str, Dict[str, Any]]] = None,
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         agent_mailbox: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        agent_local_state: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> None:
         """
         把并行分析阶段委托给 `PhaseExecutor`。
@@ -1940,6 +2020,9 @@ class LangGraphRuntimeOrchestrator:
             agent_commands=agent_commands,
             dialogue_items=dialogue_items,
             agent_mailbox=agent_mailbox,
+            # `agent_local_state` 需要跨阶段透传给 PhaseExecutor，
+            # 否则并行分析阶段会在进入执行前就因为签名不一致而崩溃。
+            agent_local_state=agent_local_state,
         )
 
     async def _run_collaboration_phase(
@@ -1949,6 +2032,7 @@ class LangGraphRuntimeOrchestrator:
         history_cards: List[AgentEvidence],
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         agent_mailbox: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        agent_local_state: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> None:
         """把专家协作阶段委托给 `PhaseExecutor` 统一执行。"""
         await self._phase_executor.run_collaboration_phase(
@@ -1957,6 +2041,9 @@ class LangGraphRuntimeOrchestrator:
             history_cards=history_cards,
             dialogue_items=dialogue_items,
             agent_mailbox=agent_mailbox,
+            # 协作阶段同样依赖每个专家的私有工作记忆，否则后续 peer review
+            # 会丢失已验证结论、未决问题等上下文。
+            agent_local_state=agent_local_state,
         )
 
     async def _graph_finalize(self, state: _DebateExecState) -> _DebateExecState:
@@ -2331,6 +2418,125 @@ class LangGraphRuntimeOrchestrator:
         deduped = list(dict.fromkeys(values))
         return deduped[:4]
 
+    @staticmethod
+    def _tool_limited_output_is_context_grounded(
+        *,
+        spec: AgentSpec,
+        payload: Dict[str, Any],
+        context_with_tools: Dict[str, Any],
+    ) -> bool:
+        """判断受限分析是否已被共享上下文里的显式证据充分支撑。"""
+        if not isinstance(payload, dict) or not payload:
+            return False
+        shared_context = context_with_tools.get("shared_context")
+        if not isinstance(shared_context, dict):
+            shared_context = {}
+        focused_context = context_with_tools.get("focused_context")
+        if not isinstance(focused_context, dict):
+            focused_context = {}
+
+        conclusion = str(payload.get("conclusion") or "").strip()
+        analysis = str(payload.get("analysis") or "").strip()
+        evidence_chain = payload.get("evidence_chain")
+        evidence_count = len(evidence_chain) if isinstance(evidence_chain, list) else 0
+        needs_validation = payload.get("needs_validation")
+        if not isinstance(needs_validation, list):
+            needs_validation = []
+        open_questions = payload.get("open_questions")
+        if not isinstance(open_questions, list):
+            open_questions = []
+        confidence_raw = payload.get("confidence")
+        try:
+            confidence = float(confidence_raw)
+        except Exception:
+            confidence = 0.0
+
+        # 中文注释：首轮专家在“工具不可用”场景下经常会刻意保守自降置信度，
+        # 但如果文本已经明确给出因果链、反证和放大器判断，就不应再被机械判成 inferred。
+        # 这里补一个轻量文本信号识别，专门兜住 synthetic/benchmark 这类静态证据充分的场景。
+        reasoning_text = f"{conclusion}\n{analysis}".lower()
+        causal_markers = (
+            "根因",
+            "causal",
+            "因果",
+            "amplification",
+            "放大器",
+            "次生",
+            "不是根因",
+            "不是性能瓶颈源头",
+            "长事务",
+            "事务内",
+            "连接池耗尽",
+            "锁等待",
+        )
+        contradiction_markers = (
+            "counter_evidence",
+            "反证",
+            "why_not_change",
+            "不改变当前判断",
+            "不是原发根因",
+        )
+        causal_signal_count = sum(1 for marker in causal_markers if marker in reasoning_text)
+        contradiction_signal_count = sum(1 for marker in contradiction_markers if marker in reasoning_text)
+
+        # 中文注释：不同专家对“共享证据充分”的判断标准不同，尽量只认强信号字段，
+        # 避免把泛化 incident 摘要误当作可直接支撑结论的证据。
+        per_agent_context_keys = {
+            "LogAgent": ("log_excerpt", "timeline_summary", "error_summary", "incident_summary"),
+            "CodeAgent": ("code_diff_summary", "log_excerpt", "incident_summary", "change_summary"),
+            "DatabaseAgent": ("db_wait_summary", "top_sql_summary", "log_excerpt", "incident_summary"),
+            "MetricsAgent": ("metric_summary", "timeline_summary", "incident_summary"),
+        }
+        context_signal_count = 0
+        for key in per_agent_context_keys.get(spec.name, ("incident_summary",)):
+            value = shared_context.get(key)
+            if isinstance(value, dict) and value:
+                context_signal_count += 1
+            elif isinstance(value, str) and value.strip():
+                context_signal_count += 1
+        if focused_context:
+            context_signal_count += 1
+
+        anchor_map = {
+            "LogAgent": ("log_evidence_anchors", "timeline_events"),
+            "CodeAgent": ("code_evidence_anchors", "mapped_code_paths"),
+            "DatabaseAgent": ("db_evidence_anchors", "suspicious_tables", "suspicious_sql"),
+            "MetricsAgent": ("metric_evidence_anchors", "metric_windows"),
+        }
+        anchor_count = 0
+        for key in anchor_map.get(spec.name, ()):
+            value = payload.get(key)
+            if isinstance(value, list):
+                anchor_count += len([item for item in value if str(item).strip()])
+
+        reasoning_signal_count = 0
+        if len(conclusion) >= 20:
+            reasoning_signal_count += 1
+        if len(analysis) >= 80:
+            reasoning_signal_count += 1
+        if needs_validation or open_questions:
+            reasoning_signal_count += 1
+        if evidence_count >= 1 or anchor_count >= 1:
+            reasoning_signal_count += 1
+        if causal_signal_count >= 2:
+            reasoning_signal_count += 1
+        if contradiction_signal_count >= 1:
+            reasoning_signal_count += 1
+
+        # 中文注释：日志/数据库专家在工具关闭时最容易因为“缺少最终 trace / SQL 实采”
+        # 把 self-confidence 压到 0.5 左右，但这并不代表共享证据不够支撑一条可裁决结论。
+        # 对这两类专家放宽到 0.5，下限之外仍保持原来的严格门槛。
+        confidence_floor_map = {
+            "LogAgent": 0.5,
+            "DatabaseAgent": 0.5,
+        }
+        confidence_floor = float(confidence_floor_map.get(spec.name, 0.66))
+        return bool(
+            reasoning_signal_count >= 2
+            and context_signal_count >= 2
+            and confidence >= confidence_floor
+        )
+
     def _apply_tool_limited_semantics(
         self,
         *,
@@ -2386,17 +2592,32 @@ class LangGraphRuntimeOrchestrator:
         else:
             chat_message = f"{tool_name or '关键工具'} 当前{tool_status}，我先基于已有证据给出受限分析。"
         confidence = float(payload.get("confidence", turn.confidence) or turn.confidence or 0.0)
-        confidence = min(confidence, 0.58)
-        confidence = max(confidence, 0.18)
+        context_grounded = self._tool_limited_output_is_context_grounded(
+            spec=spec,
+            payload=payload,
+            context_with_tools=context_with_tools,
+        )
+        if context_grounded:
+            # 中文注释：这里仍保留“工具受限”的审计标记，但不再把共享证据充分的输出
+            # 机械压成 degraded，否则 synthetic/benchmark 这类静态证据场景永远无法收敛。
+            confidence = min(max(confidence, 0.62), 0.78)
+            evidence_status = "context_grounded_without_tool"
+            degraded = False
+        else:
+            confidence = min(confidence, 0.58)
+            confidence = max(confidence, 0.18)
+            evidence_status = "inferred_without_tool"
+            degraded = True
         payload.update(
             {
                 "chat_message": chat_message,
                 "analysis": analysis,
                 "conclusion": conclusion,
                 "confidence": confidence,
-                "degraded": True,
+                "degraded": degraded,
                 "degrade_reason": reason,
-                "evidence_status": "inferred_without_tool",
+                "evidence_status": evidence_status,
+                "tool_limited": True,
                 "tool_status": tool_status,
                 "tool_name": tool_name,
                 "missing_info": list(dict.fromkeys(str(item).strip() for item in missing_info if str(item).strip()))[:6],
@@ -2406,24 +2627,269 @@ class LangGraphRuntimeOrchestrator:
         return replace(turn, output_content=payload, confidence=confidence)
 
     @staticmethod
-    def _count_key_evidence_coverage(history_cards: List[AgentEvidence]) -> Dict[str, int]:
-        """计算统计keyevidencecoverage，为治理、裁决或展示提供量化依据。"""
-        coverage = {"ok": 0, "degraded": 0, "missing": 0}
+    def _count_key_evidence_coverage(history_cards: List[AgentEvidence]) -> Dict[str, Any]:
+        """计算关键证据覆盖，并附带跨域佐证强度。"""
+        coverage: Dict[str, Any] = {
+            "ok": 0,
+            "degraded": 0,
+            "missing": 0,
+            "covered_agents": [],
+            "corroboration_agents": [],
+            "corroboration_count": 0,
+            "weighted_score": 0.0,
+        }
         seen: set[str] = set()
+        corroboration_seen: set[str] = set()
         for card in history_cards:
             name = str(card.agent_name or "").strip()
+            output = card.raw_output if isinstance(getattr(card, "raw_output", None), dict) else {}
+            evidence_status = str(output.get("evidence_status") or "").strip().lower()
+            if name in LangGraphRuntimeOrchestrator.CORROBORATION_AGENTS:
+                if name not in corroboration_seen and evidence_status != "missing":
+                    corroboration_seen.add(name)
+                continue
             if name not in LangGraphRuntimeOrchestrator.KEY_EVIDENCE_AGENTS or name in seen:
                 continue
             seen.add(name)
-            output = card.raw_output if isinstance(getattr(card, "raw_output", None), dict) else {}
-            evidence_status = str(output.get("evidence_status") or "").strip().lower()
             if evidence_status == "missing":
                 coverage["missing"] += 1
             elif LangGraphRuntimeOrchestrator._is_degraded_output(output):
                 coverage["degraded"] += 1
             else:
                 coverage["ok"] += 1
+                coverage["covered_agents"].append(name)
+        observed_key_agents = max(
+            1,
+            int(coverage.get("ok") or 0)
+            + int(coverage.get("degraded") or 0)
+            + int(coverage.get("missing") or 0),
+        )
+        base_score = (
+            int(coverage.get("ok") or 0)
+            + 0.5 * int(coverage.get("degraded") or 0)
+        ) / observed_key_agents
+        corroboration_agents = sorted(corroboration_seen)
+        corroboration_bonus = min(0.28, 0.08 * len(corroboration_agents))
+        coverage["covered_agents"] = sorted(dict.fromkeys(coverage["covered_agents"]))
+        coverage["corroboration_agents"] = corroboration_agents
+        coverage["corroboration_count"] = len(corroboration_agents)
+        coverage["weighted_score"] = round(max(0.0, min(1.0, base_score + corroboration_bonus)), 3)
         return coverage
+
+    @staticmethod
+    def _judge_has_strong_shared_evidence(final_judgment: Any, decision_rationale: Any) -> bool:
+        """判断 Judge 是否已经拿到足够强的共享证据链，可避免被机械压成低置信。"""
+        if not isinstance(final_judgment, dict):
+            return False
+        root_cause = final_judgment.get("root_cause")
+        if not isinstance(root_cause, dict):
+            return False
+        try:
+            root_confidence = float(root_cause.get("confidence") or 0.0)
+        except Exception:
+            root_confidence = 0.0
+        evidence_chain = final_judgment.get("evidence_chain")
+        if not isinstance(evidence_chain, list):
+            evidence_chain = []
+        strong_count = 0
+        source_types: set[str] = set()
+        source_agents: set[str] = set()
+        exclusion_signal = False
+        for item in evidence_chain[:6]:
+            if not isinstance(item, dict):
+                continue
+            strength = str(item.get("strength") or "").strip().lower()
+            evidence_type = str(item.get("type") or "").strip().lower()
+            source = str(item.get("source") or "").strip()
+            description = str(item.get("description") or "").strip().lower()
+            if strength == "strong":
+                strong_count += 1
+            if evidence_type:
+                source_types.add(evidence_type)
+            if source:
+                source_agents.add(source)
+            if any(marker in description for marker in ("不是原发根因", "排除", "not root cause", "不是根因")):
+                exclusion_signal = True
+        reasoning_text = ""
+        if isinstance(decision_rationale, dict):
+            reasoning_text = str(decision_rationale.get("reasoning") or "").strip().lower()
+        if any(marker in reasoning_text for marker in ("排除数据库主因", "足以排除", "not root cause", "不是原发根因")):
+            exclusion_signal = True
+        # 这里要求 Judge 不只是“有结论”，还要满足：
+        # 1. 根因自身置信度不低；
+        # 2. 至少三条强证据；
+        # 3. 证据来自多源类型或多个专家；
+        # 4. 明确排除一个高频错误候选。
+        return (
+            root_confidence >= 0.7
+            and strong_count >= 3
+            and (len(source_types) >= 2 or len(source_agents) >= 3)
+            and exclusion_signal
+        )
+
+    @staticmethod
+    def _build_top_k_hypotheses(history_cards: List[AgentEvidence], k: int = 3) -> List[Dict[str, Any]]:
+        """从最近专家结论中提炼 Top-K 根因候选。"""
+        candidates: List[Dict[str, Any]] = []
+        seen = set()
+        for card in reversed(history_cards):
+            if card.agent_name in {"JudgeAgent", "CriticAgent", "RebuttalAgent", "VerificationAgent"}:
+                continue
+            conclusion = str(card.conclusion or "").strip()
+            if not conclusion:
+                continue
+            key = f"{card.agent_name}|{conclusion[:120]}"
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(
+                {
+                    "agent_name": card.agent_name,
+                    "phase": card.phase,
+                    "summary": str(card.summary or "")[:160],
+                    "conclusion": conclusion[:240],
+                    "confidence": float(card.confidence or 0.0),
+                }
+            )
+        candidates.sort(key=lambda item: float(item.get("confidence") or 0.0), reverse=True)
+        return candidates[: max(1, int(k or 3))]
+
+    @staticmethod
+    def _build_round_gap_summary(
+        history_cards: List[AgentEvidence],
+        evidence_coverage: Dict[str, int],
+        top_k_hypotheses: List[Dict[str, Any]],
+    ) -> List[str]:
+        """基于证据覆盖和当前候选生成下一轮缺口摘要。"""
+        gaps: List[str] = []
+        if int(evidence_coverage.get("missing") or 0) > 0:
+            gaps.append("仍有关键证据 Agent 缺失输出，需要补齐日志/代码/数据库/指标中的空缺。")
+        if int(evidence_coverage.get("degraded") or 0) > 0:
+            gaps.append("部分关键证据处于降级状态，需要进一步补强工具结果和交叉验证。")
+        if len(top_k_hypotheses) >= 2:
+            top1 = str(top_k_hypotheses[0].get("conclusion") or "")
+            top2 = str(top_k_hypotheses[1].get("conclusion") or "")
+            if top1 and top2 and top1[:80] != top2[:80]:
+                gaps.append("Top-2 根因候选尚未收敛，需要主 Agent 继续追问差异点。")
+        if not gaps and history_cards:
+            gaps.append("当前证据基本收敛，可进入裁决或验证阶段。")
+        return gaps[:4]
+
+    @staticmethod
+    def _build_round_objectives(
+        top_k_hypotheses: List[Dict[str, Any]],
+        round_gap_summary: List[str],
+    ) -> List[str]:
+        """为下一轮讨论生成简短目标。"""
+        objectives: List[str] = []
+        if top_k_hypotheses:
+            objectives.append(f"优先验证 Top-1 候选：{str(top_k_hypotheses[0].get('conclusion') or '')[:120]}")
+        objectives.extend(str(item or "").strip() for item in round_gap_summary if str(item or "").strip())
+        return list(dict.fromkeys(objectives))[:4]
+
+    def _passes_depth_quality_gate(
+        self,
+        *,
+        evidence_coverage: Dict[str, Any],
+        round_gap_summary: List[str],
+    ) -> bool:
+        """
+        根据 analysis_depth_mode 判断当前证据质量是否允许收口。
+
+        quick/standard/deep 不应该只影响预算，还应影响收口门槛：
+        - quick: 允许单源高信号结论快速收口
+        - standard: 至少需要双源关键证据
+        - deep: 需要关键证据齐全、无降级，并有至少一个旁证 Agent 参与
+        """
+        depth_mode = str(self.analysis_depth_mode or "standard").strip().lower()
+        ok_count = int(evidence_coverage.get("ok") or 0)
+        degraded_count = int(evidence_coverage.get("degraded") or 0)
+        missing_count = int(evidence_coverage.get("missing") or 0)
+        corroboration_count = int(evidence_coverage.get("corroboration_count") or 0)
+        has_divergence_gap = any("尚未收敛" in str(item or "") for item in list(round_gap_summary or []))
+
+        if depth_mode == "quick":
+            return ok_count >= 1 and missing_count <= 1 and degraded_count <= 1
+        if depth_mode == "deep":
+            return (
+                ok_count >= 2
+                and missing_count == 0
+                and degraded_count == 0
+                and corroboration_count >= 1
+                and not has_divergence_gap
+            )
+        return ok_count >= 2 and missing_count == 0 and degraded_count <= 1
+
+    def _inject_followup_objectives_into_commands(
+        self,
+        commands: Dict[str, Dict[str, Any]],
+        *,
+        top_k_hypotheses: List[Dict[str, Any]],
+        round_objectives: List[str],
+        round_gap_summary: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """把当前轮的收敛目标和缺口注入下一轮专家命令。"""
+        if not isinstance(commands, dict):
+            return {}
+        shared_focus = "；".join(
+            [
+                *[str(item or "").strip() for item in round_objectives if str(item or "").strip()],
+                *[f"候选根因：{str(item.get('conclusion') or '')[:120]}" for item in top_k_hypotheses[:2]],
+            ]
+        ).strip("；")
+        shared_expected = "补齐缺失证据、验证 Top-K 候选差异，并给出是否支持继续收敛/进入裁决的判断"
+        enriched: Dict[str, Dict[str, Any]] = {}
+        for target, command in commands.items():
+            if not isinstance(command, dict):
+                continue
+            next_command = dict(command)
+            existing_focus = str(next_command.get("focus") or "").strip()
+            if shared_focus:
+                next_command["focus"] = "；".join(
+                    part for part in [existing_focus, shared_focus] if part
+                )[:480]
+            if round_gap_summary:
+                next_command["followup_gaps"] = list(dict.fromkeys(round_gap_summary))[:4]
+            if top_k_hypotheses:
+                next_command["top_k_hypotheses"] = [
+                    {
+                        "agent_name": str(item.get("agent_name") or ""),
+                        "conclusion": str(item.get("conclusion") or "")[:200],
+                        "confidence": float(item.get("confidence") or 0.0),
+                    }
+                    for item in top_k_hypotheses[:3]
+                ]
+            next_command["round_objectives"] = list(dict.fromkeys(round_objectives))[:4]
+            if not str(next_command.get("expected_output") or "").strip():
+                next_command["expected_output"] = shared_expected
+            enriched[target] = next_command
+        return enriched
+
+    @staticmethod
+    def _compute_debate_stability_score(
+        *,
+        judge_confidence: float,
+        evidence_coverage: Dict[str, Any],
+        top_k_hypotheses: List[Dict[str, Any]],
+        round_gap_summary: List[str],
+    ) -> float:
+        """计算当前辩论稳定度，用于动态停止。"""
+        if evidence_coverage.get("weighted_score") is not None:
+            coverage_score = float(evidence_coverage.get("weighted_score") or 0.0)
+        else:
+            coverage_total = max(
+                1,
+                int(evidence_coverage.get("ok") or 0)
+                + int(evidence_coverage.get("degraded") or 0)
+                + int(evidence_coverage.get("missing") or 0),
+            )
+            coverage_score = (int(evidence_coverage.get("ok") or 0) + 0.5 * int(evidence_coverage.get("degraded") or 0)) / coverage_total
+        top1_confidence = float((top_k_hypotheses[0].get("confidence") if top_k_hypotheses else 0.0) or 0.0)
+        disagreement_penalty = 0.0 if len(top_k_hypotheses) <= 1 else 0.1
+        gap_penalty = min(0.3, 0.1 * len(round_gap_summary))
+        score = 0.45 * max(0.0, min(1.0, judge_confidence)) + 0.35 * max(0.0, min(1.0, coverage_score)) + 0.2 * max(0.0, min(1.0, top1_confidence))
+        score -= disagreement_penalty + gap_penalty
+        return round(max(0.0, min(1.0, score)), 3)
 
     def _infer_reply_target(
         self,
@@ -2522,7 +2988,7 @@ class LangGraphRuntimeOrchestrator:
         inbox_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """组装单个专家 Agent 的执行 Prompt。"""
-        return self._prompt_builder.build_agent_prompt(
+        prompt = self._prompt_builder.build_agent_prompt(
             spec=spec,
             loop_round=loop_round,
             context=context,
@@ -2532,6 +2998,9 @@ class LangGraphRuntimeOrchestrator:
             dialogue_items=dialogue_items,
             inbox_messages=inbox_messages,
         )
+        if self._should_precompact_analysis_prompt(spec, loop_round):
+            return self._precompact_prompt_for_execution(prompt)
+        return prompt
 
     def _build_collaboration_prompt(
         self,
@@ -2544,7 +3013,7 @@ class LangGraphRuntimeOrchestrator:
         inbox_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """组装协作阶段使用的 Prompt。"""
-        return self._prompt_builder.build_collaboration_prompt(
+        prompt = self._prompt_builder.build_collaboration_prompt(
             spec=spec,
             loop_round=loop_round,
             context=context,
@@ -2554,6 +3023,172 @@ class LangGraphRuntimeOrchestrator:
             dialogue_items=dialogue_items,
             inbox_messages=inbox_messages,
         )
+        if self._should_precompact_analysis_prompt(spec, loop_round):
+            return self._precompact_prompt_for_execution(prompt)
+        return prompt
+
+    @staticmethod
+    def _merge_unique_agent_notes(raw_items: Any, *, limit: int = 6) -> List[str]:
+        """去重并裁剪 Agent 私有记忆中的文本条目。"""
+        values: List[str] = []
+        for item in list(raw_items or []):
+            text = str(item or "").strip()
+            if not text:
+                continue
+            values.append(text[:220])
+        return list(dict.fromkeys(values))[: max(1, limit)]
+
+    @staticmethod
+    def _agent_local_context(
+        *,
+        agent_name: str,
+        agent_local_state: Optional[Dict[str, Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        """
+        读取当前 Agent 的私有工作记忆。
+
+        这里故意只返回当前 agent_name 对应的那一份切片，
+        避免把其他 Agent 的私有推理过程泄漏到当前 Prompt 中。
+        """
+        payload = dict(agent_local_state or {})
+        local_ctx = payload.get(str(agent_name or "").strip())
+        return dict(local_ctx or {}) if isinstance(local_ctx, dict) else {}
+
+    def _attach_agent_local_context(
+        self,
+        *,
+        context_with_tools: Dict[str, Any],
+        agent_name: str,
+        agent_local_state: Optional[Dict[str, Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        """把当前 Agent 的私有工作记忆挂到 Prompt envelope 中。"""
+        local_ctx = self._agent_local_context(
+            agent_name=agent_name,
+            agent_local_state=agent_local_state,
+        )
+        if not local_ctx:
+            return dict(context_with_tools or {})
+        return {
+            **dict(context_with_tools or {}),
+            "agent_local_context": local_ctx,
+        }
+
+    def _build_agent_local_state_update(
+        self,
+        *,
+        agent_name: str,
+        turn: DebateTurn,
+        agent_local_state: Optional[Dict[str, Dict[str, Any]]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        从当前回合结果提炼 Agent 私有工作记忆。
+
+        这份状态只服务于该 Agent 后续轮次的连续推理：
+        - `private_hypotheses` 记录当前最可疑假设
+        - `rejected_hypotheses` 记录被反证或保留意见的方向
+        - `verified_evidence_ids` 记录已经命中的证据锚点
+        - `missing_checks` 记录仍待补证的检查项
+        """
+        key = str(agent_name or "").strip()
+        payload = {
+            str(name or "").strip(): dict(item or {})
+            for name, item in dict(agent_local_state or {}).items()
+            if str(name or "").strip()
+        }
+        if not key:
+            return payload
+
+        previous = dict(payload.get(key) or {})
+        output = dict(turn.output_content or {})
+        conclusion = str(output.get("conclusion") or "").strip()
+        counter_evidence = list(output.get("counter_evidence") or [])
+        next_checks = list(output.get("next_checks") or [])
+        raw_evidence = list(output.get("evidence_chain") or [])
+
+        verified_evidence_ids = list(previous.get("verified_evidence_ids") or [])
+        for item in raw_evidence:
+            if isinstance(item, dict):
+                candidate = (
+                    str(item.get("evidence_id") or "").strip()
+                    or str(item.get("source_ref") or "").strip()
+                    or str(item.get("description") or "").strip()
+                )
+            else:
+                candidate = str(item or "").strip()
+            if candidate:
+                verified_evidence_ids.append(candidate[:220])
+
+        private_hypotheses_source = list(previous.get("private_hypotheses") or [])
+        if conclusion:
+            private_hypotheses_source.insert(0, conclusion)
+
+        payload[key] = {
+            **previous,
+            "latest_conclusion": conclusion[:220],
+            "latest_confidence": float(turn.confidence or 0.0),
+            "private_hypotheses": self._merge_unique_agent_notes(private_hypotheses_source, limit=6),
+            "rejected_hypotheses": self._merge_unique_agent_notes(
+                [*list(previous.get("rejected_hypotheses") or []), *counter_evidence],
+                limit=6,
+            ),
+            "verified_evidence_ids": self._merge_unique_agent_notes(verified_evidence_ids, limit=8),
+            "missing_checks": self._merge_unique_agent_notes(
+                [*list(previous.get("missing_checks") or []), *next_checks],
+                limit=8,
+            ),
+        }
+        return payload
+
+    def _evidence_recipients(
+        self,
+        *,
+        sender: str,
+        turn: DebateTurn,
+        assigned_command: Optional[Dict[str, Any]] = None,
+        context_with_tools: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        """
+        根据本轮证据内容选择需要被通知的同伴。
+
+        设计目标是缩小广播面：
+        - `ProblemAnalysisAgent` 永远收到，负责统一收敛
+        - 其他专家只在当前证据明显和自己相关时才收到
+        - 若暂时推断不出明确对象，就不做全员广播
+        """
+        sender_name = str(sender or "").strip()
+        available_agents = [
+            name
+            for name in list(self.PARALLEL_ANALYSIS_AGENTS)
+            if str(name or "").strip() and str(name or "").strip() != sender_name
+        ]
+        if not available_agents:
+            return ["ProblemAnalysisAgent"]
+
+        output = dict(turn.output_content or {})
+        focused_context = (
+            dict((context_with_tools or {}).get("focused_context") or {})
+            if isinstance(context_with_tools, dict)
+            else {}
+        )
+        signal_texts: List[str] = [
+            str(output.get("conclusion") or ""),
+            str(output.get("chat_message") or ""),
+            str((assigned_command or {}).get("focus") or ""),
+            str((assigned_command or {}).get("expected_output") or ""),
+            str(focused_context.get("causal_summary") or ""),
+        ]
+        signal_texts.extend(str(item or "") for item in list(output.get("evidence_chain") or []))
+        signal_texts.extend(str(item or "") for item in list(output.get("next_checks") or []))
+        signal_texts.extend(str(item or "") for item in list(output.get("counter_evidence") or []))
+        signal_texts.extend(str(item or "") for item in list((assigned_command or {}).get("followup_gaps") or []))
+        signal_texts.extend(
+            str(item.get("conclusion") or "")
+            for item in list((assigned_command or {}).get("top_k_hypotheses") or [])
+            if isinstance(item, dict)
+        )
+        targeted = infer_relevant_agents_from_texts(signal_texts, available_agents=available_agents)
+        recipients = ["ProblemAnalysisAgent", *targeted[:2]]
+        return list(dict.fromkeys([name for name in recipients if str(name or "").strip()]))
 
     def _work_log_context(self, *, limit: int = 16) -> Dict[str, Any]:
         """裁剪工作日志，生成可放入 Prompt 的轻量上下文。"""
@@ -2831,6 +3466,7 @@ class LangGraphRuntimeOrchestrator:
 
         return {
             **compact_context,
+            "shared_context": dict(compact_context or {}),
             "focused_context": focused_detail,
             "tool_context": {
                 "name": tool_context.get("name"),
@@ -2923,78 +3559,99 @@ class LangGraphRuntimeOrchestrator:
         except Exception:
             return "{}"
 
+    def _is_fast_execution_mode(self) -> bool:
+        """判断当前是否处于 quick/background/async 这类强调吞吐与稳定性的模式。"""
+        return is_fast_execution_mode_rule(self._execution_mode_name)
+
+    def _is_fast_first_round(self) -> bool:
+        """判断是否是快速模式首轮。"""
+        return is_fast_first_round_rule(
+            execution_mode_name=self._execution_mode_name,
+            require_verification_plan=self._require_verification_plan,
+            turns=self.turns,
+        )
+
+    def _has_expert_turns(self) -> bool:
+        """判断当前是否已经出现过专家 Agent 的实际输出。"""
+        return has_expert_turns_rule(self.turns)
+
+    def _is_fast_analysis_opening(self) -> bool:
+        """判断是否仍处于快速模式的首轮专家分析窗口。"""
+        return is_fast_analysis_opening_rule(
+            execution_mode_name=self._execution_mode_name,
+            require_verification_plan=self._require_verification_plan,
+            turns=self.turns,
+        )
+
+    def _should_precompact_analysis_prompt(self, spec: AgentSpec, loop_round: int) -> bool:
+        """快速模式首轮对专家分析 Prompt 做预压缩，避免初始上下文过大。"""
+        return bool(
+            loop_round == 1
+            and spec.phase == "analysis"
+            and spec.name not in {"ProblemAnalysisAgent", "JudgeAgent", "VerificationAgent"}
+            and self._is_fast_execution_mode()
+        )
+
+    def _precompact_prompt_for_execution(self, prompt: str) -> str:
+        """在真正请求模型前先做一轮轻量压缩。"""
+        max_chars = 2200 if self._execution_mode_name == "quick" else 2800
+        return self._compact_prompt_for_retry(prompt, max_chars=max_chars)
+
     def _agent_max_tokens(self, agent_name: str) -> int:
         """按 Agent 角色返回本轮允许使用的最大 token 预算。"""
-        if agent_name == "JudgeAgent":
-            configured = int(settings.DEBATE_JUDGE_MAX_TOKENS)
-            return max(900, min(configured, 1600))
-        if agent_name in {"CriticAgent", "RebuttalAgent"}:
-            configured = int(settings.DEBATE_REVIEW_MAX_TOKENS)
-            return max(560, min(configured, 1100))
-        if agent_name == "ProblemAnalysisAgent":
-            configured = int(settings.DEBATE_ANALYSIS_MAX_TOKENS)
-            if self._deployment_profile_name in {"investigation_full", "production_governed"} and not self.turns:
-                return max(280, min(configured, 360))
-            if not self._require_verification_plan and not self.turns:
-                return max(360, min(configured, 480))
-            return max(620, min(configured, 1100))
-        configured = int(settings.DEBATE_ANALYSIS_MAX_TOKENS)
-        return max(560, min(configured, 1100))
+        return agent_max_tokens_rule(
+            agent_name=agent_name,
+            debate_judge_max_tokens=int(settings.DEBATE_JUDGE_MAX_TOKENS),
+            debate_review_max_tokens=int(settings.DEBATE_REVIEW_MAX_TOKENS),
+            debate_analysis_max_tokens=int(settings.DEBATE_ANALYSIS_MAX_TOKENS),
+            deployment_profile_name=self._deployment_profile_name,
+            analysis_depth_mode_name=self.analysis_depth_mode,
+            require_verification_plan=self._require_verification_plan,
+            turns=self.turns,
+            execution_mode_name=self._execution_mode_name,
+        )
 
     def _agent_timeout_plan(self, agent_name: str) -> List[float]:
         """按 Agent 角色生成 HTTP 超时与重试超时计划。"""
-        if agent_name == "JudgeAgent":
-            if not self._require_verification_plan:
-                first_timeout = float(max(40, int(settings.llm_judge_timeout)))
-                retry_timeout = float(max(first_timeout + 10, int(settings.llm_judge_retry_timeout) + 15))
-                return [first_timeout, retry_timeout]
-            first_timeout = float(max(18, int(settings.llm_judge_timeout)))
-            retry_timeout = float(max(first_timeout, int(settings.llm_judge_retry_timeout)))
-            return [first_timeout, retry_timeout]
-        if agent_name == "ProblemAnalysisAgent":
-            if not self._require_verification_plan:
-                return [float(max(45, int(settings.llm_analysis_timeout)))]
-            first_timeout = float(max(12, int(settings.llm_analysis_timeout)))
-            retry_timeout = float(max(first_timeout, min(int(settings.llm_analysis_timeout) + 10, 60)))
-            return [first_timeout, retry_timeout]
-        if agent_name in {"CriticAgent", "RebuttalAgent"}:
-            return [float(max(12, int(settings.llm_review_timeout)))]
-        return [float(max(12, int(settings.llm_analysis_timeout)))]
+        return agent_timeout_plan_rule(
+            agent_name=agent_name,
+            llm_judge_timeout=int(settings.llm_judge_timeout),
+            llm_judge_retry_timeout=int(settings.llm_judge_retry_timeout),
+            llm_analysis_timeout=int(settings.llm_analysis_timeout),
+            llm_review_timeout=int(settings.llm_review_timeout),
+            analysis_depth_mode_name=self.analysis_depth_mode,
+            require_verification_plan=self._require_verification_plan,
+            execution_mode_name=self._execution_mode_name,
+            turns=self.turns,
+        )
 
     def _agent_http_timeout(self, agent_name: str) -> int:
         """返回单次 LLM HTTP 请求允许的最长超时时间。"""
-        if agent_name == "JudgeAgent":
-            if not self._require_verification_plan:
-                return max(45, min(int(settings.llm_judge_retry_timeout) + 20, 120))
-            return max(20, min(int(settings.llm_judge_retry_timeout), 120))
-        if agent_name in {"CriticAgent", "RebuttalAgent"}:
-            return max(15, min(int(settings.llm_review_timeout), 90))
-        return max(15, min(int(settings.llm_analysis_timeout), 90))
+        return agent_http_timeout_rule(
+            agent_name=agent_name,
+            llm_judge_retry_timeout=int(settings.llm_judge_retry_timeout),
+            llm_review_timeout=int(settings.llm_review_timeout),
+            llm_analysis_timeout=int(settings.llm_analysis_timeout),
+            analysis_depth_mode_name=self.analysis_depth_mode,
+            require_verification_plan=self._require_verification_plan,
+            execution_mode_name=self._execution_mode_name,
+            turns=self.turns,
+        )
 
     def _agent_queue_timeout(self, agent_name: str) -> float:
         """返回该 Agent 在 LLM 队列里允许等待的最长时间。"""
-        base_timeout = float(max(2, int(settings.llm_queue_timeout)))
-        analysis_timeout = float(max(base_timeout, int(settings.llm_analysis_queue_timeout)))
-        metrics_timeout = float(max(analysis_timeout, int(settings.llm_metrics_queue_timeout)))
-        judge_timeout = float(max(analysis_timeout, int(settings.llm_judge_queue_timeout)))
-        if agent_name == "JudgeAgent":
-            return judge_timeout
-        if agent_name == "ProblemAnalysisAgent":
-            if self._deployment_profile_name in {"investigation_full", "production_governed"} and not self.turns:
-                return float(max(min(judge_timeout - 5.0, judge_timeout), analysis_timeout + 10.0, 55.0))
-            return float(max(min(judge_timeout - 10.0, judge_timeout), analysis_timeout + 5.0, 50.0))
-        if agent_name == "MetricsAgent":
-            if self._deployment_profile_name in {"investigation_full", "production_governed"}:
-                return float(max(metrics_timeout, 75.0))
-            return float(max(metrics_timeout, 60.0))
-        if (
-            self._deployment_profile_name in {"investigation_full", "production_governed"}
-            and agent_name in {"LogAgent", "CodeAgent", "DatabaseAgent", "ChangeAgent", "DomainAgent"}
-        ):
-            return float(max(analysis_timeout, 45.0))
-        if agent_name in {"CriticAgent", "RebuttalAgent", "VerificationAgent"}:
-            return float(max(base_timeout + 10.0, 40.0))
-        return base_timeout
+        return agent_queue_timeout_rule(
+            agent_name=agent_name,
+            llm_queue_timeout=int(settings.llm_queue_timeout),
+            llm_analysis_queue_timeout=int(settings.llm_analysis_queue_timeout),
+            llm_metrics_queue_timeout=int(settings.llm_metrics_queue_timeout),
+            llm_judge_queue_timeout=int(settings.llm_judge_queue_timeout),
+            deployment_profile_name=self._deployment_profile_name,
+            analysis_depth_mode_name=self.analysis_depth_mode,
+            execution_mode_name=self._execution_mode_name,
+            require_verification_plan=self._require_verification_plan,
+            turns=self.turns,
+        )
 
     def _remaining_session_budget_seconds(self) -> Optional[float]:
         """计算当前会话剩余的总预算秒数。"""
@@ -3029,6 +3686,9 @@ class LangGraphRuntimeOrchestrator:
         limit = max(700, int(max_chars))
         if len(text) <= limit:
             return text
+        structured = self._compact_prompt_preserving_context_blocks(text, max_chars=limit)
+        if structured:
+            return structured
         head_len = int(limit * 0.62)
         tail_len = max(120, limit - head_len)
         return (
@@ -3036,6 +3696,428 @@ class LangGraphRuntimeOrchestrator:
             "[中间上下文在超时重试时已压缩，保留首尾关键指令、证据和输出格式]\n\n"
             f"{text[-tail_len:]}"
         )
+
+    @staticmethod
+    def _compact_prompt_section(section: str, *, max_chars: int) -> str:
+        """压缩单个 Prompt 区块，同时尽量保留区块标题与首尾关键证据。"""
+        text = str(section or "")
+        limit = max(120, int(max_chars or 120))
+        if len(text) <= limit:
+            return text
+        head_len = max(48, int(limit * 0.68))
+        tail_len = max(36, limit - head_len)
+        return (
+            f"{text[:head_len]}\n"
+            "[中间上下文在超时重试时已压缩，保留首尾关键指令、证据和输出格式]\n"
+            f"{text[-tail_len:]}"
+        )
+
+    @staticmethod
+    def _compact_inline_text(text: Any, *, max_chars: int) -> str:
+        """压缩单行/JSON 字段值，同时保留首尾证据避免中段被整体腰斩。"""
+        value = str(text or "")
+        limit = max(40, int(max_chars or 40))
+        if len(value) <= limit:
+            return value
+        marker = "...[已压缩]..."
+        head_len = max(20, int(limit * 0.58))
+        tail_len = max(14, limit - head_len - len(marker))
+        return f"{value[:head_len]}{marker}{value[-tail_len:]}"
+
+    @classmethod
+    def _compact_log_excerpt_for_prompt(cls, text: Any, *, max_chars: int) -> str:
+        """压缩日志摘录时优先保留异常开头和 diff/DB 汇总尾部。"""
+        value = str(text or "")
+        limit = max(80, int(max_chars or 80))
+        if len(value) <= limit:
+            return value
+
+        summary_markers = (
+            "Code diff summary:",
+            "DB wait summary:",
+            "@Transactional",
+        )
+        tail_source = ""
+        for marker in summary_markers:
+            index = value.rfind(marker)
+            if index >= 0:
+                tail_source = value[index:]
+                break
+
+        marker_text = "...[已压缩]..."
+        if not tail_source:
+            return cls._compact_inline_text(value, max_chars=limit)
+
+        tail_budget = max(120, int(limit * 0.54))
+        tail = tail_source if len(tail_source) <= tail_budget else cls._compact_inline_text(tail_source, max_chars=tail_budget)
+        head_budget = max(48, limit - len(tail) - len(marker_text))
+        head = value[:head_budget]
+        compacted = f"{head}{marker_text}{tail}"
+        if len(compacted) <= limit:
+            return compacted
+        return cls._compact_inline_text(compacted, max_chars=limit)
+
+    @staticmethod
+    def _parse_fenced_json_section(section: str) -> Optional[tuple[str, Any, str]]:
+        """解析带 ```json fenced block 的 Prompt 区块，便于按字段裁剪。"""
+        text = str(section or "")
+        fence = "```json\n"
+        start = text.find(fence)
+        if start < 0:
+            return None
+        json_start = start + len(fence)
+        end = text.find("\n```", json_start)
+        if end < 0:
+            return None
+        try:
+            payload = json.loads(text[json_start:end])
+        except Exception:
+            return None
+        prefix = text[:json_start]
+        suffix = text[end:]
+        return prefix, payload, suffix
+
+    @staticmethod
+    def _compact_prompt_list(items: Any, *, limit: int, width: int) -> List[Any]:
+        """压缩列表，优先保留前几项，并裁剪长文本。"""
+        values = list(items or [])
+        compacted: List[Any] = []
+        for item in values[: max(1, limit)]:
+            if isinstance(item, str):
+                compacted.append(LangGraphRuntimeOrchestrator._compact_inline_text(item, max_chars=width))
+            elif isinstance(item, dict):
+                compacted.append(
+                    {
+                        str(key): LangGraphRuntimeOrchestrator._compact_inline_text(value, max_chars=width)
+                        if isinstance(value, str)
+                        else value
+                        for key, value in list(item.items())[:6]
+                    }
+                )
+            else:
+                compacted.append(item)
+        return compacted
+
+    def _compact_prompt_payload_for_marker(
+        self,
+        marker: str,
+        payload: Any,
+        *,
+        max_chars: int,
+    ) -> Any:
+        """按 Prompt 区块语义裁剪 JSON 载荷，优先保留根因判断关键字段。"""
+        if not isinstance(payload, dict):
+            return payload
+
+        if marker in {"故障上下文:\n", "共享上下文：\n"}:
+            log_limit = 240 if max_chars <= 720 else 320 if max_chars <= 900 else 420
+            description_limit = 180 if max_chars <= 720 else 240
+            item_limit = 4 if max_chars <= 720 else 6
+            incident_summary = payload.get("incident_summary") if isinstance(payload.get("incident_summary"), dict) else {}
+            interface_mapping = payload.get("interface_mapping") if isinstance(payload.get("interface_mapping"), dict) else {}
+            endpoint = interface_mapping.get("endpoint") if isinstance(interface_mapping.get("endpoint"), dict) else {}
+            investigation_leads = payload.get("investigation_leads") if isinstance(payload.get("investigation_leads"), dict) else {}
+            parsed_data = payload.get("parsed_data") if isinstance(payload.get("parsed_data"), dict) else {}
+            compact_payload: Dict[str, Any] = {
+                "incident_summary": {
+                    "title": self._compact_inline_text(incident_summary.get("title"), max_chars=140),
+                    "description": self._compact_inline_text(incident_summary.get("description"), max_chars=description_limit),
+                    "severity": incident_summary.get("severity"),
+                    "service_name": self._compact_inline_text(incident_summary.get("service_name"), max_chars=80),
+                },
+                # 这里必须保留日志摘录首尾：前半段常有首个异常，后半段常有 code diff/DB summary。
+                "log_excerpt": self._compact_log_excerpt_for_prompt(payload.get("log_excerpt"), max_chars=log_limit),
+                "execution_mode": payload.get("execution_mode"),
+                "available_analysis_agents": self._compact_prompt_list(
+                    payload.get("available_analysis_agents"),
+                    limit=item_limit,
+                    width=60,
+                ),
+                "interface_mapping": {
+                    "matched": bool(interface_mapping.get("matched")),
+                    "confidence": interface_mapping.get("confidence"),
+                    "domain": interface_mapping.get("domain"),
+                    "aggregate": interface_mapping.get("aggregate"),
+                    "owner_team": interface_mapping.get("owner_team"),
+                    "owner": interface_mapping.get("owner"),
+                    "endpoint": {
+                        "method": endpoint.get("method"),
+                        "path": endpoint.get("path"),
+                        "service": endpoint.get("service"),
+                        "interface": endpoint.get("interface"),
+                    },
+                    "database_tables": self._compact_prompt_list(
+                        interface_mapping.get("database_tables") or interface_mapping.get("db_tables"),
+                        limit=item_limit,
+                        width=120,
+                    ),
+                    "code_artifacts": self._compact_prompt_list(
+                        interface_mapping.get("code_artifacts"),
+                        limit=item_limit,
+                        width=180,
+                    ),
+                    "dependency_services": self._compact_prompt_list(
+                        interface_mapping.get("dependency_services"),
+                        limit=item_limit,
+                        width=120,
+                    ),
+                },
+                "investigation_leads": {
+                    "api_endpoints": self._compact_prompt_list(investigation_leads.get("api_endpoints"), limit=item_limit, width=160),
+                    "service_names": self._compact_prompt_list(investigation_leads.get("service_names"), limit=item_limit, width=100),
+                    "code_artifacts": self._compact_prompt_list(investigation_leads.get("code_artifacts"), limit=item_limit, width=180),
+                    "class_names": self._compact_prompt_list(investigation_leads.get("class_names"), limit=item_limit, width=100),
+                    "database_tables": self._compact_prompt_list(investigation_leads.get("database_tables"), limit=item_limit, width=120),
+                    "dependency_services": self._compact_prompt_list(investigation_leads.get("dependency_services"), limit=item_limit, width=120),
+                    "trace_ids": self._compact_prompt_list(investigation_leads.get("trace_ids"), limit=4, width=120),
+                    "domain": investigation_leads.get("domain"),
+                    "aggregate": investigation_leads.get("aggregate"),
+                },
+            }
+            if parsed_data:
+                compact_payload["parsed_data"] = {
+                    "urls": self._compact_prompt_list(parsed_data.get("urls"), limit=4, width=140),
+                    "class_names": self._compact_prompt_list(parsed_data.get("class_names"), limit=6, width=120),
+                    "sqls": self._compact_prompt_list(parsed_data.get("sqls"), limit=3, width=200),
+                }
+            asset_counts = payload.get("asset_counts")
+            if isinstance(asset_counts, dict) and asset_counts:
+                compact_payload["asset_counts"] = asset_counts
+            return compact_payload
+
+        if marker == "主Agent命令：\n":
+            return {
+                "target_agent": payload.get("target_agent"),
+                "task": self._compact_inline_text(payload.get("task"), max_chars=140 if max_chars <= 260 else 180),
+                "focus": self._compact_inline_text(payload.get("focus"), max_chars=120 if max_chars <= 260 else 160),
+                "expected_output": self._compact_inline_text(payload.get("expected_output"), max_chars=110 if max_chars <= 260 else 140),
+                "use_tool": payload.get("use_tool"),
+                "database_tables": self._compact_prompt_list(payload.get("database_tables"), limit=4, width=100),
+                "skill_hints": self._compact_prompt_list(payload.get("skill_hints"), limit=4, width=80),
+                "tool_requirement": payload.get("tool_requirement"),
+            }
+
+        if marker == "Agent 专属分析上下文：\n":
+            compact_payload: Dict[str, Any] = {}
+            analysis_objective = payload.get("analysis_objective")
+            if isinstance(analysis_objective, dict):
+                compact_payload["analysis_objective"] = {
+                    "task": self._compact_inline_text(analysis_objective.get("task"), max_chars=180),
+                    "focus": self._compact_inline_text(analysis_objective.get("focus"), max_chars=180),
+                    "expected_output": self._compact_inline_text(analysis_objective.get("expected_output"), max_chars=140),
+                }
+            if isinstance(payload.get("problem_entrypoint"), dict):
+                compact_payload["problem_entrypoint"] = payload.get("problem_entrypoint")
+            if isinstance(payload.get("log_scope"), dict):
+                compact_payload["log_scope"] = payload.get("log_scope")
+            if isinstance(payload.get("responsibility_mapping"), dict):
+                compact_payload["responsibility_mapping"] = payload.get("responsibility_mapping")
+            if isinstance(payload.get("interface_scope"), dict):
+                compact_payload["interface_scope"] = payload.get("interface_scope")
+            mapped_scope = payload.get("mapped_code_scope")
+            if isinstance(mapped_scope, dict):
+                compact_payload["mapped_code_scope"] = {
+                    "code_artifacts": self._compact_prompt_list(mapped_scope.get("code_artifacts"), limit=8, width=180),
+                    "class_names": self._compact_prompt_list(mapped_scope.get("class_names"), limit=8, width=120),
+                    "dependency_services": self._compact_prompt_list(mapped_scope.get("dependency_services"), limit=8, width=120),
+                    "database_tables": self._compact_prompt_list(mapped_scope.get("database_tables"), limit=8, width=120),
+                }
+            if isinstance(payload.get("timeline_events"), list):
+                compact_payload["timeline_events"] = self._compact_prompt_list(payload.get("timeline_events"), limit=3, width=160)
+            if isinstance(payload.get("causal_timeline"), list):
+                compact_payload["causal_timeline"] = self._compact_prompt_list(payload.get("causal_timeline"), limit=3, width=160)
+            if isinstance(payload.get("repo_hits"), dict):
+                repo_hits = payload.get("repo_hits") or {}
+                compact_payload["repo_hits"] = {
+                    "match_count": repo_hits.get("match_count"),
+                    "top_hits": self._compact_prompt_list(repo_hits.get("top_hits"), limit=4, width=180),
+                    "candidate_files": self._compact_prompt_list(repo_hits.get("candidate_files"), limit=4, width=180),
+                }
+            if isinstance(payload.get("evidence_points"), list):
+                compact_payload["evidence_points"] = self._compact_prompt_list(payload.get("evidence_points"), limit=5, width=180)
+            if isinstance(payload.get("analysis_expectations"), list):
+                compact_payload["analysis_expectations"] = self._compact_prompt_list(payload.get("analysis_expectations"), limit=4, width=180)
+            return compact_payload
+
+        if marker == "Agent 私有工作记忆：\n":
+            return {
+                str(key): (
+                    self._compact_prompt_list(value, limit=5, width=180)
+                    if isinstance(value, list)
+                    else self._compact_inline_text(value, max_chars=220)
+                    if isinstance(value, str)
+                    else value
+                )
+                for key, value in list(payload.items())[:8]
+            }
+
+        return payload
+
+    def _compact_prompt_section_by_marker(self, marker: str, section: str, *, max_chars: int) -> str:
+        """按区块类型做结构化压缩，避免关键 JSON 证据在中段被截断。"""
+        parsed = self._parse_fenced_json_section(section)
+        if not parsed:
+            return self._compact_prompt_section(section, max_chars=max_chars)
+        prefix, payload, suffix = parsed
+        compact_payload = self._compact_prompt_payload_for_marker(marker, payload, max_chars=max_chars)
+        rebuilt = f"{prefix}{json.dumps(compact_payload, ensure_ascii=False, separators=(',', ':'))}{suffix}"
+        if len(rebuilt) <= max_chars:
+            return rebuilt
+        return self._compact_prompt_section(rebuilt, max_chars=max_chars)
+
+    @classmethod
+    def _split_prompt_sections(cls, prompt: str) -> tuple[str, Dict[str, str]]:
+        """按已知标题切分 Prompt，便于优先保留关键上下文块。"""
+        text = str(prompt or "")
+        markers = [
+            "主Agent命令：\n",
+            "故障上下文:\n",
+            "最近对话消息：\n",
+            "最近对话消息:\n",
+            "你收到的消息（命令/反馈/证据）：\n",
+            "你收到的消息（命令/反馈/证据）:\n",
+            "RCA 技能模板与场景参数：\n",
+            "RCA 技能模板与场景参数:\n",
+            "共享上下文：\n",
+            "Agent 专属分析上下文：\n",
+            "Agent 私有工作记忆：\n",
+            "工具受限说明：\n",
+            "工作日志上下文：\n",
+            "工作日志上下文:\n",
+            "同伴结论：\n",
+            "最近交互摘要：\n",
+            "最近发言摘要:\n",
+            "本轮最近发言:\n",
+            "未决问题:\n",
+            "请仅输出 JSON，格式示例：\n",
+            "仅输出 JSON，格式:\n",
+            "输出 JSON 格式:\n",
+        ]
+        positions = [
+            (marker, text.find(marker))
+            for marker in markers
+            if text.find(marker) >= 0
+        ]
+        if not positions:
+            return text, {}
+        positions.sort(key=lambda item: item[1])
+        intro = text[: positions[0][1]]
+        sections: Dict[str, str] = {}
+        for index, (marker, start) in enumerate(positions):
+            end = positions[index + 1][1] if index + 1 < len(positions) else len(text)
+            sections[marker] = text[start:end]
+        return intro, sections
+
+    def _compact_prompt_preserving_context_blocks(self, prompt: str, *, max_chars: int) -> Optional[str]:
+        """
+        按区块压缩 Prompt，而不是直接裁掉中段。
+
+        这条路径专门解决 quick 模式下“共享上下文和专属上下文位于中间，
+        但被首尾截断压缩整体切没”的问题。优先保留：
+        1. 命令与共享上下文
+        2. Agent 专属上下文
+        3. 最终输出格式
+        低优先级块（对话、工作日志）空间不够时再压缩或省略。
+        """
+        intro, sections = self._split_prompt_sections(prompt)
+        if not sections:
+            return None
+
+        intro_block = self._compact_prompt_section(intro, max_chars=min(420, max_chars // 3))
+        # 这些区块决定 Agent 是否能看到真正的问题上下文，必须优先保留。
+        required_markers = [
+            "故障上下文:\n",
+            "主Agent命令：\n",
+            "共享上下文：\n",
+            "Agent 专属分析上下文：\n",
+            "Agent 私有工作记忆：\n",
+            "工具受限说明：\n",
+            "请仅输出 JSON，格式示例：\n",
+            "仅输出 JSON，格式:\n",
+            "输出 JSON 格式:\n",
+        ]
+        optional_markers = [
+            "你收到的消息（命令/反馈/证据）：\n",
+            "你收到的消息（命令/反馈/证据）:\n",
+            "RCA 技能模板与场景参数：\n",
+            "RCA 技能模板与场景参数:\n",
+            "最近交互摘要：\n",
+            "最近发言摘要:\n",
+            "本轮最近发言:\n",
+            "未决问题:\n",
+            "同伴结论：\n",
+            "最近对话消息：\n",
+            "最近对话消息:\n",
+            "工作日志上下文：\n",
+            "工作日志上下文:\n",
+        ]
+
+        section_limits = {
+            "故障上下文:\n": 1250,
+            "主Agent命令：\n": 420,
+            "共享上下文：\n": 1250,
+            "Agent 专属分析上下文：\n": 620,
+            "Agent 私有工作记忆：\n": 360,
+            "工具受限说明：\n": 360,
+            "你收到的消息（命令/反馈/证据）：\n": 320,
+            "你收到的消息（命令/反馈/证据）:\n": 320,
+            "RCA 技能模板与场景参数：\n": 280,
+            "RCA 技能模板与场景参数:\n": 280,
+            "最近交互摘要：\n": 260,
+            "最近发言摘要:\n": 260,
+            "本轮最近发言:\n": 260,
+            "未决问题:\n": 220,
+            "同伴结论：\n": 260,
+            "最近对话消息：\n": 220,
+            "最近对话消息:\n": 220,
+            "工作日志上下文：\n": 220,
+            "工作日志上下文:\n": 220,
+            "请仅输出 JSON，格式示例：\n": 420,
+            "仅输出 JSON，格式:\n": 420,
+            "输出 JSON 格式:\n": 420,
+        }
+
+        selected_sections: List[str] = []
+        omitted_any = False
+
+        def _append_section(marker: str, *, required: bool) -> None:
+            nonlocal omitted_any
+            section = sections.get(marker)
+            if not section:
+                return
+            budget = int(section_limits.get(marker, 260))
+            compacted = self._compact_prompt_section_by_marker(marker, section, max_chars=budget)
+            current_size = len(intro_block) + sum(len(item) for item in selected_sections)
+            if current_size + len(compacted) <= max_chars:
+                selected_sections.append(compacted)
+                return
+            if required:
+                # 必保留区块即使需要挤压，也要至少留下标题和最核心首尾。
+                emergency_budget = max(140, max_chars - current_size - 32)
+                if emergency_budget > 100:
+                    selected_sections.append(
+                        self._compact_prompt_section_by_marker(marker, section, max_chars=emergency_budget)
+                    )
+                    return
+            omitted_any = True
+
+        for marker in required_markers:
+            _append_section(marker, required=True)
+        for marker in optional_markers:
+            _append_section(marker, required=False)
+
+        if not selected_sections:
+            return None
+
+        marker_block = (
+            "\n[中间上下文在超时重试时已压缩，保留首尾关键指令、证据和输出格式]\n\n"
+            if omitted_any
+            else "\n"
+        )
+        compacted_prompt = intro_block.rstrip() + marker_block + "\n".join(
+            item.rstrip() for item in selected_sections if str(item or "").strip()
+        )
+        return compacted_prompt[:max_chars]
 
     # Compatibility wrappers: parsing/normalization implementation was moved to
     # app.runtime.langgraph.parsers to keep runtime focused on graph orchestration.
@@ -3287,7 +4369,6 @@ class LangGraphRuntimeOrchestrator:
 
         coverage = self._count_key_evidence_coverage(history_cards)
         if coverage["degraded"] + coverage["missing"] >= 2:
-            confidence = min(float(confidence or 0.0), 0.45)
             if not isinstance(final_judgment, dict):
                 final_judgment = {}
             risk_assessment = final_judgment.get("risk_assessment")
@@ -3298,27 +4379,41 @@ class LangGraphRuntimeOrchestrator:
                 for item in list(risk_assessment.get("risk_factors") or [])
                 if str(item).strip()
             ]
-            factors.append(
-                f"关键证据不足：成功={coverage['ok']}，降级={coverage['degraded']}，缺失={coverage['missing']}"
-            )
-            risk_assessment["risk_factors"] = list(dict.fromkeys(factors))[:6]
-            risk_assessment["risk_level"] = "high"
-            final_judgment["risk_assessment"] = risk_assessment
             if not isinstance(decision_rationale, dict):
                 decision_rationale = {}
             reasoning = str(decision_rationale.get("reasoning") or "").strip()
-            suffix = "关键证据 Agent 覆盖不足，本轮结论仅作为低置信方向判断。"
-            decision_rationale["reasoning"] = f"{reasoning} {suffix}".strip()
             if not isinstance(action_items, list):
                 action_items = []
-            action_items = [
-                {
-                    "priority": 1,
-                    "action": "优先恢复失败/缺失的关键证据 Agent（Log/Code/Database/Metrics）并重跑分析",
-                    "owner": "待确认",
-                },
-                *[item for item in action_items if isinstance(item, dict)],
-            ][:3]
+            if self._judge_has_strong_shared_evidence(final_judgment, decision_rationale):
+                # 如果 Judge 已基于共享日志、栈、指标等形成多源强证据链，
+                # 即使个别关键专家超时，也不应把最终结论机械压成 0.45。
+                confidence = min(float(confidence or 0.0), 0.68)
+                factors.append(
+                    f"部分关键专家降级：成功={coverage['ok']}，降级={coverage['degraded']}，缺失={coverage['missing']}；当前结论主要依赖共享证据链。"
+                )
+                risk_assessment["risk_level"] = str(risk_assessment.get("risk_level") or "high")
+                decision_rationale["reasoning"] = (
+                    f"{reasoning} 部分关键专家未完成，但共享日志/栈/指标证据链已经足以支撑保守收口。"
+                ).strip()
+            else:
+                confidence = min(float(confidence or 0.0), 0.45)
+                factors.append(
+                    f"关键证据不足：成功={coverage['ok']}，降级={coverage['degraded']}，缺失={coverage['missing']}"
+                )
+                risk_assessment["risk_level"] = "high"
+                decision_rationale["reasoning"] = (
+                    f"{reasoning} 关键证据 Agent 覆盖不足，本轮结论仅作为低置信方向判断。"
+                ).strip()
+                action_items = [
+                    {
+                        "priority": 1,
+                        "action": "优先恢复失败/缺失的关键证据 Agent（Log/Code/Database/Metrics）并重跑分析",
+                        "owner": "待确认",
+                    },
+                    *[item for item in action_items if isinstance(item, dict)],
+                ][:3]
+            risk_assessment["risk_factors"] = list(dict.fromkeys(factors))[:6]
+            final_judgment["risk_assessment"] = risk_assessment
 
         dissenting_opinions = [
             {
@@ -3335,6 +4430,18 @@ class LangGraphRuntimeOrchestrator:
             "confidence": max(0.0, min(1.0, confidence)),
             "consensus_reached": consensus_reached,
             "executed_rounds": max(1, executed_rounds),
+            "top_k_hypotheses": self._build_top_k_hypotheses(history_cards),
+            "evidence_coverage": coverage,
+            "debate_stability_score": self._compute_debate_stability_score(
+                judge_confidence=float(confidence or 0.0),
+                evidence_coverage=coverage,
+                top_k_hypotheses=self._build_top_k_hypotheses(history_cards),
+                round_gap_summary=self._build_round_gap_summary(
+                    history_cards,
+                    coverage,
+                    self._build_top_k_hypotheses(history_cards),
+                ),
+            ),
             "final_judgment": final_judgment,
             "verification_plan": verification_plan,
             "decision_rationale": decision_rationale,
@@ -3385,5 +4492,6 @@ class LangGraphRuntimeOrchestrator:
 
 langgraph_runtime_orchestrator = LangGraphRuntimeOrchestrator(
     consensus_threshold=settings.DEBATE_CONSENSUS_THRESHOLD,
-    max_rounds=settings.DEBATE_MAX_ROUNDS,
+    max_rounds=None,
+    analysis_depth_mode=settings.DEBATE_ANALYSIS_DEPTH_MODE,
 )

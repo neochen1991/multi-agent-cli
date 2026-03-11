@@ -44,6 +44,8 @@ export interface AutoInvestigateTask {
   status: string;
 }
 
+export type AnalysisDepthMode = 'quick' | 'standard' | 'deep';
+
 export interface AlertIngestPayload {
   alarm_id: string;
   service_name: string;
@@ -55,6 +57,7 @@ export interface AlertIngestPayload {
   exception_stack?: string;
   trace_id?: string;
   max_rounds?: number;
+  analysis_depth_mode?: AnalysisDepthMode;
 }
 
 export interface DebateRound {
@@ -157,6 +160,38 @@ export interface ReportDiff {
   summary: string;
   diff_lines: string[];
 }
+
+// 分析深度模式存到本地，保证设置页和 Incident 页在新开会话时使用同一份偏好。
+const ANALYSIS_DEPTH_MODE_STORAGE_KEY = 'analysis_depth_mode';
+const DEFAULT_MAX_ROUNDS_BY_DEPTH_MODE: Record<AnalysisDepthMode, number> = {
+  quick: 1,
+  standard: 2,
+  deep: 4,
+};
+
+export const getStoredAnalysisDepthMode = (): AnalysisDepthMode => {
+  // SSR 或测试环境下没有 window，统一回退到标准深度。
+  if (typeof window === 'undefined') {
+    return 'standard';
+  }
+  const raw = String(localStorage.getItem(ANALYSIS_DEPTH_MODE_STORAGE_KEY) || '').trim().toLowerCase();
+  if (raw === 'quick' || raw === 'standard' || raw === 'deep') {
+    return raw;
+  }
+  return 'standard';
+};
+
+export const setStoredAnalysisDepthMode = (value: AnalysisDepthMode): void => {
+  // 设置页切换深度模式后，后续新会话都直接复用这里的值。
+  if (typeof window === 'undefined') {
+    return;
+  }
+  localStorage.setItem(ANALYSIS_DEPTH_MODE_STORAGE_KEY, value);
+};
+
+// 前端默认轮次和后端 depth-mode 约定保持一致，避免 UI 初始化值与后端实际策略漂移。
+export const getDefaultMaxRoundsForDepthMode = (mode: AnalysisDepthMode): number =>
+  DEFAULT_MAX_ROUNDS_BY_DEPTH_MODE[mode];
 
 export interface AssetFusion {
   incident_id: string;
@@ -555,13 +590,23 @@ export const incidentApi = {
     return data;
   },
   async autoInvestigate(incidentId: string, maxRounds = 1): Promise<AutoInvestigateTask> {
+    // 自动排障入口也要带上深度模式，避免后台创建的会话丢失用户偏好。
+    const analysisDepthMode = getStoredAnalysisDepthMode();
     const { data } = await api.post<AutoInvestigateTask>(`/incidents/${incidentId}/auto-investigate`, null, {
-      params: { max_rounds: maxRounds },
+      params: {
+        max_rounds: maxRounds,
+        analysis_depth_mode: analysisDepthMode,
+      },
     });
     return data;
   },
   async ingestAlert(payload: AlertIngestPayload): Promise<AutoInvestigateTask> {
-    const { data } = await api.post<AutoInvestigateTask>('/incidents/automation/alerts/ingest', payload);
+    // 告警自动建会话时，优先使用请求显式值，否则沿用本地设置。
+    const analysisDepthMode = getStoredAnalysisDepthMode();
+    const { data } = await api.post<AutoInvestigateTask>('/incidents/automation/alerts/ingest', {
+      ...payload,
+      analysis_depth_mode: payload.analysis_depth_mode || analysisDepthMode,
+    });
     return data;
   },
 };
@@ -571,9 +616,15 @@ export const debateApi = {
     incidentId: string,
     options?: { maxRounds?: number; mode?: 'standard' | 'quick' | 'background' | 'async' },
   ): Promise<{ id: string; incident_id: string; status: string }> {
+    // 新建辩论会话时总是把当前深度模式传给后端，确保默认轮次和策略可复现。
+    const analysisDepthMode = getStoredAnalysisDepthMode();
     const params: Record<string, string | number> = { incident_id: incidentId };
+    params.analysis_depth_mode = analysisDepthMode;
     if (typeof options?.maxRounds === 'number' && Number.isFinite(options.maxRounds)) {
       params.max_rounds = Math.max(1, Math.min(8, Math.trunc(options.maxRounds)));
+    } else {
+      // 如果用户没显式改轮次，就按深度模式映射出的默认轮次初始化。
+      params.max_rounds = getDefaultMaxRoundsForDepthMode(analysisDepthMode);
     }
     if (options?.mode) {
       params.mode = options.mode;

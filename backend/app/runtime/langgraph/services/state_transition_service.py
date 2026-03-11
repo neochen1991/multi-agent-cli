@@ -130,6 +130,10 @@ class StateTransitionService:
             **convo_state,
         }
 
-        # 合并预览并生成结构化快照
-        merged_preview = {**dict(state), **next_state}
+        # 中文注释：这里不能再把原始 state 里的 routing_state / output_state
+        # 直接带进快照预览，否则旧的结构化字段会在 flatten 阶段反向覆盖
+        # 本轮刚算出的 flat 更新，导致 next_step / discussion_step_count /
+        # history_cards 等关键字段“看起来被更新了”，但下一节点读取时仍是旧值。
+        # 因此快照基准必须使用已经展平过的最新视图，再叠加本步更新。
+        merged_preview = {**base_state, **next_state}
         return {**next_state, **self.structured_snapshot(merged_preview)}

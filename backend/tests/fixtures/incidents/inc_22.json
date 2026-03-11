@@ -1,0 +1,49 @@
+{
+  "id": "fixture_inc_22",
+  "title": "payment confirm timeout with retry budget gap",
+  "scenario": "upstream-timeout-with-retry-budget-gap",
+  "symptom": "2026-02-20 16:42 起 POST /api/v1/payments 大量超时。表面现象是支付接口 30s 超时并伴随 retries=3，但数据库和连接池指标平稳，真实根因是同步调用 RiskService 时只做了单次调用超时控制，没有总超时预算与熔断，导致三次重试把主链路预算耗尽。",
+  "log_excerpt": "2026-02-20T16:42:09.001+08:00 INFO  [payment-service] confirmPayment start traceId=pay_9f2a riskTimeoutMs=10000 maxRetries=3\n2026-02-20T16:42:19.114+08:00 WARN  [payment-service] RiskService attempt=1 timeout after 10000ms traceId=pay_9f2a\n2026-02-20T16:42:19.315+08:00 INFO  [payment-service] retrying RiskService attempt=2 backoffMs=200 traceId=pay_9f2a\n2026-02-20T16:42:29.338+08:00 WARN  [payment-service] RiskService attempt=2 timeout after 10000ms traceId=pay_9f2a\n2026-02-20T16:42:29.539+08:00 INFO  [payment-service] retrying RiskService attempt=3 backoffMs=200 traceId=pay_9f2a\n2026-02-20T16:42:39.560+08:00 WARN  [payment-service] RiskService attempt=3 timeout after 10000ms traceId=pay_9f2a\n2026-02-20T16:42:40.015+08:00 ERROR [payment-service] /api/v1/payments timeout after 30000ms cause=RiskService timeout retries=3 traceId=pay_9f2a\nMetric summary: Hikari active 4/30, DB CPU 18%, slow SQL count=0, payment-worker queue depth stable, risk-service client timeout=10000ms",
+  "stacktrace": "org.springframework.web.client.ResourceAccessException: I/O error on POST request for \"http://risk-service/api/v1/check\": Read timed out\n\tat org.springframework.web.client.RestTemplate.doExecute(RestTemplate.java:791)\n\tat com.acme.payment.integration.RiskClient.check(RiskClient.java:48)\n\tat com.acme.payment.application.PaymentAppService.confirm(PaymentAppService.java:127)\nCaused by: java.net.SocketTimeoutException: Read timed out\n\tat java.base/sun.nio.ch.NioSocketImpl.timedRead(NioSocketImpl.java:288)\n\tat java.base/sun.nio.ch.NioSocketImpl.implRead(NioSocketImpl.java:314)",
+  "expected_root_cause": "PaymentController#confirmPayment -> PaymentAppService#confirm -> PaymentAggregate#confirm 调用链中，同步调用 RiskService 时只设置了单次调用超时并执行 3 次重试，但没有总超时预算和熔断，导致主链路被重试耗尽而超时。",
+  "expected_domain": "支付",
+  "expected_aggregate": "Payment",
+  "owner": "sre-benchmark",
+  "tags": [
+    "golden",
+    "upstream-timeout",
+    "retry-budget",
+    "code-root-cause",
+    "db-not-root-cause"
+  ],
+  "golden": true,
+  "trace_id": "pay_9f2a",
+  "expected_causal_chain": [
+    "同步调用 RiskService",
+    "单次 10s 超时连续触发 3 次重试",
+    "缺少总超时预算与熔断，主链路线程持续阻塞",
+    "支付接口在 30s SLA 内被重试耗尽预算",
+    "数据库和连接池只是旁证，非根因"
+  ],
+  "must_include": [
+    "上游 RiskService 同步调用",
+    "重试策略没有总超时预算或熔断",
+    "数据库不是主因"
+  ],
+  "must_exclude": [
+    "数据库慢 SQL 是主因",
+    "连接池耗尽是主因",
+    "只把上游服务慢当作唯一根因而忽略本地重试策略"
+  ],
+  "distractor_root_causes": [
+    "t_payment_attempt 表状态异常导致支付超时",
+    "Hikari 连接池配置过小",
+    "RiskService 单点慢就是全部根因"
+  ],
+  "scoring_rubric": {
+    "root_cause_correct": 4,
+    "causal_chain_complete": 3,
+    "explicitly_rules_out_db_as_primary": 2,
+    "uses_cross_source_evidence": 1
+  }
+}

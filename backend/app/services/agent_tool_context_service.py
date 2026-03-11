@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import csv
 from collections import deque
-from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha1
 import json
@@ -43,9 +42,59 @@ from app.runtime.connectors import (
     PrometheusConnector,
     TelemetryConnector,
 )
+from app.services.code_analysis.call_graph_builder import (
+    build_method_call_chain,
+    parse_interface_ref,
+    resolve_next_method_call,
+)
+from app.services.code_analysis.source_loader import (
+    extract_field_types,
+    extract_methods,
+    find_source_unit,
+    guess_entry_method,
+    load_repo_focus_windows,
+    load_source_units,
+    parse_source_unit,
+    resolve_repo_file,
+)
+from app.services.code_analysis.symbol_resolver import (
+    expand_related_code_files,
+    extract_related_code_symbols,
+    find_symbol_file,
+)
 from app.services.tooling_service import tooling_service
 from app.services.agent_skill_service import agent_skill_service
 from app.services.knowledge_service import knowledge_service
+from app.services.tool_context.audit import ToolAuditBuilder
+from app.services.tool_context.assemblers.change_focused import build_change_focused_context
+from app.services.tool_context.assemblers.code_focused import build_code_focused_context
+from app.services.tool_context.assemblers.cross_agent_focused import (
+    build_cross_agent_focused_context,
+    build_critique_summary,
+    build_judge_verdict_summary,
+    build_problem_coordination_summary,
+    build_rebuttal_summary,
+    build_rule_summary,
+    build_verification_summary,
+)
+from app.services.tool_context.assemblers.database_focused import build_database_focused_context
+from app.services.tool_context.assemblers.domain_focused import build_domain_focused_context
+from app.services.tool_context.focused_context import resolve_focused_context_builder_name
+from app.services.tool_context.assemblers.log_focused import build_log_focused_context
+from app.services.tool_context.assemblers.metrics_focused import build_metrics_focused_context
+from app.services.tool_context.providers.change_provider import build_change_context as build_change_context_provider
+from app.services.tool_context.providers.code_provider import build_code_context as build_code_context_provider
+from app.services.tool_context.providers.database_provider import build_database_context as build_database_context_provider
+from app.services.tool_context.providers.domain_provider import build_domain_context as build_domain_context_provider
+from app.services.tool_context.providers.log_provider import build_log_context as build_log_context_provider
+from app.services.tool_context.providers.metrics_provider import build_metrics_context as build_metrics_context_provider
+from app.services.tool_context.providers.rule_suggestion_provider import (
+    build_rule_suggestion_context as build_rule_suggestion_context_provider,
+)
+from app.services.tool_context.providers.runbook_provider import build_runbook_context as build_runbook_context_provider
+from app.services.tool_context.assemblers.runbook_focused import build_runbook_focused_context
+from app.services.tool_context.result import ToolContextResult
+from app.services.tool_context.router import decide_tool_invocation, resolve_context_builder_name
 from app.tools.case_library import CaseLibraryTool
 
 logger = structlog.get_logger()
@@ -74,37 +123,6 @@ GIT_FETCH_TIMEOUTS = (15, 25)
 GIT_CLONE_TIMEOUTS = (30, 45)
 GIT_LOCAL_TIMEOUT = 20
 
-
-@dataclass
-class ToolContextResult:
-    """统一的工具上下文返回结构，供 runtime、前端和审计链复用。"""
-    name: str
-    enabled: bool
-    used: bool
-    status: str
-    summary: str
-    data: Dict[str, Any]
-    command_gate: Dict[str, Any] = field(default_factory=dict)
-    audit_log: List[Dict[str, Any]] = field(default_factory=list)
-    execution_path: str = ""
-    permission_decision: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """转成普通字典，便于直接塞进运行时上下文。"""
-        return {
-            "name": self.name,
-            "enabled": self.enabled,
-            "used": self.used,
-            "status": self.status,
-            "summary": self.summary,
-            "data": self.data,
-            "command_gate": self.command_gate,
-            "audit_log": self.audit_log,
-            "execution_path": self.execution_path,
-            "permission_decision": self.permission_decision,
-        }
-
-
 class AgentToolContextService:
     """封装AgentToolContextService相关数据结构或服务能力。"""
     def __init__(self) -> None:
@@ -118,7 +136,7 @@ class AgentToolContextService:
         self._apm_connector = APMConnector()
         self._logcloud_connector = LogCloudConnector()
         self._alert_platform_connector = AlertPlatformConnector()
-        self._audit_seq = 0
+        self._audit_builder = ToolAuditBuilder()
 
     async def build_context(
         self,
@@ -138,87 +156,13 @@ class AgentToolContextService:
         """
         command_gate = self._decide_tool_invocation(agent_name=agent_name, assigned_command=assigned_command)
         cfg = await tooling_service.get_config()
-        # 这里的分支不是简单按名字分发，而是在定义“每类 Agent 允许看什么证据源”。
-        # 这样主 Agent 只需要下发方向，具体的工具接入边界由系统统一控制。
-        if agent_name == "CodeAgent":
-            result = await self._build_code_context(
-                cfg, compact_context, incident_context, assigned_command, command_gate
-            )
-        elif agent_name == "ProblemAnalysisAgent":
-            # 主Agent默认使用“规则建议工具包”聚合指标与案例库证据
-            result = await self._build_rule_suggestion_context(
-                cfg,
-                compact_context,
-                incident_context,
-                assigned_command,
-                command_gate,
-            )
-        elif agent_name == "ChangeAgent":
-            result = await self._build_change_context(
-                cfg, compact_context, incident_context, assigned_command, command_gate
-            )
-        elif agent_name == "LogAgent":
-            result = await self._build_log_context(
-                cfg, compact_context, incident_context, assigned_command, command_gate
-            )
-        elif agent_name == "MetricsAgent":
-            result = await self._build_metrics_context(
-                cfg,
-                compact_context, incident_context, assigned_command, command_gate
-            )
-        elif agent_name == "RunbookAgent":
-            result = await self._build_runbook_context(
-                compact_context, incident_context, assigned_command, command_gate
-            )
-        elif agent_name == "CriticAgent":
-            # 质疑Agent基于客观指标做反证与漏洞审查
-            result = await self._build_metrics_context(
-                cfg,
-                compact_context,
-                incident_context,
-                assigned_command,
-                command_gate,
-            )
-        elif agent_name == "RebuttalAgent":
-            # 反驳Agent优先补充日志侧证据
-            result = await self._build_log_context(
-                cfg,
-                compact_context,
-                incident_context,
-                assigned_command,
-                command_gate,
-            )
-        elif agent_name == "JudgeAgent":
-            # 裁决Agent基于规则建议工具包汇总可验证证据
-            result = await self._build_rule_suggestion_context(
-                cfg,
-                compact_context,
-                incident_context,
-                assigned_command,
-                command_gate,
-            )
-        elif agent_name == "VerificationAgent":
-            # 验证Agent基于指标快照生成验证与回归观察点
-            result = await self._build_metrics_context(
-                cfg,
-                compact_context,
-                incident_context,
-                assigned_command,
-                command_gate,
-            )
-        elif agent_name == "RuleSuggestionAgent":
-            result = await self._build_rule_suggestion_context(
-                cfg,
-                compact_context, incident_context, assigned_command, command_gate
-            )
-        elif agent_name == "DomainAgent":
-            result = await self._build_domain_context(
-                cfg, compact_context, incident_context, assigned_command, command_gate
-            )
-        elif agent_name == "DatabaseAgent":
-            result = await self._build_database_context(
-                cfg, compact_context, incident_context, assigned_command, command_gate
-            )
+        builder_name = resolve_context_builder_name(agent_name)
+        if builder_name:
+            builder = getattr(self, builder_name)
+            if builder_name == "_build_runbook_context":
+                result = await builder(compact_context, incident_context, assigned_command, command_gate)
+            else:
+                result = await builder(cfg, compact_context, incident_context, assigned_command, command_gate)
         else:
             result = ToolContextResult(
                 name="none",
@@ -285,22 +229,10 @@ class AgentToolContextService:
         assigned_command: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """为指定 Agent 生成更贴近问题闭包的专属上下文。"""
-        if agent_name == "CodeAgent":
-            return self._build_code_focused_context(compact_context, incident_context, tool_context, assigned_command)
-        if agent_name == "LogAgent":
-            return self._build_log_focused_context(compact_context, incident_context, tool_context, assigned_command)
-        if agent_name == "DomainAgent":
-            return self._build_domain_focused_context(compact_context, incident_context, tool_context, assigned_command)
-        if agent_name == "DatabaseAgent":
-            return self._build_database_focused_context(compact_context, incident_context, tool_context, assigned_command)
-        if agent_name == "MetricsAgent":
-            return self._build_metrics_focused_context(compact_context, incident_context, tool_context, assigned_command)
-        if agent_name == "ChangeAgent":
-            return self._build_change_focused_context(compact_context, incident_context, tool_context, assigned_command)
-        if agent_name == "RunbookAgent":
-            return self._build_runbook_focused_context(compact_context, incident_context, tool_context, assigned_command)
-        if agent_name in {"ProblemAnalysisAgent", "CriticAgent", "RebuttalAgent", "JudgeAgent", "VerificationAgent", "RuleSuggestionAgent"}:
-            return self._build_cross_agent_focused_context(compact_context, incident_context, tool_context, assigned_command)
+        builder_name = resolve_focused_context_builder_name(agent_name)
+        if builder_name:
+            builder = getattr(self, builder_name)
+            return builder(compact_context, incident_context, tool_context, assigned_command)
         return {}
 
     def _merge_skill_context(
@@ -406,74 +338,13 @@ class AgentToolContextService:
         tool_context: Optional[Dict[str, Any]],
         assigned_command: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        leads = self._extract_investigation_leads(compact_context, incident_context, assigned_command)
-        payload = {
-            "problem_frame": {
-                "title": str(((compact_context.get("incident_summary") or {}).get("title") or incident_context.get("title") or ""))[:200],
-                "description": str(((compact_context.get("incident_summary") or {}).get("description") or incident_context.get("description") or ""))[:600],
-                "service_name": self._primary_service_name(compact_context, incident_context, assigned_command),
-                "severity": str(((compact_context.get("incident_summary") or {}).get("severity") or incident_context.get("severity") or ""))[:40],
-            },
-            "investigation_focus": {
-                "api_endpoints": list(leads.get("api_endpoints") or [])[:8],
-                "service_names": list(leads.get("service_names") or [])[:8],
-                "database_tables": self._extract_database_tables(compact_context, incident_context, assigned_command)[:12],
-                "error_keywords": list(leads.get("error_keywords") or [])[:10],
-                "trace_ids": list(leads.get("trace_ids") or [])[:6],
-            },
-            "tool_summary": {
-                "name": str((tool_context or {}).get("name") or ""),
-                "status": str((tool_context or {}).get("status") or ""),
-                "summary": str((tool_context or {}).get("summary") or "")[:320],
-            },
-        }
-        role_hint = str((assigned_command or {}).get("target_role") or "").strip().lower()
-        task_text = " ".join(
-            filter(
-                None,
-                [
-                    str((assigned_command or {}).get("task") or "").strip(),
-                    str((assigned_command or {}).get("focus") or "").strip(),
-                ],
-            )
-        ).lower()
-        if role_hint in {"commander", "main", "problem_analysis"} or "分发" in task_text or "拆解" in task_text:
-            payload["coordination_summary"] = self._build_problem_coordination_summary(
-                problem_frame=payload["problem_frame"],
-                investigation_focus=payload["investigation_focus"],
-                tool_summary=payload["tool_summary"],
-            )
-        if "裁决" in task_text or "最终判断" in task_text or "收敛证据" in task_text:
-            payload["verdict_summary"] = self._build_judge_verdict_summary(
-                problem_frame=payload["problem_frame"],
-                investigation_focus=payload["investigation_focus"],
-                tool_summary=payload["tool_summary"],
-            )
-        if "验证" in task_text or "回落" in task_text or "修复是否生效" in task_text:
-            payload["verification_summary"] = self._build_verification_summary(
-                problem_frame=payload["problem_frame"],
-                investigation_focus=payload["investigation_focus"],
-                tool_summary=payload["tool_summary"],
-            )
-        if "质疑" in task_text or "证据缺口" in task_text or "替代解释" in task_text:
-            payload["critique_summary"] = self._build_critique_summary(
-                problem_frame=payload["problem_frame"],
-                investigation_focus=payload["investigation_focus"],
-                tool_summary=payload["tool_summary"],
-            )
-        if "反驳" in task_text or "补强" in task_text or "闭环证据" in task_text:
-            payload["rebuttal_summary"] = self._build_rebuttal_summary(
-                problem_frame=payload["problem_frame"],
-                investigation_focus=payload["investigation_focus"],
-                tool_summary=payload["tool_summary"],
-            )
-        if "规则化建议" in task_text or "守护策略" in task_text or "告警" in task_text:
-            payload["rule_summary"] = self._build_rule_summary(
-                problem_frame=payload["problem_frame"],
-                investigation_focus=payload["investigation_focus"],
-                tool_summary=payload["tool_summary"],
-            )
-        return payload
+        return build_cross_agent_focused_context(
+            self,
+            compact_context,
+            incident_context,
+            tool_context,
+            assigned_command,
+        )
 
     def _build_problem_coordination_summary(
         self,
@@ -482,42 +353,11 @@ class AgentToolContextService:
         investigation_focus: Dict[str, Any],
         tool_summary: Dict[str, Any],
     ) -> Dict[str, Any]:
-        database_tables = list(investigation_focus.get("database_tables") or [])[:12]
-        error_keywords = [str(item or "").strip().lower() for item in list(investigation_focus.get("error_keywords") or [])]
-        api_endpoints = list(investigation_focus.get("api_endpoints") or [])[:8]
-
-        priority_tracks: List[str] = []
-        dispatch_targets: List[str] = []
-        evidence_points: List[str] = []
-        dominant_pattern = "generic_investigation"
-
-        if api_endpoints:
-            priority_tracks.append("接口入口与故障表象确认")
-            dispatch_targets.extend(["LogAgent", "CodeAgent"])
-            evidence_points.append(f"问题接口：{api_endpoints[0]}")
-        if database_tables or any(token in " ".join(error_keywords) for token in ("db", "lock", "transaction", "pool")):
-            priority_tracks.append("数据库与连接池压力链")
-            dispatch_targets.append("DatabaseAgent")
-            evidence_points.append(f"数据库线索：{';'.join(database_tables[:3]) or 'db/pool/lock keyword'}")
-        if any(token in " ".join(error_keywords) for token in ("502", "timeout", "error")):
-            priority_tracks.append("日志时间线与用户可见故障闭环")
-            dispatch_targets.append("LogAgent")
-            evidence_points.append("错误关键词显示用户侧故障已暴露，需要先重建时间线。")
-        if tool_summary.get("status"):
-            evidence_points.append(f"主控预加载：{str(tool_summary.get('name') or '-')}/{str(tool_summary.get('status') or '-')}")
-
-        if len(priority_tracks) >= 2:
-            dominant_pattern = "multi_signal_incident"
-        if not dispatch_targets:
-            dispatch_targets = ["LogAgent", "DomainAgent", "CodeAgent"]
-
-        return {
-            "dominant_pattern": dominant_pattern,
-            "service_name": str(problem_frame.get("service_name") or "")[:160],
-            "priority_tracks": list(dict.fromkeys(priority_tracks))[:4],
-            "dispatch_targets": list(dict.fromkeys(dispatch_targets))[:5],
-            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
-        }
+        return build_problem_coordination_summary(
+            problem_frame=problem_frame,
+            investigation_focus=investigation_focus,
+            tool_summary=tool_summary,
+        )
 
     def _build_judge_verdict_summary(
         self,
@@ -526,35 +366,11 @@ class AgentToolContextService:
         investigation_focus: Dict[str, Any],
         tool_summary: Dict[str, Any],
     ) -> Dict[str, Any]:
-        api_endpoints = list(investigation_focus.get("api_endpoints") or [])[:8]
-        database_tables = list(investigation_focus.get("database_tables") or [])[:12]
-        error_keywords = [str(item or "").strip().lower() for item in list(investigation_focus.get("error_keywords") or [])]
-
-        decision_axes: List[str] = []
-        evidence_points: List[str] = []
-        dominant_pattern = "needs_more_evidence"
-
-        if api_endpoints:
-            decision_axes.append("接口级故障是否可与日志和代码入口闭环")
-            evidence_points.append(f"问题接口：{api_endpoints[0]}")
-        if database_tables:
-            decision_axes.append("数据库线索是否足以支撑根因归属")
-            evidence_points.append(f"关键表：{';'.join(database_tables[:3])}")
-        if any(token in " ".join(error_keywords) for token in ("502", "timeout", "lock", "db")):
-            decision_axes.append("用户故障表象与底层资源争用是否一致")
-            evidence_points.append(f"错误线索：{';'.join(error_keywords[:4])}")
-        if tool_summary.get("status"):
-            evidence_points.append(f"裁决输入：{str(tool_summary.get('name') or '-')}/{str(tool_summary.get('status') or '-')}")
-
-        if len(decision_axes) >= 2:
-            dominant_pattern = "ready_for_verdict"
-
-        return {
-            "dominant_pattern": dominant_pattern,
-            "service_name": str(problem_frame.get("service_name") or "")[:160],
-            "decision_axes": list(dict.fromkeys(decision_axes))[:4],
-            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
-        }
+        return build_judge_verdict_summary(
+            problem_frame=problem_frame,
+            investigation_focus=investigation_focus,
+            tool_summary=tool_summary,
+        )
 
     def _build_verification_summary(
         self,
@@ -563,32 +379,11 @@ class AgentToolContextService:
         investigation_focus: Dict[str, Any],
         tool_summary: Dict[str, Any],
     ) -> Dict[str, Any]:
-        api_endpoints = list(investigation_focus.get("api_endpoints") or [])[:8]
-        database_tables = list(investigation_focus.get("database_tables") or [])[:12]
-        error_keywords = [str(item or "").strip().lower() for item in list(investigation_focus.get("error_keywords") or [])]
-
-        checkpoints: List[str] = []
-        evidence_points: List[str] = []
-        dominant_pattern = "verification_generic"
-
-        if api_endpoints:
-            checkpoints.append("确认接口错误率和超时率回落")
-            evidence_points.append(f"验证对象：{api_endpoints[0]}")
-        if database_tables or any(token in " ".join(error_keywords) for token in ("db", "lock", "pool")):
-            checkpoints.append("确认数据库连接池、锁等待和慢 SQL 指标回落")
-            evidence_points.append(f"数据面线索：{';'.join(database_tables[:3]) or 'db/lock/pool keyword'}")
-        checkpoints.append("确认关键服务 CPU/线程等资源指标恢复")
-        if tool_summary.get("status"):
-            evidence_points.append(f"验证输入：{str(tool_summary.get('name') or '-')}/{str(tool_summary.get('status') or '-')}")
-        if len(checkpoints) >= 2:
-            dominant_pattern = "verification_ready"
-
-        return {
-            "dominant_pattern": dominant_pattern,
-            "service_name": str(problem_frame.get("service_name") or "")[:160],
-            "checkpoints": list(dict.fromkeys(checkpoints))[:5],
-            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
-        }
+        return build_verification_summary(
+            problem_frame=problem_frame,
+            investigation_focus=investigation_focus,
+            tool_summary=tool_summary,
+        )
 
     def _build_critique_summary(
         self,
@@ -597,31 +392,11 @@ class AgentToolContextService:
         investigation_focus: Dict[str, Any],
         tool_summary: Dict[str, Any],
     ) -> Dict[str, Any]:
-        api_endpoints = list(investigation_focus.get("api_endpoints") or [])[:8]
-        database_tables = list(investigation_focus.get("database_tables") or [])[:12]
-        error_keywords = [str(item or "").strip().lower() for item in list(investigation_focus.get("error_keywords") or [])]
-        challenge_axes: List[str] = []
-        evidence_points: List[str] = []
-        dominant_pattern = "generic_challenge"
-        if api_endpoints:
-            challenge_axes.append("接口现象是否存在其他解释路径")
-            evidence_points.append(f"问题接口：{api_endpoints[0]}")
-        if database_tables:
-            challenge_axes.append("数据库线索是否足以证明唯一根因")
-            evidence_points.append(f"涉及表：{';'.join(database_tables[:3])}")
-        if error_keywords:
-            challenge_axes.append("错误关键词是否可能来自级联症状而非根因")
-            evidence_points.append(f"现有线索：{';'.join(error_keywords[:4])}")
-        if tool_summary.get("status"):
-            evidence_points.append(f"质疑输入：{str(tool_summary.get('name') or '-')}/{str(tool_summary.get('status') or '-')}")
-        if len(challenge_axes) >= 2:
-            dominant_pattern = "evidence_challenge"
-        return {
-            "dominant_pattern": dominant_pattern,
-            "service_name": str(problem_frame.get("service_name") or "")[:160],
-            "challenge_axes": list(dict.fromkeys(challenge_axes))[:4],
-            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
-        }
+        return build_critique_summary(
+            problem_frame=problem_frame,
+            investigation_focus=investigation_focus,
+            tool_summary=tool_summary,
+        )
 
     def _build_rebuttal_summary(
         self,
@@ -630,28 +405,11 @@ class AgentToolContextService:
         investigation_focus: Dict[str, Any],
         tool_summary: Dict[str, Any],
     ) -> Dict[str, Any]:
-        api_endpoints = list(investigation_focus.get("api_endpoints") or [])[:8]
-        database_tables = list(investigation_focus.get("database_tables") or [])[:12]
-        error_keywords = [str(item or "").strip().lower() for item in list(investigation_focus.get("error_keywords") or [])]
-        reinforcement_axes: List[str] = []
-        evidence_points: List[str] = []
-        dominant_pattern = "generic_rebuttal"
-        if api_endpoints:
-            reinforcement_axes.append("补强接口入口到用户故障的闭环")
-            evidence_points.append(f"问题接口：{api_endpoints[0]}")
-        if database_tables or any(token in " ".join(error_keywords) for token in ("lock", "db", "pool")):
-            reinforcement_axes.append("补强数据库/资源争用证据链")
-            evidence_points.append(f"数据面：{';'.join(database_tables[:3]) or 'db/lock/pool keyword'}")
-        if tool_summary.get("status"):
-            evidence_points.append(f"反驳输入：{str(tool_summary.get('name') or '-')}/{str(tool_summary.get('status') or '-')}")
-        if len(reinforcement_axes) >= 2:
-            dominant_pattern = "evidence_reinforcement"
-        return {
-            "dominant_pattern": dominant_pattern,
-            "service_name": str(problem_frame.get("service_name") or "")[:160],
-            "reinforcement_axes": list(dict.fromkeys(reinforcement_axes))[:4],
-            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
-        }
+        return build_rebuttal_summary(
+            problem_frame=problem_frame,
+            investigation_focus=investigation_focus,
+            tool_summary=tool_summary,
+        )
 
     def _build_rule_summary(
         self,
@@ -660,28 +418,11 @@ class AgentToolContextService:
         investigation_focus: Dict[str, Any],
         tool_summary: Dict[str, Any],
     ) -> Dict[str, Any]:
-        api_endpoints = list(investigation_focus.get("api_endpoints") or [])[:8]
-        database_tables = list(investigation_focus.get("database_tables") or [])[:12]
-        error_keywords = [str(item or "").strip().lower() for item in list(investigation_focus.get("error_keywords") or [])]
-        recommendation_axes: List[str] = []
-        evidence_points: List[str] = []
-        dominant_pattern = "generic_rule"
-        if api_endpoints:
-            recommendation_axes.append("沉淀接口级告警与守护规则")
-            evidence_points.append(f"问题接口：{api_endpoints[0]}")
-        if database_tables or any(token in " ".join(error_keywords) for token in ("pool", "db", "timeout")):
-            recommendation_axes.append("沉淀数据库/连接池容量守护策略")
-            evidence_points.append(f"数据面：{';'.join(database_tables[:3]) or 'db/pool keyword'}")
-        if tool_summary.get("status"):
-            evidence_points.append(f"规则输入：{str(tool_summary.get('name') or '-')}/{str(tool_summary.get('status') or '-')}")
-        if len(recommendation_axes) >= 2:
-            dominant_pattern = "rule_ready"
-        return {
-            "dominant_pattern": dominant_pattern,
-            "service_name": str(problem_frame.get("service_name") or "")[:160],
-            "recommendation_axes": list(dict.fromkeys(recommendation_axes))[:4],
-            "evidence_points": list(dict.fromkeys(evidence_points))[:6],
-        }
+        return build_rule_summary(
+            problem_frame=problem_frame,
+            investigation_focus=investigation_focus,
+            tool_summary=tool_summary,
+        )
 
     def _build_code_focused_context(
         self,
@@ -690,67 +431,13 @@ class AgentToolContextService:
         tool_context: Optional[Dict[str, Any]],
         assigned_command: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        mapping = compact_context.get("interface_mapping") if isinstance(compact_context.get("interface_mapping"), dict) else {}
-        endpoint = ((mapping.get("endpoint") or mapping.get("matched_endpoint") or {}) if isinstance(mapping, dict) else {})
-        leads = self._extract_investigation_leads(compact_context, incident_context, assigned_command)
-        tool_data = (tool_context or {}).get("data") if isinstance(tool_context, dict) else {}
-        if not isinstance(tool_data, dict):
-            tool_data = {}
-        hits = [item for item in list(tool_data.get("hits") or []) if isinstance(item, dict)]
-        repo_path = str(tool_data.get("repo_path") or "").strip()
-        artifact_hints = list(mapping.get("code_artifacts") or []) + list(leads.get("code_artifacts") or [])
-        hit_files = [str(item.get("file") or "").strip() for item in hits if str(item.get("file") or "").strip()]
-        related_files = self._expand_related_code_files(
-            repo_path=repo_path,
-            seed_files=[*artifact_hints, *hit_files],
-            class_hints=list(leads.get("class_names") or []),
-            depth=2,
-            per_hop_limit=6,
+        return build_code_focused_context(
+            self,
+            compact_context,
+            incident_context,
+            tool_context,
+            assigned_command,
         )
-        code_windows = self._load_repo_focus_windows(
-            repo_path=repo_path,
-            candidate_files=[*artifact_hints, *hit_files, *related_files],
-            max_files=8,
-            max_chars=1400,
-        )
-        method_call_chain = self._build_method_call_chain(
-            repo_path=repo_path,
-            endpoint_interface=str(endpoint.get("interface") or ""),
-            code_windows=code_windows,
-            hit_snippets=[str(item.get("snippet") or "") for item in hits[:8]],
-        )
-        return {
-            "analysis_objective": {
-                "task": str((assigned_command or {}).get("task") or "")[:240],
-                "focus": str((assigned_command or {}).get("focus") or "")[:300],
-                "expected_output": str((assigned_command or {}).get("expected_output") or "")[:240],
-            },
-            "problem_entrypoint": {
-                "method": str(endpoint.get("method") or "")[:24],
-                "path": str(endpoint.get("path") or "")[:240],
-                "service": str(endpoint.get("service") or self._primary_service_name(compact_context, incident_context, assigned_command))[:160],
-                "interface": str(endpoint.get("interface") or "")[:240],
-            },
-            "mapped_code_scope": {
-                "code_artifacts": list(dict.fromkeys([str(item) for item in artifact_hints if str(item).strip()]))[:12],
-                "class_names": list(leads.get("class_names") or [])[:12],
-                "dependency_services": list(leads.get("dependency_services") or [])[:10],
-                "database_tables": self._extract_database_tables(compact_context, incident_context, assigned_command)[:12],
-            },
-            "repo_hits": {
-                "keywords": list(tool_data.get("keywords") or [])[:12],
-                "match_count": len(hits),
-                "top_hits": hits[:12],
-                "candidate_files": list(dict.fromkeys([str(item) for item in hit_files if str(item).strip()]))[:12],
-                "related_files": related_files[:12],
-            },
-            "code_windows": code_windows,
-            "method_call_chain": method_call_chain,
-            "analysis_expectations": [
-                "优先定位接口入口与事务边界，再分析同步调用、锁竞争、连接占用和重试放大。",
-                "若无法形成完整调用链，至少给出入口方法、下游调用点和可疑资源占用点。",
-            ],
-        }
 
     def _build_log_focused_context(
         self,
@@ -759,24 +446,13 @@ class AgentToolContextService:
         tool_context: Optional[Dict[str, Any]],
         assigned_command: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        excerpt = self._resolve_log_excerpt(compact_context, incident_context, tool_context)
-        timeline = self._extract_log_timeline(excerpt, max_events=10)
-        trace_id = self._primary_trace_id(compact_context, incident_context, assigned_command)
-        causal_timeline = self._build_log_causal_timeline(timeline)
-        return {
-            "analysis_objective": {
-                "task": str((assigned_command or {}).get("task") or "")[:240],
-                "focus": str((assigned_command or {}).get("focus") or "")[:300],
-            },
-            "log_scope": {
-                "service_name": self._primary_service_name(compact_context, incident_context, assigned_command),
-                "trace_id": trace_id,
-                "keywords": list(((tool_context or {}).get("data") or {}).get("keywords") or [])[:10] if isinstance(tool_context, dict) else [],
-            },
-            "timeline_events": timeline,
-            "causal_timeline": causal_timeline,
-            "raw_excerpt": excerpt[:2200],
-        }
+        return build_log_focused_context(
+            self,
+            compact_context,
+            incident_context,
+            tool_context,
+            assigned_command,
+        )
 
     def _build_domain_focused_context(
         self,
@@ -785,39 +461,13 @@ class AgentToolContextService:
         tool_context: Optional[Dict[str, Any]],
         assigned_command: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        mapping = compact_context.get("interface_mapping") if isinstance(compact_context.get("interface_mapping"), dict) else {}
-        tool_data = (tool_context or {}).get("data") if isinstance(tool_context, dict) else {}
-        if not isinstance(tool_data, dict):
-            tool_data = {}
-        matches = [item for item in list(tool_data.get("matches") or []) if isinstance(item, dict)]
-        endpoint = ((mapping.get("endpoint") or mapping.get("matched_endpoint") or {}) if isinstance(mapping, dict) else {})
-        causal_summary = self._build_domain_causal_summary(
-            mapping=mapping if isinstance(mapping, dict) else {},
-            endpoint=endpoint if isinstance(endpoint, dict) else {},
-            matches=matches[:8],
+        return build_domain_focused_context(
+            self,
+            compact_context,
+            incident_context,
+            tool_context,
+            assigned_command,
         )
-        return {
-            "responsibility_mapping": {
-                "matched": bool(mapping.get("matched")),
-                "confidence": mapping.get("confidence"),
-                "domain": str(mapping.get("domain") or "")[:120],
-                "aggregate": str(mapping.get("aggregate") or "")[:120],
-                "owner_team": str(mapping.get("owner_team") or "")[:120],
-                "owner": str(mapping.get("owner") or "")[:120],
-                "feature": str(mapping.get("feature") or "")[:120],
-            },
-            "interface_scope": {
-                "method": str(endpoint.get("method") or "")[:24],
-                "path": str(endpoint.get("path") or "")[:240],
-                "service": str(endpoint.get("service") or self._primary_service_name(compact_context, incident_context, assigned_command))[:160],
-                "database_tables": list(mapping.get("database_tables") or mapping.get("db_tables") or [])[:12],
-                "dependency_services": list(mapping.get("dependency_services") or [])[:10],
-                "monitor_items": list(mapping.get("monitor_items") or [])[:10],
-            },
-            "knowledge_matches": matches[:8],
-            "cmdb_payload": (((tool_data.get("remote_cmdb") or {}).get("payload") or {}) if isinstance(tool_data.get("remote_cmdb"), dict) else {}),
-            "causal_summary": causal_summary,
-        }
 
     def _build_database_focused_context(
         self,
@@ -826,39 +476,13 @@ class AgentToolContextService:
         tool_context: Optional[Dict[str, Any]],
         assigned_command: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        tool_data = (tool_context or {}).get("data") if isinstance(tool_context, dict) else {}
-        if not isinstance(tool_data, dict):
-            tool_data = {}
-        target_tables = self._extract_database_tables(compact_context, incident_context, assigned_command)[:16]
-        causal_summary = self._build_database_causal_summary(
-            target_tables=target_tables,
-            tool_data=tool_data,
+        return build_database_focused_context(
+            self,
+            compact_context,
+            incident_context,
+            tool_context,
+            assigned_command,
         )
-        return {
-            "analysis_objective": {
-                "task": str((assigned_command or {}).get("task") or "")[:240],
-                "focus": str((assigned_command or {}).get("focus") or "")[:300],
-            },
-            "target_tables": target_tables,
-            "schema_summary": {
-                "engine": str(tool_data.get("engine") or "")[:40],
-                "schema": str(tool_data.get("schema") or "")[:80],
-                "tables": list(tool_data.get("tables") or [])[:16],
-                "table_structures": list(tool_data.get("table_structures") or [])[:8],
-                "indexes": self._trim_mapping(tool_data.get("indexes"), item_limit=8, value_limit=6),
-            },
-            "sql_signals": {
-                "slow_sql": list(tool_data.get("slow_sql") or [])[:8],
-                "top_sql": list(tool_data.get("top_sql") or [])[:8],
-                "keyword_hits": list(tool_data.get("keyword_hits") or [])[:8],
-            },
-            "runtime_signals": {
-                "session_status": list(tool_data.get("session_status") or [])[:8],
-                "used_target_tables": bool(tool_data.get("used_target_tables")),
-                "fallback_reason": str(tool_data.get("fallback_reason") or "")[:120],
-            },
-            "causal_summary": causal_summary,
-        }
 
     def _build_metrics_focused_context(
         self,
@@ -867,27 +491,13 @@ class AgentToolContextService:
         tool_context: Optional[Dict[str, Any]],
         assigned_command: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        tool_data = (tool_context or {}).get("data") if isinstance(tool_context, dict) else {}
-        if not isinstance(tool_data, dict):
-            tool_data = {}
-        signals = [item for item in list(tool_data.get("signals") or []) if isinstance(item, dict)]
-        causal_metric_chain = self._build_metric_causal_chain(signals[:16])
-        return {
-            "analysis_objective": {
-                "task": str((assigned_command or {}).get("task") or "")[:240],
-                "focus": str((assigned_command or {}).get("focus") or "")[:300],
-            },
-            "metric_signals": signals[:16],
-            "metric_timeline_summary": self._summarize_metric_signals(signals[:16]),
-            "causal_metric_chain": causal_metric_chain,
-            "remote_sources": {
-                "telemetry": self._remote_source_summary(tool_data.get("remote_telemetry")),
-                "prometheus": self._remote_source_summary(tool_data.get("remote_prometheus")),
-                "loki": self._remote_source_summary(tool_data.get("remote_loki")),
-                "grafana": self._remote_source_summary(tool_data.get("remote_grafana")),
-                "apm": self._remote_source_summary(tool_data.get("remote_apm")),
-            },
-        }
+        return build_metrics_focused_context(
+            self,
+            compact_context,
+            incident_context,
+            tool_context,
+            assigned_command,
+        )
 
     def _build_change_focused_context(
         self,
@@ -896,30 +506,13 @@ class AgentToolContextService:
         tool_context: Optional[Dict[str, Any]],
         assigned_command: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        tool_data = (tool_context or {}).get("data") if isinstance(tool_context, dict) else {}
-        if not isinstance(tool_data, dict):
-            tool_data = {}
-        leads = self._extract_investigation_leads(compact_context, incident_context, assigned_command)
-        changes = [item for item in list(tool_data.get("changes") or []) if isinstance(item, dict)]
-        causal_summary = self._build_change_causal_summary(
-            compact_context=compact_context,
-            incident_context=incident_context,
-            assigned_command=assigned_command,
-            changes=changes,
+        return build_change_focused_context(
+            self,
+            compact_context,
+            incident_context,
+            tool_context,
+            assigned_command,
         )
-        return {
-            "analysis_objective": {
-                "task": str((assigned_command or {}).get("task") or "")[:240],
-                "focus": str((assigned_command or {}).get("focus") or "")[:300],
-            },
-            "service_scope": {
-                "service_name": self._primary_service_name(compact_context, incident_context, assigned_command),
-                "api_endpoints": list(leads.get("api_endpoints") or [])[:8],
-                "code_artifacts": list(leads.get("code_artifacts") or [])[:10],
-            },
-            "change_window": changes[:12],
-            "causal_summary": causal_summary,
-        }
 
     def _build_runbook_focused_context(
         self,
@@ -928,29 +521,13 @@ class AgentToolContextService:
         tool_context: Optional[Dict[str, Any]],
         assigned_command: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        tool_data = (tool_context or {}).get("data") if isinstance(tool_context, dict) else {}
-        if not isinstance(tool_data, dict):
-            tool_data = {}
-        items = [item for item in list(tool_data.get("items") or []) if isinstance(item, dict)]
-        recommended_actions = self._extract_runbook_actions(items[:6])
-        action_summary = self._build_runbook_action_summary(
-            compact_context=compact_context,
-            incident_context=incident_context,
-            assigned_command=assigned_command,
-            items=items[:6],
-            recommended_actions=recommended_actions,
-            source=str(tool_data.get("source") or "")[:80],
+        return build_runbook_focused_context(
+            self,
+            compact_context,
+            incident_context,
+            tool_context,
+            assigned_command,
         )
-        return {
-            "analysis_objective": {
-                "task": str((assigned_command or {}).get("task") or "")[:240],
-                "focus": str((assigned_command or {}).get("focus") or "")[:300],
-            },
-            "knowledge_source": str(tool_data.get("source") or "")[:80],
-            "matched_entries": items[:6],
-            "recommended_actions": recommended_actions,
-            "action_summary": action_summary,
-        }
 
     async def _build_code_context(
         self,
@@ -961,122 +538,14 @@ class AgentToolContextService:
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
         """构建构建代码上下文，供后续节点或调用方直接使用。"""
-        tool_cfg = cfg.code_repo
-        audit_log: List[Dict[str, Any]] = [
-            self._audit(
-                tool_name="git_repo_search",
-                action="command_gate",
-                status="ok" if command_gate.get("allow_tool") else "skipped",
-                detail={
-                    "reason": str(command_gate.get("reason") or ""),
-                    "has_command": bool(command_gate.get("has_command")),
-                    "decision_source": str(command_gate.get("decision_source") or ""),
-                    "command_preview": self._command_preview(assigned_command),
-                },
-            )
-        ]
-        if not tool_cfg.enabled:
-            return ToolContextResult(
-                name="git_repo_search",
-                enabled=False,
-                used=False,
-                status="disabled",
-                summary="CodeAgent Git 工具开关已关闭，使用默认分析逻辑。",
-                data={},
-                command_gate=command_gate,
-                audit_log=[
-                    *audit_log,
-                    self._audit(
-                        tool_name="git_repo_search",
-                        action="config_check",
-                        status="disabled",
-                        detail={"enabled": False},
-                    ),
-                ],
-            )
-        if not bool(command_gate.get("allow_tool")):
-            return ToolContextResult(
-                name="git_repo_search",
-                enabled=True,
-                used=False,
-                status="skipped_by_command",
-                summary=f"主Agent命令未要求 CodeAgent 调用 Git 工具：{str(command_gate.get('reason') or '未授权工具调用')}",
-                data={"command_preview": self._command_preview(assigned_command)},
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-
-        try:
-            repo_path = await asyncio.to_thread(
-                self._resolve_repo_path,
-                tool_cfg.repo_url,
-                tool_cfg.access_token,
-                tool_cfg.branch,
-                tool_cfg.local_repo_path,
-                audit_log,
-            )
-            if not repo_path:
-                return ToolContextResult(
-                    name="git_repo_search",
-                    enabled=True,
-                    used=False,
-                    status="unavailable",
-                    summary="未配置可用仓库地址/本地路径，使用默认分析逻辑。",
-                    data={},
-                    command_gate=command_gate,
-                    audit_log=audit_log,
-                )
-            keywords = self._extract_keywords(compact_context, incident_context, assigned_command)
-            hits, scan_meta = await asyncio.to_thread(
-                self._search_repo,
-                repo_path,
-                keywords,
-                int(tool_cfg.max_hits),
-            )
-            audit_log.append(
-                self._audit(
-                    tool_name="git_repo_search",
-                    action="repo_search",
-                    status="ok",
-                    detail=scan_meta,
-                )
-            )
-            summary = f"仓库检索完成，命中 {len(hits)} 条代码片段。"
-            return ToolContextResult(
-                name="git_repo_search",
-                enabled=True,
-                used=True,
-                status="ok",
-                summary=summary,
-                data={
-                    "repo_path": str(repo_path),
-                    "keywords": keywords,
-                    "hits": hits[: int(tool_cfg.max_hits)],
-                },
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        except Exception as exc:
-            error_text = str(exc).strip() or exc.__class__.__name__
-            logger.warning("code_tool_context_failed", error=error_text)
-            return ToolContextResult(
-                name="git_repo_search",
-                enabled=True,
-                used=False,
-                status="error",
-                summary=f"Git 工具调用失败：{error_text}，已回退默认分析逻辑。",
-                data={"error": error_text},
-                command_gate=command_gate,
-                audit_log=[
-                    *audit_log,
-                    self._audit(
-                        tool_name="git_repo_search",
-                        action="tool_execute",
-                        status="error",
-                        detail={"error": error_text},
-                    ),
-                ],
-            )
+        return await build_code_context_provider(
+            self,
+            cfg=cfg,
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
+            command_gate=command_gate,
+        )
 
     async def _build_log_context(
         self,
@@ -1087,156 +556,14 @@ class AgentToolContextService:
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
         """构建构建日志上下文，供后续节点或调用方直接使用。"""
-        tool_cfg = cfg.log_file
-        audit_log: List[Dict[str, Any]] = [
-            self._audit(
-                tool_name="local_log_reader",
-                action="command_gate",
-                status="ok" if command_gate.get("allow_tool") else "skipped",
-                detail={
-                    "reason": str(command_gate.get("reason") or ""),
-                    "has_command": bool(command_gate.get("has_command")),
-                    "decision_source": str(command_gate.get("decision_source") or ""),
-                    "command_preview": self._command_preview(assigned_command),
-                },
-            )
-        ]
-        if not tool_cfg.enabled:
-            return ToolContextResult(
-                name="local_log_reader",
-                enabled=False,
-                used=False,
-                status="disabled",
-                summary="LogAgent 日志文件工具开关已关闭，使用默认分析逻辑。",
-                data={},
-                command_gate=command_gate,
-                audit_log=[
-                    *audit_log,
-                    self._audit(
-                        tool_name="local_log_reader",
-                        action="config_check",
-                        status="disabled",
-                        detail={"enabled": False},
-                    ),
-                ],
-            )
-        if not bool(command_gate.get("allow_tool")):
-            return ToolContextResult(
-                name="local_log_reader",
-                enabled=True,
-                used=False,
-                status="skipped_by_command",
-                summary=f"主Agent命令未要求 LogAgent 读取日志：{str(command_gate.get('reason') or '未授权工具调用')}",
-                data={"command_preview": self._command_preview(assigned_command)},
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        path = Path(str(tool_cfg.file_path or "").strip())
-        if not path.exists() or not path.is_file():
-            return ToolContextResult(
-                name="local_log_reader",
-                enabled=True,
-                used=False,
-                status="unavailable",
-                summary="日志文件路径不可用，已回退默认分析逻辑。",
-                data={"file_path": str(path)},
-                command_gate=command_gate,
-                audit_log=[
-                    *audit_log,
-                    self._audit(
-                        tool_name="local_log_reader",
-                        action="file_check",
-                        status="unavailable",
-                        detail={"file_path": str(path)},
-                    ),
-                ],
-            )
-        try:
-            keywords = self._extract_keywords(compact_context, incident_context, assigned_command)
-            service_name = self._primary_service_name(compact_context, incident_context, assigned_command)
-            trace_id = self._primary_trace_id(compact_context, incident_context, assigned_command)
-            remote_logcloud_payload: Dict[str, Any] = {}
-            if bool(getattr(cfg, "logcloud_source", None) and cfg.logcloud_source.enabled):
-                logcloud_result = await self._logcloud_connector.fetch(
-                    cfg.logcloud_source,
-                    {
-                        "service_name": service_name,
-                        "trace_id": trace_id,
-                        "query": " ".join(keywords[:6]),
-                    },
-                )
-                logcloud_status = str(logcloud_result.get("status") or "unknown")
-                logcloud_request_meta = dict(logcloud_result.get("request_meta") or {})
-                audit_log.append(
-                    self._audit(
-                        tool_name="logcloud_connector",
-                        action="remote_fetch",
-                        status=logcloud_status,
-                        detail={
-                            "enabled": bool(cfg.logcloud_source.enabled),
-                            "endpoint": str(cfg.logcloud_source.endpoint or "")[:180],
-                            "message": str(logcloud_result.get("message") or "")[:180],
-                            "request_meta": logcloud_request_meta,
-                        },
-                    )
-                )
-                if logcloud_status == "ok" and isinstance(logcloud_result.get("data"), dict):
-                    remote_logcloud_payload = dict(logcloud_result.get("data") or {})
-            excerpt, line_count, read_meta = await asyncio.to_thread(
-                self._read_log_excerpt,
-                path,
-                int(tool_cfg.max_lines),
-                keywords,
-            )
-            audit_log.append(
-                self._audit(
-                    tool_name="local_log_reader",
-                    action="file_read",
-                    status="ok",
-                    detail=read_meta,
-                )
-            )
-            return ToolContextResult(
-                name="local_log_reader",
-                enabled=True,
-                used=True,
-                status="ok",
-                summary=f"日志文件读取完成，采样 {line_count} 行。",
-                data={
-                    "file_path": str(path),
-                    "line_count": line_count,
-                    "keywords": keywords,
-                    "excerpt": excerpt,
-                    "remote_logcloud": {
-                        "enabled": bool(getattr(cfg, "logcloud_source", None) and cfg.logcloud_source.enabled),
-                        "status": "ok" if remote_logcloud_payload else "disabled_or_unavailable",
-                        "payload": remote_logcloud_payload,
-                    },
-                },
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        except Exception as exc:
-            error_text = str(exc).strip() or exc.__class__.__name__
-            logger.warning("log_tool_context_failed", error=error_text)
-            return ToolContextResult(
-                name="local_log_reader",
-                enabled=True,
-                used=False,
-                status="error",
-                summary=f"日志文件读取失败：{error_text}，已回退默认分析逻辑。",
-                data={"error": error_text},
-                command_gate=command_gate,
-                audit_log=[
-                    *audit_log,
-                    self._audit(
-                        tool_name="local_log_reader",
-                        action="file_read",
-                        status="error",
-                        detail={"error": error_text, "file_path": str(path)},
-                    ),
-                ],
-            )
+        return await build_log_context_provider(
+            self,
+            cfg=cfg,
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
+            command_gate=command_gate,
+        )
 
     async def _build_domain_context(
         self,
@@ -1247,161 +574,14 @@ class AgentToolContextService:
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
         """构建构建domain上下文，供后续节点或调用方直接使用。"""
-        tool_cfg = cfg.domain_excel
-        audit_log: List[Dict[str, Any]] = [
-            self._audit(
-                tool_name="domain_excel_lookup",
-                action="command_gate",
-                status="ok" if command_gate.get("allow_tool") else "skipped",
-                detail={
-                    "reason": str(command_gate.get("reason") or ""),
-                    "has_command": bool(command_gate.get("has_command")),
-                    "decision_source": str(command_gate.get("decision_source") or ""),
-                    "command_preview": self._command_preview(assigned_command),
-                },
-            )
-        ]
-        if not tool_cfg.enabled:
-            return ToolContextResult(
-                name="domain_excel_lookup",
-                enabled=False,
-                used=False,
-                status="disabled",
-                summary="DomainAgent 责任田 Excel 工具开关已关闭，使用默认分析逻辑。",
-                data={},
-                command_gate=command_gate,
-                audit_log=[
-                    *audit_log,
-                    self._audit(
-                        tool_name="domain_excel_lookup",
-                        action="config_check",
-                        status="disabled",
-                        detail={"enabled": False},
-                    ),
-                ],
-            )
-        if not bool(command_gate.get("allow_tool")):
-            return ToolContextResult(
-                name="domain_excel_lookup",
-                enabled=True,
-                used=False,
-                status="skipped_by_command",
-                summary=f"主Agent命令未要求 DomainAgent 查询责任田文档：{str(command_gate.get('reason') or '未授权工具调用')}",
-                data={"command_preview": self._command_preview(assigned_command)},
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        path = Path(str(tool_cfg.excel_path or "").strip())
-        if not path.exists() or not path.is_file():
-            return ToolContextResult(
-                name="domain_excel_lookup",
-                enabled=True,
-                used=False,
-                status="unavailable",
-                summary="责任田 Excel 路径不可用，已回退默认分析逻辑。",
-                data={"excel_path": str(path)},
-                command_gate=command_gate,
-                audit_log=[
-                    *audit_log,
-                    self._audit(
-                        tool_name="domain_excel_lookup",
-                        action="file_check",
-                        status="unavailable",
-                        detail={"excel_path": str(path)},
-                    ),
-                ],
-            )
-        try:
-            keywords = self._extract_keywords(compact_context, incident_context, assigned_command)
-            service_name = self._primary_service_name(compact_context, incident_context, assigned_command)
-            result = await asyncio.to_thread(
-                self._lookup_domain_file,
-                path,
-                str(tool_cfg.sheet_name or "").strip(),
-                int(tool_cfg.max_rows),
-                int(tool_cfg.max_matches),
-                keywords,
-            )
-            cmdb_payload: Dict[str, Any] = {}
-            if bool(cfg.cmdb_source.enabled):
-                cmdb_result = await self._cmdb_connector.fetch(
-                    cfg.cmdb_source,
-                    {
-                        "service_name": service_name,
-                        "keywords": keywords[:8],
-                    },
-                )
-                cmdb_status = str(cmdb_result.get("status") or "unknown")
-                cmdb_request_meta = dict(cmdb_result.get("request_meta") or {})
-                audit_log.append(
-                    self._audit(
-                        tool_name="cmdb_connector",
-                        action="remote_fetch",
-                        status=cmdb_status,
-                        detail={
-                            "enabled": bool(cfg.cmdb_source.enabled),
-                            "endpoint": str(cfg.cmdb_source.endpoint or "")[:180],
-                            "message": str(cmdb_result.get("message") or "")[:180],
-                            "request_meta": cmdb_request_meta,
-                        },
-                    )
-                )
-                if cmdb_status == "ok" and isinstance(cmdb_result.get("data"), dict):
-                    cmdb_payload = dict(cmdb_result.get("data") or {})
-            audit_log.append(
-                self._audit(
-                    tool_name="domain_excel_lookup",
-                    action="file_read",
-                    status="ok",
-                    detail={
-                        "excel_path": str(path),
-                        "row_count": int(result.get("row_count") or 0),
-                        "match_count": len(list(result.get("matches") or [])),
-                        "sheet_used": str(result.get("sheet_used") or ""),
-                        "format": str(result.get("format") or ""),
-                    },
-                )
-            )
-            return ToolContextResult(
-                name="domain_excel_lookup",
-                enabled=True,
-                used=True,
-                status="ok",
-                summary=f"责任田文档查询完成，命中 {len(result.get('matches') or [])} 行。",
-                data={
-                    "excel_path": str(path),
-                    "keywords": keywords,
-                    **result,
-                    "remote_cmdb": {
-                        "enabled": bool(cfg.cmdb_source.enabled),
-                        "status": "ok" if cmdb_payload else "disabled_or_unavailable",
-                        "payload": cmdb_payload,
-                    },
-                },
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        except Exception as exc:
-            error_text = str(exc).strip() or exc.__class__.__name__
-            logger.warning("domain_tool_context_failed", error=error_text)
-            return ToolContextResult(
-                name="domain_excel_lookup",
-                enabled=True,
-                used=False,
-                status="error",
-                summary=f"责任田文档查询失败：{error_text}，已回退默认分析逻辑。",
-                data={"error": error_text},
-                command_gate=command_gate,
-                audit_log=[
-                    *audit_log,
-                    self._audit(
-                        tool_name="domain_excel_lookup",
-                        action="file_read",
-                        status="error",
-                        detail={"error": error_text, "excel_path": str(path)},
-                    ),
-                ],
-            )
+        return await build_domain_context_provider(
+            self,
+            cfg=cfg,
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
+            command_gate=command_gate,
+        )
 
     async def _build_metrics_context(
         self,
@@ -1412,255 +592,13 @@ class AgentToolContextService:
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
         """构建构建metrics上下文，供后续节点或调用方直接使用。"""
-        audit_log: List[Dict[str, Any]] = [
-            self._audit(
-                tool_name="metrics_snapshot_analyzer",
-                action="command_gate",
-                status="ok" if command_gate.get("allow_tool") else "skipped",
-                detail={
-                    "reason": str(command_gate.get("reason") or ""),
-                    "has_command": bool(command_gate.get("has_command")),
-                    "decision_source": str(command_gate.get("decision_source") or ""),
-                    "command_preview": self._command_preview(assigned_command),
-                },
-            )
-        ]
-        if not bool(command_gate.get("allow_tool")):
-            return ToolContextResult(
-                name="metrics_snapshot_analyzer",
-                enabled=True,
-                used=False,
-                status="skipped_by_command",
-                summary=f"主Agent命令未要求 MetricsAgent 分析指标：{str(command_gate.get('reason') or '未授权工具调用')}",
-                data={"command_preview": self._command_preview(assigned_command)},
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        remote_telemetry_payload: Dict[str, Any] = {}
-        remote_prometheus_payload: Dict[str, Any] = {}
-        remote_loki_payload: Dict[str, Any] = {}
-        remote_grafana_payload: Dict[str, Any] = {}
-        remote_apm_payload: Dict[str, Any] = {}
-        service_name = self._primary_service_name(compact_context, incident_context, assigned_command)
-        trace_id = self._primary_trace_id(compact_context, incident_context, assigned_command)
-        if bool(cfg.telemetry_source.enabled):
-            telemetry_result = await self._telemetry_connector.fetch(
-                cfg.telemetry_source,
-                {
-                    "service_name": service_name,
-                    "trace_id": trace_id,
-                },
-            )
-            telemetry_status = str(telemetry_result.get("status") or "unknown")
-            telemetry_request_meta = dict(telemetry_result.get("request_meta") or {})
-            audit_log.append(
-                self._audit(
-                    tool_name="telemetry_connector",
-                    action="remote_fetch",
-                    status=telemetry_status,
-                    detail={
-                        "enabled": bool(cfg.telemetry_source.enabled),
-                        "endpoint": str(cfg.telemetry_source.endpoint or "")[:180],
-                        "message": str(telemetry_result.get("message") or "")[:180],
-                        "request_meta": telemetry_request_meta,
-                    },
-                )
-            )
-            if telemetry_status == "ok" and isinstance(telemetry_result.get("data"), dict):
-                remote_telemetry_payload = dict(telemetry_result.get("data") or {})
-        if bool(getattr(cfg, "prometheus_source", None) and cfg.prometheus_source.enabled):
-            prometheus_result = await self._prometheus_connector.fetch(
-                cfg.prometheus_source,
-                {
-                    "service_name": service_name,
-                    "query": str(assigned_command.get("focus") if isinstance(assigned_command, dict) else ""),
-                },
-            )
-            prometheus_status = str(prometheus_result.get("status") or "unknown")
-            prometheus_request_meta = dict(prometheus_result.get("request_meta") or {})
-            audit_log.append(
-                self._audit(
-                    tool_name="prometheus_connector",
-                    action="remote_fetch",
-                    status=prometheus_status,
-                    detail={
-                        "enabled": bool(cfg.prometheus_source.enabled),
-                        "endpoint": str(cfg.prometheus_source.endpoint or "")[:180],
-                        "message": str(prometheus_result.get("message") or "")[:180],
-                        "request_meta": prometheus_request_meta,
-                    },
-                )
-            )
-            if prometheus_status == "ok" and isinstance(prometheus_result.get("data"), dict):
-                remote_prometheus_payload = dict(prometheus_result.get("data") or {})
-        if bool(getattr(cfg, "loki_source", None) and cfg.loki_source.enabled):
-            loki_result = await self._loki_connector.fetch(
-                cfg.loki_source,
-                {
-                    "service_name": service_name,
-                    "trace_id": trace_id,
-                    "query": str(assigned_command.get("focus") if isinstance(assigned_command, dict) else ""),
-                },
-            )
-            loki_status = str(loki_result.get("status") or "unknown")
-            loki_request_meta = dict(loki_result.get("request_meta") or {})
-            audit_log.append(
-                self._audit(
-                    tool_name="loki_connector",
-                    action="remote_fetch",
-                    status=loki_status,
-                    detail={
-                        "enabled": bool(cfg.loki_source.enabled),
-                        "endpoint": str(cfg.loki_source.endpoint or "")[:180],
-                        "message": str(loki_result.get("message") or "")[:180],
-                        "request_meta": loki_request_meta,
-                    },
-                )
-            )
-            if loki_status == "ok" and isinstance(loki_result.get("data"), dict):
-                remote_loki_payload = dict(loki_result.get("data") or {})
-        if bool(getattr(cfg, "grafana_source", None) and cfg.grafana_source.enabled):
-            grafana_result = await self._grafana_connector.fetch(
-                cfg.grafana_source,
-                {
-                    "service_name": service_name,
-                    "query": str(assigned_command.get("focus") if isinstance(assigned_command, dict) else ""),
-                },
-            )
-            grafana_status = str(grafana_result.get("status") or "unknown")
-            grafana_request_meta = dict(grafana_result.get("request_meta") or {})
-            audit_log.append(
-                self._audit(
-                    tool_name="grafana_connector",
-                    action="remote_fetch",
-                    status=grafana_status,
-                    detail={
-                        "enabled": bool(cfg.grafana_source.enabled),
-                        "endpoint": str(cfg.grafana_source.endpoint or "")[:180],
-                        "message": str(grafana_result.get("message") or "")[:180],
-                        "request_meta": grafana_request_meta,
-                    },
-                )
-            )
-            if grafana_status == "ok" and isinstance(grafana_result.get("data"), dict):
-                remote_grafana_payload = dict(grafana_result.get("data") or {})
-        if bool(getattr(cfg, "apm_source", None) and cfg.apm_source.enabled):
-            apm_result = await self._apm_connector.fetch(
-                cfg.apm_source,
-                {
-                    "service_name": service_name,
-                    "trace_id": trace_id,
-                    "query": str(assigned_command.get("focus") if isinstance(assigned_command, dict) else ""),
-                },
-            )
-            apm_status = str(apm_result.get("status") or "unknown")
-            apm_request_meta = dict(apm_result.get("request_meta") or {})
-            audit_log.append(
-                self._audit(
-                    tool_name="apm_connector",
-                    action="remote_fetch",
-                    status=apm_status,
-                    detail={
-                        "enabled": bool(cfg.apm_source.enabled),
-                        "endpoint": str(cfg.apm_source.endpoint or "")[:180],
-                        "message": str(apm_result.get("message") or "")[:180],
-                        "request_meta": apm_request_meta,
-                    },
-                )
-            )
-            if apm_status == "ok" and isinstance(apm_result.get("data"), dict):
-                remote_apm_payload = dict(apm_result.get("data") or {})
-        metrics_context = dict(incident_context or {})
-        if remote_telemetry_payload:
-            metrics_context["remote_telemetry_payload"] = remote_telemetry_payload
-        if remote_prometheus_payload:
-            metrics_context["remote_prometheus_payload"] = remote_prometheus_payload
-        if remote_loki_payload:
-            metrics_context["remote_loki_payload"] = remote_loki_payload
-        if remote_grafana_payload:
-            metrics_context["remote_grafana_payload"] = remote_grafana_payload
-        if remote_apm_payload:
-            metrics_context["remote_apm_payload"] = remote_apm_payload
-        signals = self._collect_metrics_signals(compact_context, metrics_context)
-        audit_log.append(
-            self._audit(
-                tool_name="metrics_snapshot_analyzer",
-                action="metrics_extract",
-                status="ok" if signals else "unavailable",
-                detail={
-                    "signal_count": len(signals),
-                    "sources": ["compact_context", "incident_context", "log_content"],
-                },
-            )
-        )
-        if not signals:
-            return ToolContextResult(
-                name="metrics_snapshot_analyzer",
-                enabled=True,
-                used=False,
-                status="unavailable",
-                summary="未发现可解析的监控指标快照，使用默认分析逻辑。",
-                data={
-                    "remote_telemetry": {
-                        "enabled": bool(cfg.telemetry_source.enabled),
-                        "status": "ok" if remote_telemetry_payload else "disabled_or_unavailable",
-                    },
-                    "remote_prometheus": {
-                        "enabled": bool(getattr(cfg, "prometheus_source", None) and cfg.prometheus_source.enabled),
-                        "status": "ok" if remote_prometheus_payload else "disabled_or_unavailable",
-                    },
-                    "remote_loki": {
-                        "enabled": bool(getattr(cfg, "loki_source", None) and cfg.loki_source.enabled),
-                        "status": "ok" if remote_loki_payload else "disabled_or_unavailable",
-                    },
-                    "remote_grafana": {
-                        "enabled": bool(getattr(cfg, "grafana_source", None) and cfg.grafana_source.enabled),
-                        "status": "ok" if remote_grafana_payload else "disabled_or_unavailable",
-                    },
-                    "remote_apm": {
-                        "enabled": bool(getattr(cfg, "apm_source", None) and cfg.apm_source.enabled),
-                        "status": "ok" if remote_apm_payload else "disabled_or_unavailable",
-                    },
-                },
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        return ToolContextResult(
-            name="metrics_snapshot_analyzer",
-            enabled=True,
-            used=True,
-            status="ok",
-            summary=f"提取到 {len(signals)} 条监控异常信号。",
-            data={
-                "signals": signals[:20],
-                "remote_telemetry": {
-                    "enabled": bool(cfg.telemetry_source.enabled),
-                    "status": "ok" if remote_telemetry_payload else "disabled_or_unavailable",
-                    "payload": remote_telemetry_payload,
-                },
-                "remote_prometheus": {
-                    "enabled": bool(getattr(cfg, "prometheus_source", None) and cfg.prometheus_source.enabled),
-                    "status": "ok" if remote_prometheus_payload else "disabled_or_unavailable",
-                    "payload": remote_prometheus_payload,
-                },
-                "remote_loki": {
-                    "enabled": bool(getattr(cfg, "loki_source", None) and cfg.loki_source.enabled),
-                    "status": "ok" if remote_loki_payload else "disabled_or_unavailable",
-                    "payload": remote_loki_payload,
-                },
-                "remote_grafana": {
-                    "enabled": bool(getattr(cfg, "grafana_source", None) and cfg.grafana_source.enabled),
-                    "status": "ok" if remote_grafana_payload else "disabled_or_unavailable",
-                    "payload": remote_grafana_payload,
-                },
-                "remote_apm": {
-                    "enabled": bool(getattr(cfg, "apm_source", None) and cfg.apm_source.enabled),
-                    "status": "ok" if remote_apm_payload else "disabled_or_unavailable",
-                    "payload": remote_apm_payload,
-                },
-            },
+        return await build_metrics_context_provider(
+            self,
+            cfg=cfg,
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
             command_gate=command_gate,
-            audit_log=audit_log,
         )
 
     async def _build_change_context(
@@ -1672,117 +610,14 @@ class AgentToolContextService:
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
         """构建构建change上下文，供后续节点或调用方直接使用。"""
-        tool_cfg = cfg.code_repo
-        audit_log: List[Dict[str, Any]] = [
-            self._audit(
-                tool_name="git_change_window",
-                action="command_gate",
-                status="ok" if command_gate.get("allow_tool") else "skipped",
-                detail={
-                    "reason": str(command_gate.get("reason") or ""),
-                    "has_command": bool(command_gate.get("has_command")),
-                    "decision_source": str(command_gate.get("decision_source") or ""),
-                    "command_preview": self._command_preview(assigned_command),
-                },
-            )
-        ]
-        if not tool_cfg.enabled:
-            return ToolContextResult(
-                name="git_change_window",
-                enabled=False,
-                used=False,
-                status="disabled",
-                summary="ChangeAgent 变更工具开关已关闭，使用默认分析逻辑。",
-                data={},
-                command_gate=command_gate,
-                audit_log=[
-                    *audit_log,
-                    self._audit(
-                        tool_name="git_change_window",
-                        action="config_check",
-                        status="disabled",
-                        detail={"enabled": False},
-                    ),
-                ],
-            )
-        if not bool(command_gate.get("allow_tool")):
-            return ToolContextResult(
-                name="git_change_window",
-                enabled=True,
-                used=False,
-                status="skipped_by_command",
-                summary=f"主Agent命令未要求 ChangeAgent 拉取变更窗口：{str(command_gate.get('reason') or '未授权工具调用')}",
-                data={"command_preview": self._command_preview(assigned_command)},
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        try:
-            repo_path = await asyncio.to_thread(
-                self._resolve_repo_path,
-                tool_cfg.repo_url,
-                tool_cfg.access_token,
-                tool_cfg.branch,
-                tool_cfg.local_repo_path,
-                audit_log,
-            )
-            if not repo_path:
-                return ToolContextResult(
-                    name="git_change_window",
-                    enabled=True,
-                    used=False,
-                    status="unavailable",
-                    summary="未配置可用仓库地址/本地路径，无法拉取变更窗口。",
-                    data={},
-                    command_gate=command_gate,
-                    audit_log=audit_log,
-                )
-            changes = await asyncio.to_thread(
-                self._collect_recent_git_changes,
-                repo_path,
-                int(getattr(tool_cfg, "max_hits", 20) or 20),
-                audit_log,
-            )
-            if not changes:
-                return ToolContextResult(
-                    name="git_change_window",
-                    enabled=True,
-                    used=False,
-                    status="unavailable",
-                    summary="未获取到有效变更记录，已回退默认分析逻辑。",
-                    data={"repo_path": repo_path, "changes": []},
-                    command_gate=command_gate,
-                    audit_log=audit_log,
-                )
-            return ToolContextResult(
-                name="git_change_window",
-                enabled=True,
-                used=True,
-                status="ok",
-                summary=f"已提取最近 {len(changes)} 条代码变更。",
-                data={"repo_path": repo_path, "changes": changes},
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        except Exception as exc:
-            error_text = str(exc).strip() or exc.__class__.__name__
-            return ToolContextResult(
-                name="git_change_window",
-                enabled=True,
-                used=False,
-                status="error",
-                summary=f"变更窗口提取失败：{error_text}，已回退默认分析。",
-                data={"error": error_text},
-                command_gate=command_gate,
-                audit_log=[
-                    *audit_log,
-                    self._audit(
-                        tool_name="git_change_window",
-                        action="tool_execute",
-                        status="error",
-                        detail={"error": error_text},
-                    ),
-                ],
-            )
+        return await build_change_context_provider(
+            self,
+            cfg=cfg,
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
+            command_gate=command_gate,
+        )
 
     async def _build_database_context(
         self,
@@ -1793,197 +628,14 @@ class AgentToolContextService:
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
         """构建构建database上下文，供后续节点或调用方直接使用。"""
-        tool_cfg = getattr(cfg, "database", None)
-        audit_log: List[Dict[str, Any]] = [
-            self._audit(
-                tool_name="db_snapshot_reader",
-                action="command_gate",
-                status="ok" if command_gate.get("allow_tool") else "skipped",
-                detail={
-                    "reason": str(command_gate.get("reason") or ""),
-                    "has_command": bool(command_gate.get("has_command")),
-                    "decision_source": str(command_gate.get("decision_source") or ""),
-                    "command_preview": self._command_preview(assigned_command),
-                },
-            )
-        ]
-        if not tool_cfg or not bool(getattr(tool_cfg, "enabled", False)):
-            return ToolContextResult(
-                name="db_snapshot_reader",
-                enabled=False,
-                used=False,
-                status="disabled",
-                summary="DatabaseAgent 数据库工具开关已关闭，使用默认分析逻辑。",
-                data={},
-                command_gate=command_gate,
-                audit_log=[
-                    *audit_log,
-                    self._audit(
-                        tool_name="db_snapshot_reader",
-                        action="config_check",
-                        status="disabled",
-                        detail={"enabled": False},
-                    ),
-                ],
-            )
-        if not bool(command_gate.get("allow_tool")):
-            return ToolContextResult(
-                name="db_snapshot_reader",
-                enabled=True,
-                used=False,
-                status="skipped_by_command",
-                summary=f"主Agent命令未要求 DatabaseAgent 调用数据库工具：{str(command_gate.get('reason') or '未授权工具调用')}",
-                data={"command_preview": self._command_preview(assigned_command)},
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        try:
-            engine = str(getattr(tool_cfg, "engine", "sqlite") or "sqlite").strip().lower()
-            max_rows = int(getattr(tool_cfg, "max_rows", 50) or 50)
-            timeout_seconds = int(getattr(tool_cfg, "connect_timeout_seconds", 8) or 8)
-            keywords = self._extract_keywords(compact_context, incident_context, assigned_command)
-            mapped_tables = self._extract_database_tables(compact_context, incident_context, assigned_command)
-            if engine in {"postgresql", "postgres", "pg"}:
-                dsn = str(getattr(tool_cfg, "postgres_dsn", "") or "").strip()
-                schema = str(getattr(tool_cfg, "pg_schema", "public") or "public").strip() or "public"
-                if not dsn:
-                    return ToolContextResult(
-                        name="db_snapshot_reader",
-                        enabled=True,
-                        used=False,
-                        status="unavailable",
-                        summary="PostgreSQL DSN 未配置，已回退默认分析逻辑。",
-                        data={"engine": "postgresql"},
-                        command_gate=command_gate,
-                        audit_log=[
-                            *audit_log,
-                            self._audit(
-                                tool_name="db_snapshot_reader",
-                                action="config_check",
-                                status="unavailable",
-                                detail={"engine": "postgresql", "reason": "postgres_dsn empty"},
-                            ),
-                        ],
-                    )
-                if asyncpg is None:
-                    return ToolContextResult(
-                        name="db_snapshot_reader",
-                        enabled=True,
-                        used=False,
-                        status="error",
-                        summary="未安装 asyncpg，无法连接 PostgreSQL，请先安装依赖。",
-                        data={"engine": "postgresql", "error": "asyncpg not installed"},
-                        command_gate=command_gate,
-                        audit_log=[
-                            *audit_log,
-                            self._audit(
-                                tool_name="db_snapshot_reader",
-                                action="dependency_check",
-                                status="error",
-                                detail={"engine": "postgresql", "reason": "asyncpg missing"},
-                            ),
-                        ],
-                    )
-                snapshot = await self._collect_postgres_snapshot(
-                    dsn=dsn,
-                    schema=schema,
-                    max_rows=max_rows,
-                    keywords=keywords,
-                    target_tables=mapped_tables,
-                    timeout_seconds=timeout_seconds,
-                )
-                query_action = "postgres_query"
-                query_detail: Dict[str, Any] = {
-                    "engine": "postgresql",
-                    "schema": schema,
-                    "max_rows": max_rows,
-                    "requested_tables": mapped_tables[:12],
-                    "table_count": int(snapshot.get("table_count") or 0),
-                    "slow_sql_count": len(list(snapshot.get("slow_sql") or [])),
-                    "top_sql_count": len(list(snapshot.get("top_sql") or [])),
-                    "session_count": len(list(snapshot.get("session_status") or [])),
-                }
-            else:
-                db_path = Path(str(getattr(tool_cfg, "db_path", "") or "").strip())
-                if not db_path.exists() or not db_path.is_file():
-                    return ToolContextResult(
-                        name="db_snapshot_reader",
-                        enabled=True,
-                        used=False,
-                        status="unavailable",
-                        summary="SQLite 快照文件路径不可用，已回退默认分析逻辑。",
-                        data={"engine": "sqlite", "db_path": str(db_path)},
-                        command_gate=command_gate,
-                        audit_log=[
-                            *audit_log,
-                            self._audit(
-                                tool_name="db_snapshot_reader",
-                                action="file_check",
-                                status="unavailable",
-                                detail={"engine": "sqlite", "db_path": str(db_path)},
-                            ),
-                        ],
-                    )
-                snapshot = await asyncio.to_thread(
-                    self._collect_database_snapshot,
-                    db_path,
-                    max_rows,
-                    keywords,
-                    mapped_tables,
-                )
-                query_action = "sqlite_query"
-                query_detail = {
-                    "engine": "sqlite",
-                    "db_path": str(db_path),
-                    "max_rows": max_rows,
-                    "requested_tables": mapped_tables[:12],
-                    "table_count": int(snapshot.get("table_count") or 0),
-                    "slow_sql_count": len(list(snapshot.get("slow_sql") or [])),
-                    "top_sql_count": len(list(snapshot.get("top_sql") or [])),
-                    "session_count": len(list(snapshot.get("session_status") or [])),
-                }
-            audit_log.append(
-                self._audit(
-                    tool_name="db_snapshot_reader",
-                    action=query_action,
-                    status="ok",
-                    detail=query_detail,
-                )
-            )
-            return ToolContextResult(
-                name="db_snapshot_reader",
-                enabled=True,
-                used=True,
-                status="ok",
-                summary=(
-                    f"数据库快照读取完成，表 {snapshot.get('table_count', 0)} 个，"
-                    f"慢SQL {len(list(snapshot.get('slow_sql') or []))} 条。"
-                ),
-                data=snapshot,
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        except Exception as exc:
-            error_text = str(exc).strip() or exc.__class__.__name__
-            logger.warning("database_tool_context_failed", error=error_text)
-            return ToolContextResult(
-                name="db_snapshot_reader",
-                enabled=True,
-                used=False,
-                status="error",
-                summary=f"数据库快照读取失败：{error_text}，已回退默认分析逻辑。",
-                data={"error": error_text},
-                command_gate=command_gate,
-                audit_log=[
-                    *audit_log,
-                    self._audit(
-                        tool_name="db_snapshot_reader",
-                        action="database_query",
-                        status="error",
-                        detail={"error": error_text},
-                    ),
-                ],
-            )
+        return await build_database_context_provider(
+            self,
+            cfg=cfg,
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
+            command_gate=command_gate,
+        )
 
     async def _build_runbook_context(
         self,
@@ -1993,109 +645,12 @@ class AgentToolContextService:
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
         """构建构建runbook上下文，供后续节点或调用方直接使用。"""
-        audit_log: List[Dict[str, Any]] = [
-            self._audit(
-                tool_name="runbook_case_library",
-                action="command_gate",
-                status="ok" if command_gate.get("allow_tool") else "skipped",
-                detail={
-                    "reason": str(command_gate.get("reason") or ""),
-                    "has_command": bool(command_gate.get("has_command")),
-                    "decision_source": str(command_gate.get("decision_source") or ""),
-                    "command_preview": self._command_preview(assigned_command),
-                },
-            )
-        ]
-        if not bool(command_gate.get("allow_tool")):
-            return ToolContextResult(
-                name="runbook_case_library",
-                enabled=True,
-                used=False,
-                status="skipped_by_command",
-                summary=f"主Agent命令未要求 RunbookAgent 检索案例：{str(command_gate.get('reason') or '未授权工具调用')}",
-                data={"command_preview": self._command_preview(assigned_command)},
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        keywords = self._extract_keywords(compact_context, incident_context, assigned_command)
-        query = " ".join(keywords[:6]).strip()
-        knowledge_items = await knowledge_service.search_reference_entries(
-            query=query,
-            limit=8,
-        )
-        audit_log.append(
-            self._audit(
-                tool_name="runbook_case_library",
-                action="knowledge_search",
-                status="ok" if knowledge_items else "unavailable",
-                detail={"query": query, "match_count": len(knowledge_items), "source": "knowledge_base"},
-            )
-        )
-        if knowledge_items:
-            return ToolContextResult(
-                name="runbook_case_library",
-                enabled=True,
-                used=True,
-                status="ok",
-                summary=f"知识库命中 {len(knowledge_items)} 条案例 / SOP。",
-                data={"query": query, "items": knowledge_items[:8], "source": "knowledge_base"},
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        result = await self._case_library.execute(action="search", query=query)
-        if not result.success:
-            error_text = str(result.error or "unknown error")
-            return ToolContextResult(
-                name="runbook_case_library",
-                enabled=True,
-                used=False,
-                status="error",
-                summary=f"案例库查询失败：{error_text}",
-                data={"error": error_text, "query": query},
-                command_gate=command_gate,
-                audit_log=[
-                    *audit_log,
-                    self._audit(
-                        tool_name="runbook_case_library",
-                        action="case_search",
-                        status="error",
-                        detail={"error": error_text, "query": query},
-                    ),
-                ],
-            )
-        items = []
-        payload = result.data if isinstance(result.data, dict) else {}
-        raw_items = payload.get("items") if isinstance(payload, dict) else []
-        if isinstance(raw_items, list):
-            items = [item for item in raw_items if isinstance(item, dict)]
-        audit_log.append(
-            self._audit(
-                tool_name="runbook_case_library",
-                action="case_search",
-                status="ok",
-                detail={"query": query, "match_count": len(items)},
-            )
-        )
-        if not items:
-            return ToolContextResult(
-                name="runbook_case_library",
-                enabled=True,
-                used=False,
-                status="unavailable",
-                summary="案例库无匹配结果，使用默认分析逻辑。",
-                data={"query": query},
-                command_gate=command_gate,
-                audit_log=audit_log,
-            )
-        return ToolContextResult(
-            name="runbook_case_library",
-            enabled=True,
-            used=True,
-            status="ok",
-            summary=f"案例库命中 {len(items)} 条相似故障。",
-            data={"query": query, "items": items[:8], "source": "legacy_case_library"},
+        return await build_runbook_context_provider(
+            self,
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
             command_gate=command_gate,
-            audit_log=audit_log,
         )
 
     async def _build_rule_suggestion_context(
@@ -2107,71 +662,13 @@ class AgentToolContextService:
         command_gate: Dict[str, Any],
     ) -> ToolContextResult:
         """构建构建rulesuggestion上下文，供后续节点或调用方直接使用。"""
-        metrics = await self._build_metrics_context(
+        return await build_rule_suggestion_context_provider(
+            self,
             cfg=cfg,
             compact_context=compact_context,
             incident_context=incident_context,
             assigned_command=assigned_command,
             command_gate=command_gate,
-        )
-        runbook = await self._build_runbook_context(
-            compact_context=compact_context,
-            incident_context=incident_context,
-            assigned_command=assigned_command,
-            command_gate=command_gate,
-        )
-        alert_payload: Dict[str, Any] = {}
-        alert_audit_log: List[Dict[str, Any]] = []
-        if bool(getattr(cfg, "alert_platform_source", None) and cfg.alert_platform_source.enabled):
-            alert_result = await self._alert_platform_connector.fetch(
-                cfg.alert_platform_source,
-                {
-                    "service_name": str(incident_context.get("service_name") or ""),
-                    "severity": str(incident_context.get("severity") or ""),
-                    "alert_id": str(incident_context.get("alarm_id") or incident_context.get("alert_id") or ""),
-                },
-            )
-            alert_status = str(alert_result.get("status") or "unknown")
-            alert_request_meta = dict(alert_result.get("request_meta") or {})
-            alert_audit_log.append(
-                self._audit(
-                    tool_name="alert_platform_connector",
-                    action="remote_fetch",
-                    status=alert_status,
-                    detail={
-                        "enabled": bool(cfg.alert_platform_source.enabled),
-                        "endpoint": str(cfg.alert_platform_source.endpoint or "")[:180],
-                        "message": str(alert_result.get("message") or "")[:180],
-                        "request_meta": alert_request_meta,
-                    },
-                )
-            )
-            if alert_status == "ok" and isinstance(alert_result.get("data"), dict):
-                alert_payload = dict(alert_result.get("data") or {})
-        used = bool(metrics.used or runbook.used)
-        status = "ok" if used else ("skipped_by_command" if metrics.status == "skipped_by_command" else "unavailable")
-        return ToolContextResult(
-            name="rule_suggestion_toolkit",
-            enabled=True,
-            used=used,
-            status=status,
-            summary=(
-                "已汇总指标与案例库上下文，供规则建议Agent生成阈值与告警窗口。"
-                if used
-                else "未获得可用的指标/案例上下文，规则建议将基于当前会话推断。"
-            ),
-            data={
-                "metrics_signals": ((metrics.data or {}).get("signals") or [])[:20],
-                "runbook_items": ((runbook.data or {}).get("items") or [])[:8],
-                "query": (runbook.data or {}).get("query") or "",
-                "remote_alert_platform": {
-                    "enabled": bool(getattr(cfg, "alert_platform_source", None) and cfg.alert_platform_source.enabled),
-                    "status": "ok" if alert_payload else "disabled_or_unavailable",
-                    "payload": alert_payload,
-                },
-            },
-            command_gate=command_gate,
-            audit_log=[*(metrics.audit_log or []), *(runbook.audit_log or []), *alert_audit_log],
         )
 
     def _resolve_repo_path(
@@ -2944,116 +1441,11 @@ class AgentToolContextService:
         assigned_command: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """根据命令文本和显式开关决定本轮是否允许工具调用。"""
-        command = dict(assigned_command or {})
-        text_fields = [
-            str(command.get("task") or "").strip(),
-            str(command.get("focus") or "").strip(),
-            str(command.get("expected_output") or "").strip(),
-        ]
-        skill_hints = command.get("skill_hints")
-        has_skill_hints = isinstance(skill_hints, list) and bool(
-            [str(item or "").strip() for item in skill_hints if str(item or "").strip()]
-        )
-        has_command = bool(any(text_fields)) or ("use_tool" in command) or has_skill_hints
-        if not has_command:
-            return {
-                "agent_name": agent_name,
-                "has_command": False,
-                "allow_tool": False,
-                "reason": "未收到主Agent命令",
-                "decision_source": "no_command",
-            }
-
-        use_tool_raw = command.get("use_tool")
-        if isinstance(use_tool_raw, bool):
-            return {
-                "agent_name": agent_name,
-                "has_command": True,
-                "allow_tool": use_tool_raw,
-                "reason": "主Agent命令显式指定工具开关",
-                "decision_source": "explicit_boolean",
-            }
-
-        merged = " ".join(text_fields).lower()
-        disable_terms = ("无需工具", "不要调用工具", "禁止调用工具", "仅基于现有信息", "不查日志", "不查代码", "不查责任田")
-        if any(term in merged for term in disable_terms):
-            return {
-                "agent_name": agent_name,
-                "has_command": True,
-                "allow_tool": False,
-                "reason": "主Agent命令要求不调用工具",
-                "decision_source": "command_text_negative",
-            }
-
-        enable_terms = (
-            "读取日志",
-            "查询日志",
-            "检索代码",
-            "搜索仓库",
-            "查责任田",
-            "excel",
-            "csv",
-            "git",
-            "repo",
-            "指标",
-            "监控",
-            "cpu",
-            "线程",
-            "连接池",
-            "grafana",
-            "apm",
-            "trace",
-            "链路",
-            "变更",
-            "发布",
-            "commit",
-            "runbook",
-            "案例库",
-            "sop",
-            "日志云",
-            "logcloud",
-            "告警平台",
-            "alert",
-            "数据库",
-            "慢sql",
-            "top sql",
-            "索引",
-            "表结构",
-            "session",
-        )
-        if any(term in merged for term in enable_terms):
-            return {
-                "agent_name": agent_name,
-                "has_command": True,
-                "allow_tool": True,
-                "reason": "主Agent命令要求外部证据检索",
-                "decision_source": "command_text_positive",
-            }
-
-        return {
-            "agent_name": agent_name,
-            "has_command": True,
-            "allow_tool": True,
-            "reason": "收到主Agent命令，按Agent默认工具策略执行",
-            "decision_source": "command_default",
-        }
+        return dict(decide_tool_invocation(agent_name=agent_name, assigned_command=assigned_command))
 
     def _command_preview(self, assigned_command: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """执行commandpreview相关逻辑，并为当前模块提供可复用的处理能力。"""
-        command = dict(assigned_command or {})
-        skill_hints_raw = command.get("skill_hints")
-        skill_hints = (
-            [str(item or "").strip()[:80] for item in skill_hints_raw if str(item or "").strip()]
-            if isinstance(skill_hints_raw, list)
-            else []
-        )
-        return {
-            "task": str(command.get("task") or "")[:240],
-            "focus": str(command.get("focus") or "")[:240],
-            "expected_output": str(command.get("expected_output") or "")[:240],
-            "use_tool": command.get("use_tool"),
-            "skill_hints": skill_hints[:8],
-        }
+        return self._audit_builder.command_preview(assigned_command)
 
     def _audit(
         self,
@@ -3064,27 +1456,16 @@ class AgentToolContextService:
         detail: Dict[str, Any],
     ) -> Dict[str, Any]:
         """生成标准化工具审计记录，统一请求/响应摘要和明细预览。"""
-        detail_payload = detail if isinstance(detail, dict) else {"value": str(detail or "")}
-        call_id = self._next_audit_call_id(tool_name=tool_name, action=action)
-        return {
-            "timestamp": datetime.utcnow().isoformat(),
-            "call_id": call_id,
-            "tool_name": tool_name,
-            "action": action,
-            "status": status,
-            "request_summary": self._request_summary(detail_payload),
-            "response_summary": self._response_summary(detail_payload),
-            "detail_preview": self._detail_preview(detail_payload),
-            "duration_ms": self._coerce_duration_ms(detail_payload),
-            "detail": detail_payload,
-        }
+        return self._audit_builder.build_entry(
+            tool_name=tool_name,
+            action=action,
+            status=status,
+            detail=detail,
+        )
 
     def _next_audit_call_id(self, *, tool_name: str, action: str) -> str:
         """执行nextaudit调用id相关逻辑，并为当前模块提供可复用的处理能力。"""
-        self._audit_seq += 1
-        tool = re.sub(r"[^a-z0-9]+", "_", str(tool_name or "tool").lower()).strip("_") or "tool"
-        act = re.sub(r"[^a-z0-9]+", "_", str(action or "action").lower()).strip("_") or "action"
-        return f"{tool}_{act}_{self._audit_seq:06d}"
+        return self._audit_builder.next_call_id(tool_name=tool_name, action=action)
 
     def _detail_preview(self, detail: Dict[str, Any], *, max_chars: int = 420) -> str:
         """执行detailpreview相关逻辑，并为当前模块提供可复用的处理能力。"""
@@ -3599,49 +1980,12 @@ class AgentToolContextService:
         max_files: int,
         max_chars: int,
     ) -> List[Dict[str, Any]]:
-        root = Path(str(repo_path or "").strip())
-        if not root.exists() or not root.is_dir():
-            return []
-        windows: List[Dict[str, Any]] = []
-        seen: set[str] = set()
-        for raw_name in candidate_files:
-            name = str(raw_name or "").strip()
-            if not name:
-                continue
-            normalized = name.lstrip("./")
-            if normalized in seen:
-                continue
-            seen.add(normalized)
-            direct = root / normalized
-            file_path: Optional[Path] = None
-            if direct.exists() and direct.is_file():
-                file_path = direct
-            else:
-                matches = list(root.rglob(Path(normalized).name))
-                for item in matches:
-                    if item.is_file():
-                        try:
-                            rel = str(item.relative_to(root))
-                        except Exception:
-                            rel = str(item)
-                        if rel.endswith(normalized) or item.name == Path(normalized).name:
-                            file_path = item
-                            break
-            if file_path is None:
-                continue
-            try:
-                text = file_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            windows.append(
-                {
-                    "file": str(file_path.relative_to(root)),
-                    "excerpt": text[:max_chars],
-                }
-            )
-            if len(windows) >= max_files:
-                break
-        return windows
+        return load_repo_focus_windows(
+            repo_path=repo_path,
+            candidate_files=candidate_files,
+            max_files=max_files,
+            max_chars=max_chars,
+        )
 
     def _expand_related_code_files(
         self,
@@ -3652,100 +1996,23 @@ class AgentToolContextService:
         depth: int,
         per_hop_limit: int,
     ) -> List[str]:
-        root = Path(str(repo_path or "").strip())
-        if not root.exists() or not root.is_dir():
-            return []
-        queue: List[str] = [str(item or "").strip() for item in seed_files if str(item or "").strip()]
-        related: List[str] = []
-        seen_files = set(queue)
-        seen_symbols: set[str] = set()
-        explicit_symbols = [str(item or "").strip() for item in class_hints if str(item or "").strip()]
-        for symbol in explicit_symbols:
-            symbol_file = self._find_symbol_file(root, symbol)
-            if symbol_file is None:
-                continue
-            try:
-                rel = str(symbol_file.relative_to(root))
-            except Exception:
-                rel = str(symbol_file)
-            seen_symbols.add(symbol)
-            if rel in seen_files:
-                continue
-            seen_files.add(rel)
-            related.append(rel)
-            queue.append(rel)
-        for _ in range(max(1, depth)):
-            if not queue:
-                break
-            next_queue: List[str] = []
-            hop_found = 0
-            for item in list(queue):
-                file_path = self._resolve_repo_file(root, item)
-                if file_path is None:
-                    continue
-                try:
-                    text = file_path.read_text(encoding="utf-8", errors="replace")
-                except Exception:
-                    continue
-                for symbol in self._extract_related_code_symbols(text):
-                    if symbol in seen_symbols:
-                        continue
-                    seen_symbols.add(symbol)
-                    symbol_file = self._find_symbol_file(root, symbol)
-                    if symbol_file is None:
-                        continue
-                    try:
-                        rel = str(symbol_file.relative_to(root))
-                    except Exception:
-                        rel = str(symbol_file)
-                    if rel in seen_files:
-                        continue
-                    seen_files.add(rel)
-                    related.append(rel)
-                    next_queue.append(rel)
-                    hop_found += 1
-                    if hop_found >= per_hop_limit:
-                        break
-                if hop_found >= per_hop_limit:
-                    break
-            queue = next_queue
-        return related
+        return expand_related_code_files(
+            repo_path=repo_path,
+            seed_files=seed_files,
+            class_hints=class_hints,
+            depth=depth,
+            per_hop_limit=per_hop_limit,
+            source_suffixes=SOURCE_SUFFIXES,
+        )
 
     def _resolve_repo_file(self, root: Path, raw_name: str) -> Optional[Path]:
-        normalized = str(raw_name or "").strip().lstrip("./")
-        if not normalized:
-            return None
-        direct = root / normalized
-        if direct.exists() and direct.is_file():
-            return direct
-        for item in root.rglob(Path(normalized).name):
-            if item.is_file():
-                try:
-                    rel = str(item.relative_to(root))
-                except Exception:
-                    rel = str(item)
-                if rel.endswith(normalized) or item.name == Path(normalized).name:
-                    return item
-        return None
+        return resolve_repo_file(root, raw_name)
 
     def _find_symbol_file(self, root: Path, symbol: str) -> Optional[Path]:
-        for suffix in SOURCE_SUFFIXES:
-            candidate = list(root.rglob(f"{symbol}{suffix}"))
-            for item in candidate:
-                if item.is_file():
-                    return item
-        return None
+        return find_symbol_file(root, symbol, source_suffixes=SOURCE_SUFFIXES)
 
     def _extract_related_code_symbols(self, text: str) -> List[str]:
-        symbols: List[str] = []
-        for match in re.finditer(
-            r"\b([A-Z][A-Za-z0-9_]{2,}(?:Controller|Service|AppService|Repository|Repo|Mapper|Dao|Client|Gateway|Manager))\b",
-            text,
-        ):
-            symbol = str(match.group(1) or "").strip()
-            if symbol:
-                symbols.append(symbol)
-        return list(dict.fromkeys(symbols))[:24]
+        return extract_related_code_symbols(text)
 
     def _build_method_call_chain(
         self,
@@ -3755,150 +2022,30 @@ class AgentToolContextService:
         code_windows: List[Dict[str, Any]],
         hit_snippets: List[str],
     ) -> List[Dict[str, Any]]:
-        root = Path(str(repo_path or "").strip())
-        if not root.exists() or not root.is_dir():
-            return []
-        parsed = self._parse_interface_ref(endpoint_interface)
-        files = [str(item.get("file") or "").strip() for item in code_windows if str(item.get("file") or "").strip()]
-        source_units = self._load_source_units(root, files[:8])
-        if not source_units:
-            return []
-
-        entry_symbol = parsed.get("symbol") or source_units[0].get("symbol") or ""
-        entry_method = parsed.get("method") or self._guess_entry_method(source_units, hit_snippets)
-        if not entry_method:
-            return []
-        start_unit = self._find_source_unit(source_units, entry_symbol, preferred_file=files[0] if files else "")
-        if not start_unit:
-            start_unit = source_units[0]
-        chain: List[Dict[str, Any]] = []
-        visited: set[str] = set()
-        current_symbol = str(start_unit.get("symbol") or "")
-        current_method = entry_method
-        for _ in range(4):
-            unit = self._find_source_unit(source_units, current_symbol)
-            if not unit:
-                break
-            methods = unit.get("methods") if isinstance(unit.get("methods"), dict) else {}
-            method_meta = methods.get(current_method) if isinstance(methods, dict) else None
-            if not isinstance(method_meta, dict):
-                if not methods:
-                    break
-                fallback_name, fallback_meta = next(iter(methods.items()))
-                current_method = str(fallback_name)
-                method_meta = fallback_meta if isinstance(fallback_meta, dict) else {}
-            key = f"{current_symbol}#{current_method}"
-            if key in visited:
-                break
-            visited.add(key)
-            chain.append(
-                {
-                    "symbol": current_symbol,
-                    "method": current_method,
-                    "file": str(unit.get("file") or ""),
-                    "line": int(method_meta.get("line") or 0),
-                    "snippet": str(method_meta.get("snippet") or "")[:220],
-                }
-            )
-            next_call = self._resolve_next_method_call(
-                source_units=source_units,
-                current_unit=unit,
-                method_meta=method_meta,
-            )
-            if not next_call:
-                break
-            current_symbol = str(next_call.get("symbol") or "")
-            current_method = str(next_call.get("method") or "")
-            if not current_symbol or not current_method:
-                break
-        return chain
+        return build_method_call_chain(
+            repo_path=repo_path,
+            endpoint_interface=endpoint_interface,
+            code_windows=code_windows,
+            hit_snippets=hit_snippets,
+        )
 
     def _parse_interface_ref(self, raw: str) -> Dict[str, str]:
-        text = str(raw or "").strip()
-        if not text:
-            return {"symbol": "", "method": ""}
-        for sep in ("#", ".", "::"):
-            if sep in text:
-                left, right = text.split(sep, 1)
-                return {"symbol": left.strip(), "method": right.strip()}
-        return {"symbol": text.strip(), "method": ""}
+        return parse_interface_ref(raw)
 
     def _load_source_units(self, root: Path, files: List[str]) -> List[Dict[str, Any]]:
-        units: List[Dict[str, Any]] = []
-        for raw_file in files:
-            file_path = self._resolve_repo_file(root, raw_file)
-            if file_path is None:
-                continue
-            try:
-                text = file_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            units.append(self._parse_source_unit(root=root, file_path=file_path, text=text))
-        return units
+        return load_source_units(root, files)
 
     def _parse_source_unit(self, *, root: Path, file_path: Path, text: str) -> Dict[str, Any]:
-        symbol_match = re.search(r"\bclass\s+([A-Z][A-Za-z0-9_]*)\b", text)
-        symbol = str(symbol_match.group(1) if symbol_match else file_path.stem)
-        fields = self._extract_field_types(text)
-        methods = self._extract_methods(text)
-        try:
-            rel = str(file_path.relative_to(root))
-        except Exception:
-            rel = str(file_path)
-        return {
-            "symbol": symbol,
-            "file": rel,
-            "fields": fields,
-            "methods": methods,
-        }
+        return parse_source_unit(root=root, file_path=file_path, text=text)
 
     def _extract_field_types(self, text: str) -> Dict[str, str]:
-        fields: Dict[str, str] = {}
-        for match in re.finditer(
-            r"\b(?:private|protected|public)?\s*(?:final\s+)?([A-Z][A-Za-z0-9_<>]*)\s+([a-z][A-Za-z0-9_]*)\s*(?:[;=])",
-            text,
-        ):
-            field_type = str(match.group(1) or "").split("<", 1)[0].strip()
-            field_name = str(match.group(2) or "").strip()
-            if field_name and field_type:
-                fields[field_name] = field_type
-        return fields
+        return extract_field_types(text)
 
     def _extract_methods(self, text: str) -> Dict[str, Dict[str, Any]]:
-        methods: Dict[str, Dict[str, Any]] = {}
-        lines = text.splitlines()
-        for idx, line in enumerate(lines, start=1):
-            match = re.search(
-                r"\b(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?(?:[\w<>\[\],?]+\s+)+([a-zA-Z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*\{?",
-                line,
-            )
-            if not match:
-                continue
-            method_name = str(match.group(1) or "").strip()
-            if method_name in {"if", "for", "while", "switch", "catch", "return", "new"}:
-                continue
-            body_lines = lines[idx - 1 : min(len(lines), idx + 8)]
-            methods[method_name] = {
-                "line": idx,
-                "snippet": "\n".join(body_lines),
-            }
-        return methods
+        return extract_methods(text)
 
     def _guess_entry_method(self, source_units: List[Dict[str, Any]], hit_snippets: List[str]) -> str:
-        for snippet in hit_snippets:
-            match = re.search(r"\.\s*([a-zA-Z_][A-Za-z0-9_]*)\s*\(", str(snippet or ""))
-            if match:
-                return str(match.group(1) or "").strip()
-        for unit in source_units:
-            methods = unit.get("methods") if isinstance(unit.get("methods"), dict) else {}
-            for name in methods:
-                if name.lower().startswith(("create", "submit", "save", "update", "handle")):
-                    return str(name)
-        if source_units:
-            methods = source_units[0].get("methods") if isinstance(source_units[0].get("methods"), dict) else {}
-            if methods:
-                return str(next(iter(methods.keys())))
-        return ""
+        return guess_entry_method(source_units, hit_snippets)
 
     def _find_source_unit(
         self,
@@ -3907,15 +2054,7 @@ class AgentToolContextService:
         *,
         preferred_file: str = "",
     ) -> Optional[Dict[str, Any]]:
-        normalized_symbol = str(symbol or "").strip()
-        normalized_file = str(preferred_file or "").strip()
-        for unit in source_units:
-            if normalized_file and str(unit.get("file") or "").strip() == normalized_file:
-                return unit
-        for unit in source_units:
-            if str(unit.get("symbol") or "").strip() == normalized_symbol:
-                return unit
-        return None
+        return find_source_unit(source_units, symbol, preferred_file=preferred_file)
 
     def _resolve_next_method_call(
         self,
@@ -3924,17 +2063,11 @@ class AgentToolContextService:
         current_unit: Dict[str, Any],
         method_meta: Dict[str, Any],
     ) -> Optional[Dict[str, str]]:
-        snippet = str(method_meta.get("snippet") or "")
-        fields = current_unit.get("fields") if isinstance(current_unit.get("fields"), dict) else {}
-        for match in re.finditer(r"\b([a-zA-Z_][A-Za-z0-9_]*)\.([a-zA-Z_][A-Za-z0-9_]*)\s*\(", snippet):
-            receiver = str(match.group(1) or "").strip()
-            method = str(match.group(2) or "").strip()
-            symbol = str(fields.get(receiver) or "").strip()
-            if not symbol or method in {"println", "info", "warn", "error", "debug"}:
-                continue
-            if self._find_source_unit(source_units, symbol):
-                return {"symbol": symbol, "method": method}
-        return None
+        return resolve_next_method_call(
+            source_units=source_units,
+            current_unit=current_unit,
+            method_meta=method_meta,
+        )
 
     @staticmethod
     def _trim_mapping(value: Any, *, item_limit: int, value_limit: int) -> Dict[str, Any]:

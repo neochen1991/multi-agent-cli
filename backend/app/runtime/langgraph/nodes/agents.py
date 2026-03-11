@@ -26,7 +26,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict
 
 from app.runtime.langgraph.mailbox import clone_mailbox, compact_mailbox, dequeue_messages, enqueue_message
-from app.runtime.langgraph.state import DebateTurn
+from app.runtime.langgraph.state import DebateTurn, flatten_structured_state_view
 from app.runtime.messages import AgentMessage
 
 
@@ -58,6 +58,7 @@ async def execute_single_phase_agent(
     dialogue_items: list[Dict[str, Any]] | None = None,
     inbox_messages: list[Dict[str, Any]] | None = None,
     agent_mailbox: Dict[str, list[Dict[str, Any]]] | None = None,
+    agent_local_state: Dict[str, Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     """
     执行单个阶段的 Agent
@@ -111,6 +112,12 @@ async def execute_single_phase_agent(
         loop_round=loop_round,
         round_number=round_number,
         assigned_command=assigned_command,
+    )
+    # 把当前 Agent 的私有工作记忆挂到上下文里，只给自己后续轮次参考。
+    context_with_tools = orchestrator._attach_agent_local_context(
+        context_with_tools=context_with_tools,
+        agent_name=agent_name,
+        agent_local_state=agent_local_state,
     )
 
     # 应用工具开关到规格（根据上下文决定是否启用工具）
@@ -171,10 +178,16 @@ async def execute_single_phase_agent(
             round_number=round_number,
             loop_round=loop_round,
             history_cards_context=history_cards,
+            execution_context=context_with_tools,
         )
 
     # 记录执行回合
     await orchestrator._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
+    updated_agent_local_state = orchestrator._build_agent_local_state_update(
+        agent_name=agent_name,
+        turn=turn,
+        agent_local_state=agent_local_state,
+    )
 
     # 如果有命令，发出命令反馈事件
     if assigned_command:
@@ -204,7 +217,12 @@ async def execute_single_phase_agent(
     # 向其他 Agent 广播证据消息
     conclusion = str((turn.output_content or {}).get("conclusion") or "")[:280]
     evidence = list((turn.output_content or {}).get("evidence_chain") or [])[:3]
-    for receiver in ["ProblemAnalysisAgent", *list(orchestrator.PARALLEL_ANALYSIS_AGENTS)]:
+    for receiver in orchestrator._evidence_recipients(
+        sender=agent_name,
+        turn=turn,
+        assigned_command=assigned_command,
+        context_with_tools=context_with_tools,
+    ):
         if receiver == agent_name:
             continue
         enqueue_message(
@@ -223,7 +241,10 @@ async def execute_single_phase_agent(
             ),
         )
 
-    return {"agent_mailbox": compact_mailbox(mailbox)}
+    return {
+        "agent_mailbox": compact_mailbox(mailbox),
+        "agent_local_state": updated_agent_local_state,
+    }
 
 
 def build_agent_node(orchestrator: Any, agent_name: str) -> Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]:
@@ -247,20 +268,22 @@ def build_agent_node(orchestrator: Any, agent_name: str) -> Callable[[Dict[str, 
         Callable: 异步节点函数
     """
     async def _node(state: Dict[str, Any]) -> Dict[str, Any]:
+        flat_state = flatten_structured_state_view(state or {})
         # 提取状态信息
         """执行node相关逻辑，并为当前模块提供可复用的处理能力。"""
-        loop_round = int(state.get("current_round") or 1)
-        context_summary = state.get("context_summary") or {}
-        history_cards = orchestrator._history_cards_for_state(state, limit=20)
+        loop_round = int(flat_state.get("current_round") or 1)
+        context_summary = flat_state.get("context_summary") or {}
+        history_cards = orchestrator._history_cards_for_state(flat_state, limit=20)
         dialogue_items = orchestrator._dialogue_items_from_messages(
-            list(state.get("messages") or []),
+            list(flat_state.get("messages") or []),
             limit=6,
             char_budget=720,
         )
 
         # 获取收件箱消息
-        mailbox = clone_mailbox(state.get("agent_mailbox") or {})
+        mailbox = clone_mailbox(flat_state.get("agent_mailbox") or {})
         inbox_messages, mailbox = dequeue_messages(mailbox, receiver=agent_name)
+        agent_local_state = dict(flat_state.get("agent_local_state") or {})
 
         # 构建压缩上下文
         compact_context = orchestrator._compact_round_context(context_summary)
@@ -272,13 +295,15 @@ def build_agent_node(orchestrator: Any, agent_name: str) -> Callable[[Dict[str, 
             loop_round=loop_round,
             compact_context=compact_context,
             history_cards=history_cards,
-            agent_commands=dict(state.get("agent_commands") or {}),
+            agent_commands=dict(flat_state.get("agent_commands") or {}),
             dialogue_items=dialogue_items,
             inbox_messages=inbox_messages,
             agent_mailbox=mailbox,
+            agent_local_state=agent_local_state,
         )
 
         mailbox = clone_mailbox(execution_result.get("agent_mailbox") or mailbox)
+        agent_local_state = dict(execution_result.get("agent_local_state") or agent_local_state)
 
         # 如果是 JudgeAgent，发出问题分析最终摘要
         if agent_name == "JudgeAgent":
@@ -291,6 +316,7 @@ def build_agent_node(orchestrator: Any, agent_name: str) -> Callable[[Dict[str, 
         result: Dict[str, Any] = {
             "history_cards": history_cards,
             "agent_mailbox": compact_mailbox(mailbox),
+            "agent_local_state": agent_local_state,
         }
 
         # 将最新卡片转换为 AI 消息，添加到状态
@@ -299,7 +325,7 @@ def build_agent_node(orchestrator: Any, agent_name: str) -> Callable[[Dict[str, 
             if latest_message is not None:
                 result["messages"] = [latest_message]
 
-        return _apply_step_result(orchestrator, state, result)
+        return _apply_step_result(orchestrator, flat_state, result)
 
     return _node
 

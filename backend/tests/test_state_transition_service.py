@@ -1,6 +1,7 @@
 """test状态迁移服务相关测试。"""
 
 from app.runtime.langgraph.services.state_transition_service import StateTransitionService
+from app.runtime.langgraph.state import flatten_structured_state_view, structured_state_snapshot
 from app.runtime.messages import AgentEvidence
 
 
@@ -131,3 +132,67 @@ def test_state_transition_accepts_structured_history_update():
     next_state = service.apply_step_result(state, result)
     assert len(next_state.get("history_cards") or []) == 1
     assert next_state["history_cards"][0].agent_name == "LogAgent"
+
+
+def test_state_transition_snapshot_prefers_new_flat_updates_over_stale_structured_fields():
+    """阶段节点回写后，新的 flat 更新不应再被旧 routing/output_state 覆盖。"""
+
+    service = StateTransitionService(
+        dedupe_new_messages=lambda existing, new: list(new),
+        message_deltas_from_cards=lambda cards: [],
+        derive_conversation_state=lambda history_cards, **kwargs: {
+            "claims": [{"agent": c.agent_name, "conclusion": c.conclusion} for c in history_cards],
+            "open_questions": [],
+            "agent_outputs": dict(kwargs.get("existing_agent_outputs") or {}),
+        },
+        messages_to_cards=lambda messages: [],
+        merge_round_and_message_cards=lambda round_cards, message_cards: list(round_cards),
+        structured_snapshot=structured_state_snapshot,
+    )
+
+    old_card = AgentEvidence(
+        agent_name="ProblemAnalysisAgent",
+        phase="analysis",
+        summary="旧卡片",
+        conclusion="继续并行分析",
+        evidence_chain=[],
+        confidence=0.4,
+        raw_output={},
+    )
+    new_card = AgentEvidence(
+        agent_name="CodeAgent",
+        phase="analysis",
+        summary="新卡片",
+        conclusion="代码 diff 已定位到事务边界扩张",
+        evidence_chain=["promotionClient.checkQuota 被移入 @Transactional"],
+        confidence=0.82,
+        raw_output={"conclusion": "代码 diff 已定位到事务边界扩张", "confidence": 0.82},
+    )
+    state = {
+        "history_cards": [old_card],
+        "discussion_step_count": 0,
+        "next_step": "analysis_parallel",
+        "routing_state": {
+            "next_step": "analysis_parallel",
+            "discussion_step_count": 0,
+            "max_discussion_steps": 4,
+        },
+        "output_state": {
+            "history_cards": [old_card],
+        },
+        "agent_outputs": {},
+    }
+    result = {
+        "history_cards": [old_card, new_card],
+        "next_step": "",
+        "agent_outputs": {"CodeAgent": {"conclusion": "代码 diff 已定位到事务边界扩张", "confidence": 0.82}},
+    }
+
+    next_state = service.apply_step_result(state, result)
+    flat = flatten_structured_state_view(next_state)
+
+    assert next_state["discussion_step_count"] == 1
+    assert next_state["routing_state"]["discussion_step_count"] == 1
+    assert next_state["routing_state"]["next_step"] == ""
+    assert flat["discussion_step_count"] == 1
+    assert flat["next_step"] == ""

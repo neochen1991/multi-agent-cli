@@ -60,6 +60,26 @@ class PromptBuilder:
         """返回当前运行时正在使用的 Prompt 模板版本号。"""
         return self._template_version
 
+    @staticmethod
+    def _agent_context_envelope(
+        *,
+        context: Dict[str, Any],
+        peer_items: Optional[List[Dict[str, Any]]] = None,
+        inbox_messages: Optional[List[Dict[str, Any]]] = None,
+        work_log_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """为专家 Agent 构建显式上下文 envelope，兼容旧字段同时新增分层视图。"""
+        payload = dict(context or {})
+        if "shared_context" not in payload or not isinstance(payload.get("shared_context"), dict):
+            payload["shared_context"] = dict(context or {})
+        if peer_items is not None:
+            payload["peer_context"] = list(peer_items or [])
+        if inbox_messages is not None:
+            payload["mailbox_context"] = list(inbox_messages or [])
+        if work_log_context is not None:
+            payload["work_log_context"] = dict(work_log_context or {})
+        return payload
+
     def build_commander_prompt(
         self,
         *,
@@ -249,12 +269,22 @@ class PromptBuilder:
                 known.add(sig)
                 if len(peer_items) >= max(2, self._max_history_items + 1):
                     break
+        context_envelope = self._agent_context_envelope(
+            context=context,
+            peer_items=peer_items,
+            inbox_messages=inbox_messages,
+            work_log_context=work_log_context,
+        )
         return build_peer_driven_prompt(
             spec=spec,
             loop_round=loop_round,
             max_rounds=self._max_rounds,
-            context=context,
-            skill_context=build_rca_skill_context(context=context, loop_round=loop_round, max_rounds=self._max_rounds),
+            context=context_envelope,
+            skill_context=build_rca_skill_context(
+                context=dict(context_envelope.get("shared_context") or {}),
+                loop_round=loop_round,
+                max_rounds=self._max_rounds,
+            ),
             peer_items=peer_items,
             assigned_command=assigned_command,
             work_log_context=work_log_context,
@@ -281,13 +311,22 @@ class PromptBuilder:
         这里会同时带入命令、责任田与工具上下文、最近历史摘要以及 inbox 消息，
         让专家 Agent 在单轮内完成“读命令 -> 看线索 -> 输出结构化结果”。
         """
+        context_envelope = self._agent_context_envelope(
+            context=context,
+            inbox_messages=inbox_messages,
+            work_log_context=work_log_context,
+        )
         return build_agent_prompt(
             spec=spec,
             loop_round=loop_round,
             max_rounds=self._max_rounds,
             max_history_items=self._max_history_items,
-            context=context,
-            skill_context=build_rca_skill_context(context=context, loop_round=loop_round, max_rounds=self._max_rounds),
+            context=context_envelope,
+            skill_context=build_rca_skill_context(
+                context=dict(context_envelope.get("shared_context") or {}),
+                loop_round=loop_round,
+                max_rounds=self._max_rounds,
+            ),
             history_cards=history_cards,
             history_items=history_items_for_agent_prompt(
                 agent_name=spec.name,
@@ -320,19 +359,30 @@ class PromptBuilder:
         协作阶段不再让 Agent 重做完整分析，而是围绕 peer_cards 和同伴摘要，
         让专家基于他人的观点补证、反驳或收敛。
         """
+        envelope_peer_items = peer_items_for_collaboration_prompt(
+            spec_name=spec.name,
+            peer_cards=peer_cards,
+            dialogue_items=dialogue_items or [],
+            limit=max(2, len(peer_cards) if peer_cards else 2),
+        )
+        context_envelope = self._agent_context_envelope(
+            context=context,
+            peer_items=envelope_peer_items,
+            inbox_messages=inbox_messages,
+            work_log_context=work_log_context,
+        )
         return build_collaboration_prompt(
             spec=spec,
             loop_round=loop_round,
             max_rounds=self._max_rounds,
-            context=context,
-            skill_context=build_rca_skill_context(context=context, loop_round=loop_round, max_rounds=self._max_rounds),
-            peer_cards=peer_cards,
-            peer_items=peer_items_for_collaboration_prompt(
-                spec_name=spec.name,
-                peer_cards=peer_cards,
-                dialogue_items=dialogue_items or [],
-                limit=max(2, len(peer_cards) if peer_cards else 2),
+            context=context_envelope,
+            skill_context=build_rca_skill_context(
+                context=dict(context_envelope.get("shared_context") or {}),
+                loop_round=loop_round,
+                max_rounds=self._max_rounds,
             ),
+            peer_cards=peer_cards,
+            peer_items=envelope_peer_items,
             assigned_command=assigned_command,
             work_log_context=work_log_context,
             dialogue_items=dialogue_items,

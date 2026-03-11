@@ -132,6 +132,7 @@ class AlertIngestRequest(BaseModel):
     exception_stack: str = Field(default="", max_length=50000)
     trace_id: str = Field(default="", max_length=120)
     max_rounds: int = Field(default=1, ge=1, le=8)
+    analysis_depth_mode: str = Field(default="standard", pattern="^(quick|standard|deep)$")
 
 
 # ==================== API 端点 ====================
@@ -343,6 +344,7 @@ async def delete_incident(incident_id: str):
 async def auto_investigate_incident(
     incident_id: str,
     max_rounds: int = Query(1, ge=1, le=8, description="最大辩论轮次"),
+    analysis_depth_mode: str = Query("standard", pattern="^(quick|standard|deep)$", description="分析深度模式"),
 ):
     """为指定 incident 自动创建/复用辩论会话，并在后台异步执行调查。"""
     incident = await incident_service.get_incident(incident_id)
@@ -354,7 +356,11 @@ async def auto_investigate_incident(
 
     session_id = str(incident.debate_session_id or "").strip()
     if not session_id:
-        session = await debate_service.create_session(incident, max_rounds=max_rounds)
+        session = await debate_service.create_session(
+            incident,
+            max_rounds=max_rounds,
+            analysis_depth_mode=analysis_depth_mode,
+        )
         session_id = session.id
         await incident_service.update_incident(
             incident_id,
@@ -442,7 +448,11 @@ async def ingest_alert(payload: AlertIngestRequest):
         )
     )
 
-    session = await debate_service.create_session(incident, max_rounds=payload.max_rounds)
+    session = await debate_service.create_session(
+        incident,
+        max_rounds=payload.max_rounds,
+        analysis_depth_mode=payload.analysis_depth_mode,
+    )
     await incident_service.update_incident(
         incident.id,
         IncidentUpdate(

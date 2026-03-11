@@ -412,6 +412,7 @@ class GovernanceOpsService:
         queue_timeout_hotspots: Dict[str, int] = {}
         limited_analysis_hotspots: Dict[str, int] = {}
         tool_failure_topn: Dict[str, int] = {}
+        depth_mode_totals: Dict[str, int] = {}
         sla_samples: Dict[str, List[int]] = {
             "first_evidence_latency_ms": [],
             "first_conclusion_latency_ms": [],
@@ -456,11 +457,14 @@ class GovernanceOpsService:
                     "evidence_gap_sessions": 0,
                     "tool_calls": 0,
                     "tool_failures": 0,
+                    "expert_investigation_sessions": 0,
+                    "expert_investigation_steps": 0,
                     "estimated_prompt_tokens": 0,
                     "estimated_completion_tokens": 0,
                     "estimated_total_tokens": 0,
                     "estimated_model_cost": 0.0,
                     "avg_confidence": 0.0,
+                    "depth_mode_distribution": {"quick": 0, "standard": 0, "deep": 0},
                     "_confidence_sum": 0.0,
                     "_confidence_count": 0,
                     "session_ids": [],
@@ -469,6 +473,17 @@ class GovernanceOpsService:
             )
             metrics["sessions"] += 1
             metrics["session_ids"].append(session_id)
+            # 把分析深度模式沉淀成治理指标，便于区分“快跑”和“深挖”的成本/质量差异。
+            context = session.get("context") if isinstance(session.get("context"), dict) else {}
+            depth_mode = str(context.get("analysis_depth_mode") or "standard").strip().lower()
+            if depth_mode not in {"quick", "standard", "deep"}:
+                depth_mode = "standard"
+            depth_distribution = metrics.get("depth_mode_distribution")
+            if not isinstance(depth_distribution, dict):
+                depth_distribution = {"quick": 0, "standard": 0, "deep": 0}
+                metrics["depth_mode_distribution"] = depth_distribution
+            depth_distribution[depth_mode] = self._safe_int(depth_distribution.get(depth_mode), 0) + 1
+            depth_mode_totals[depth_mode] = depth_mode_totals.get(depth_mode, 0) + 1
             status = str(session.get("status") or "").lower()
             if status == "completed":
                 metrics["completed"] += 1
@@ -489,6 +504,7 @@ class GovernanceOpsService:
             first_conclusion_at: datetime | None = None
             report_ready_at: datetime | None = None
             has_limited_analysis = False
+            has_expert_investigation = False
             for event in events:
                 event_type = str(event.get("type") or "").strip().lower()
                 event_ts = _parse_ts(event.get("timestamp"))
@@ -527,6 +543,11 @@ class GovernanceOpsService:
                         metrics["tool_failures"] += 1
                         tool_name = str(event.get("tool_name") or event.get("name") or "unknown")
                         tool_failure_topn[tool_name] = tool_failure_topn.get(tool_name, 0) + 1
+                # 关键专家多步调查事件能直接反映“分析是否真正进入深挖闭环”。
+                if event_type == "expert_investigation_started":
+                    has_expert_investigation = True
+                if event_type == "expert_investigation_step_completed":
+                    metrics["expert_investigation_steps"] += 1
                 if event_ts and first_evidence_at is None and event_type in {
                     "asset_interface_mapping_completed",
                     "agent_tool_context_prepared",
@@ -552,6 +573,8 @@ class GovernanceOpsService:
                 )
             if has_limited_analysis:
                 metrics["limited_analysis_sessions"] += 1
+            if has_expert_investigation:
+                metrics["expert_investigation_sessions"] += 1
             risk_assessment = result.get("risk_assessment") if isinstance(result.get("risk_assessment"), dict) else {}
             risk_factors = risk_assessment.get("risk_factors") if isinstance(risk_assessment.get("risk_factors"), list) else []
             if any("关键证据不足" in str(item or "") for item in risk_factors):
@@ -575,6 +598,10 @@ class GovernanceOpsService:
             metrics["limited_analysis_rate"] = round(self._safe_int(metrics.get("limited_analyses"), 0) / llm_calls, 4)
             metrics["evidence_gap_rate"] = round(self._safe_int(metrics.get("evidence_gap_sessions"), 0) / sessions_count, 4)
             metrics["tool_failure_rate"] = round(self._safe_int(metrics.get("tool_failures"), 0) / tool_calls, 4)
+            metrics["expert_investigation_rate"] = round(
+                self._safe_int(metrics.get("expert_investigation_sessions"), 0) / sessions_count,
+                4,
+            )
             if self._safe_int(metrics.get("_confidence_count"), 0) > 0:
                 metrics["avg_confidence"] = round(
                     self._safe_float(metrics.get("_confidence_sum"), 0.0)
@@ -633,6 +660,11 @@ class GovernanceOpsService:
             "queue_timeout_hotspots": queue_hotspot_rows,
             "limited_analysis_hotspots": limited_analysis_rows,
             "tool_failure_topn": tool_failure_rows,
+            "depth_mode_distribution": {
+                "quick": depth_mode_totals.get("quick", 0),
+                "standard": depth_mode_totals.get("standard", 0),
+                "deep": depth_mode_totals.get("deep", 0),
+            },
             "sla": sla,
         }
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from app.runtime.langgraph.mailbox import clone_mailbox, compact_mailbox, enqueue_message
-from app.runtime.langgraph.state import structured_state_snapshot
+from app.runtime.langgraph.state import flatten_structured_state_view, structured_state_snapshot
 from app.runtime.messages import AgentMessage
 
 
@@ -23,24 +23,25 @@ async def execute_supervisor_decide(orchestrator: Any, state: Dict[str, Any]) ->
 
     它不会直接执行 Agent，只负责决定下一跳、记录理由，并把新增命令写回 mailbox。
     """
-    history_cards = orchestrator._history_cards_for_state(state, limit=20)
+    flat_state = flatten_structured_state_view(state or {})
+    history_cards = orchestrator._history_cards_for_state(flat_state, limit=20)
     dialogue_items = orchestrator._dialogue_items_from_messages(
-        list(state.get("messages") or []),
+        list(flat_state.get("messages") or []),
         limit=6,
         char_budget=720,
     )
-    loop_round = int(state.get("current_round") or 1)
-    discussion_step_count = int(state.get("discussion_step_count") or 0)
-    max_discussion_steps = int(state.get("max_discussion_steps") or orchestrator.MAX_DISCUSSION_STEPS_PER_ROUND)
-    round_cards = orchestrator._round_cards_for_routing(state)
-    preseed_step = str(state.get("next_step") or "").strip()
-    supervisor_stop_requested = bool(state.get("supervisor_stop_requested") or False)
-    supervisor_stop_reason = str(state.get("supervisor_stop_reason") or "").strip()
+    loop_round = int(flat_state.get("current_round") or 1)
+    discussion_step_count = int(flat_state.get("discussion_step_count") or 0)
+    max_discussion_steps = int(flat_state.get("max_discussion_steps") or orchestrator.MAX_DISCUSSION_STEPS_PER_ROUND)
+    round_cards = orchestrator._round_cards_for_routing(flat_state)
+    preseed_step = str(flat_state.get("next_step") or "").strip()
+    supervisor_stop_requested = bool(flat_state.get("supervisor_stop_requested") or False)
+    supervisor_stop_reason = str(flat_state.get("supervisor_stop_reason") or "").strip()
 
     # routing strategy 只负责给出 route_decision，本函数再把它落成实际状态更新。
     routing_result = await orchestrator._routing_strategy.decide(
         orchestrator=orchestrator,
-        state=state,
+        state=flat_state,
         history_cards=history_cards,
         round_cards=round_cards,
         dialogue_items=dialogue_items,
@@ -53,7 +54,7 @@ async def execute_supervisor_decide(orchestrator: Any, state: Dict[str, Any]) ->
     )
     route_decision = dict(routing_result.decision or {})
     mode = str(routing_result.mode or "langgraph_supervisor_dynamic")
-    deployment_profile = state.get("context", {}).get("deployment_profile") if isinstance(state.get("context"), dict) else {}
+    deployment_profile = flat_state.get("context", {}).get("deployment_profile") if isinstance(flat_state.get("context"), dict) else {}
     deployment_name = (
         str(deployment_profile.get("name") or "").strip()
         if isinstance(deployment_profile, dict)
@@ -68,12 +69,12 @@ async def execute_supervisor_decide(orchestrator: Any, state: Dict[str, Any]) ->
     # 重新派生一次会话聚合状态，让决策说明里能带上 open_questions/claims 统计。
     convo_state = orchestrator._derive_conversation_state_with_context(
         history_cards,
-        messages=list(state.get("messages") or []),
-        existing_agent_outputs=dict(state.get("agent_outputs") or {}),
+        messages=list(flat_state.get("messages") or []),
+        existing_agent_outputs=dict(flat_state.get("agent_outputs") or {}),
     )
     next_step = str(route_decision.get("next_step") or "").strip()
     # 如果 supervisor 连续几步都在重复同一类非 Judge 路由，就触发 doom loop guard 强制收敛。
-    existing_notes = list(state.get("supervisor_notes") or [])
+    existing_notes = list(flat_state.get("supervisor_notes") or [])
     recent_steps = [str((item or {}).get("next_step") or "").strip() for item in existing_notes[-3:]]
     if orchestrator._doom_loop_guard.should_force(next_step, recent_steps):
         route_decision["next_step"] = orchestrator._doom_loop_guard.forced_step
@@ -128,9 +129,15 @@ async def execute_supervisor_decide(orchestrator: Any, state: Dict[str, Any]) ->
         "resume_from_step": resume_from_step if should_pause_for_review else "",
         **convo_state,
     }
-    mailbox = clone_mailbox(state.get("agent_mailbox") or {})
+    mailbox = clone_mailbox(flat_state.get("agent_mailbox") or {})
     if "agent_commands" in route_decision:
         commands = dict(route_decision.get("agent_commands") or {})
+        commands = orchestrator._inject_followup_objectives_into_commands(
+            commands,
+            top_k_hypotheses=list(flat_state.get("top_k_hypotheses") or []),
+            round_objectives=list(flat_state.get("round_objectives") or []),
+            round_gap_summary=list(flat_state.get("round_gap_summary") or []),
+        )
         result["agent_commands"] = commands
         # supervisor 如果在这一步追加了新命令，要同步写回 mailbox，供后续专家节点消费。
         for target, command in commands.items():
@@ -152,5 +159,5 @@ async def execute_supervisor_decide(orchestrator: Any, state: Dict[str, Any]) ->
             )
     result["agent_mailbox"] = compact_mailbox(mailbox)
     # 返回前补一份 structured snapshot，保证后续节点拿到的是一致的状态视图。
-    merged_preview = {**dict(state), **result}
+    merged_preview = {**dict(flat_state), **result}
     return {**result, **structured_state_snapshot(merged_preview)}

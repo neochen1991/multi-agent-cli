@@ -1,0 +1,48 @@
+{
+  "id": "fixture_inc_21",
+  "title": "order create 502 with misleading db lock signals",
+  "scenario": "conflicting-evidence-code-root-cause",
+  "symptom": "2026-03-10 10:07 起 POST /api/v1/orders 大量 502/504，热点 sku_10017 下单 RT 从 300ms 升至 12s+，库存预占偶发成功但订单创建失败；数据库锁等待、Top SQL 与连接池告警同时出现，容易误判为数据库根因。",
+  "log_excerpt": "2026-03-10T10:08:09.944+08:00 WARN  [order-service] promotionClient.checkQuota cost=1847ms sku=sku_10017 traceId=8fa1a2\n2026-03-10T10:08:10.118+08:00 WARN  [order-service] inventory reservation update waiting lock sku=sku_10017 txId=7812231\n2026-03-10T10:08:11.203+08:00 ERROR [order-service] HikariPool-1 - Connection is not available, request timed out after 3000ms\n2026-03-10T10:08:11.205+08:00 ERROR [order-service] CannotGetJdbcConnectionException: Failed to obtain JDBC Connection\n2026-03-10T10:08:12.301+08:00 ERROR [gateway] upstream request timeout service=order-service path=/api/v1/orders status=502\nDB wait summary: row lock wait count 15/min -> 2200/min, top sql=update inventory_reservation set reserved = reserved + ? where sku_id = ?; explain remains on idx_inventory_reservation_sku_id; promotion-service p95 80ms -> 1.8s",
+  "stacktrace": "org.springframework.jdbc.CannotGetJdbcConnectionException: Failed to obtain JDBC Connection\n\tat org.springframework.jdbc.datasource.DataSourceUtils.getConnection(DataSourceUtils.java:81)\n\tat com.acme.order.repository.InventoryReservationRepository.reserve(InventoryReservationRepository.java:57)\nCaused by: java.sql.SQLTransientConnectionException: HikariPool-1 - Connection is not available, request timed out after 3000ms\n\tat com.zaxxer.hikari.pool.HikariPool.createTimeoutException(HikariPool.java:696)\n\tat com.zaxxer.hikari.pool.HikariPool.getConnection(HikariPool.java:181)",
+  "expected_root_cause": "发布变更把 promotionClient.checkQuota 远程调用放进下单事务内，导致事务边界过长、连接持有时间增加；热点 SKU 下数据库锁等待被放大，最终触发连接池耗尽与 502。",
+  "expected_domain": "订单",
+  "expected_aggregate": "Order",
+  "owner": "sre-benchmark",
+  "tags": [
+    "golden",
+    "conflicting-evidence",
+    "code-root-cause",
+    "db-amplifier",
+    "transaction-scope"
+  ],
+  "golden": true,
+  "expected_causal_chain": [
+    "代码变更把远程促销校验放进事务",
+    "事务持有连接与锁时间变长",
+    "热点 sku_10017 触发 inventory_reservation 行锁等待放大",
+    "HikariPool 活跃连接打满并出现获取超时",
+    "order-service RT 激增并由 gateway 返回 502/504"
+  ],
+  "must_include": [
+    "主因是代码级事务边界错误或远程调用进入事务",
+    "数据库锁等待是放大器而不是原发根因",
+    "需要明确连接池耗尽是结果不是起点"
+  ],
+  "must_exclude": [
+    "数据库热点锁竞争是唯一主因",
+    "索引失效或全表扫描是主因",
+    "仅把连接池配置过小当成主因"
+  ],
+  "distractor_root_causes": [
+    "inventory_reservation 热点行锁就是根因",
+    "数据库索引失效导致慢 SQL",
+    "流量突增导致连接池容量不足"
+  ],
+  "scoring_rubric": {
+    "root_cause_correct": 4,
+    "causal_chain_complete": 3,
+    "explicitly_rules_out_db_as_primary": 2,
+    "uses_cross_source_evidence": 1
+  }
+}

@@ -7,10 +7,29 @@
 
 - 已完成底层编排从旧方案迁移到 **LangGraph Runtime**。
 - 主 Agent（`ProblemAnalysisAgent`）负责任务拆解、命令分发、收敛决策。
+- 运行时已落地结构化状态、`agent_local_state` 私有工作记忆和 checkpoint / resume 基础能力。
+- 专家 Prompt 已统一切换到 context envelope：
+  - `shared_context`
+  - `focused_context`
+  - `tool_context`
+  - `peer_context`
+  - `mailbox_context`
+  - `work_log_context`
+- `analysis_depth_mode` 不再只是轮次别名，当前会同时影响：
+  - 默认轮次
+  - 专家集合
+  - token / timeout 预算
+  - 收口质量门槛
+- `LogAgent / CodeAgent / DatabaseAgent` 已接入多步调查子流程；`deep` 模式下会增加反证复核。
+- 无批判模式下已支持：
+  - 重复并行分析拦截
+  - 基于证据缺口的定向追问
+  - 对已形成有效覆盖专家的直接收口
 - 前端分析页拆分为三块：
   - `资产映射`
   - `辩论过程`
   - `辩论结果`
+- 历史记录页已展示每个任务的 `开始时间`，优先使用分析会话真正启动时间。
 - 工具调用已支持：
   - 开关控制
   - 命令驱动（由主 Agent 指令决定是否调用）
@@ -18,7 +37,8 @@
 
 ## Code Wiki
 
-- 完整代码架构与实现说明：`docs/wiki/code-wiki.md`
+- 当前主文档：`docs/wiki/code_wiki_v2.md`
+- 旧版新手说明：`docs/wiki/code-wiki.md`
 
 ## 2. 架构概览
 
@@ -94,6 +114,7 @@ sequenceDiagram
 - `backend/app/runtime/langgraph/`：节点、路由、状态、执行器
 - `backend/app/services/debate_service.py`：会话执行与事件沉淀
 - `backend/app/services/agent_tool_context_service.py`：Agent 工具上下文、门禁、审计
+- `backend/app/runtime/langgraph/services/state_transition_service.py`：阶段状态回写与快照合并
 
 ### 2.3 前端
 
@@ -108,6 +129,7 @@ sequenceDiagram
 分析页关键文件：
 
 - `frontend/src/pages/Incident/index.tsx`
+- `frontend/src/pages/History/index.tsx`
 
 ## 3. Multi-Agent 角色
 
@@ -115,33 +137,44 @@ sequenceDiagram
 - `LogAgent`：日志证据分析
 - `DomainAgent`：接口到领域/聚合根/责任田映射
 - `CodeAgent`：代码路径与风险点分析
+- `DatabaseAgent`：数据库侧根因/放大链路排查
+- `MetricsAgent`：指标趋势与传播链判定
 - `CriticAgent`：质疑与证据缺口识别
 - `RebuttalAgent`：反驳与证据补强
 - `JudgeAgent`：最终裁决与建议输出
+- `VerificationAgent`：验证计划与补证动作
+- `RuleSuggestionAgent`：规则建议与案例补充
 
 ## 4. 分析流程
 
 1. 创建 Incident。
 2. 采集上下文并执行接口责任田映射。
 3. 主 Agent 先发言并下发命令（`agent_command_issued`）。
-4. 被指派 Agent 按命令决定是否调用工具，再执行 LLM 分析。
-5. 多 Agent 轮次协作（含质疑/反驳）。
-6. JudgeAgent 裁决并生成最终结果。
-7. 报告生成并可在历史记录回看全过程。
+4. 被指派 Agent 先接收自己的 context envelope，再按命令决定是否调用工具。
+5. `LogAgent / CodeAgent / DatabaseAgent` 在需要时进入多步调查子流程。
+6. 路由层按证据缺口决定是整轮并行、定向追问，还是直接切 Judge。
+7. 多 Agent 轮次协作（含质疑/反驳）。
+8. JudgeAgent 裁决并生成最终结果。
+9. 报告生成并可在历史记录回看全过程。
 
 ## 5. 工具调用机制（重点）
 
-当前支持三个专家工具入口：
+当前支持四类主要专家工具入口：
 
 - `CodeAgent`：Git 仓库检索
 - `LogAgent`：本地日志文件读取
 - `DomainAgent`：责任田 Excel/CSV 查询
+- `DatabaseAgent`：数据库快照/结构化数据库上下文
 
 设计约束：
 
 - 工具调用必须在主 Agent 下发命令后触发。
 - 命令可显式携带 `use_tool`。
 - 未配置工具的 Agent 不展示工具调用记录。
+- 工具不可用时，专家会回退到共享证据，并明确标记：
+  - `context_grounded_without_tool`
+  - `degraded`
+  - `missing`
 - 每次工具调用会输出审计信息：
   - 命令门禁决策
   - 工具执行状态
@@ -305,7 +338,14 @@ WebSocket：
 node ./scripts/smoke-e2e.mjs
 ```
 
-会覆盖：
+可通过 `SMOKE_SCENARIO` 指定典型用例：
+
+- `order-502-db-lock`
+- `order-404-route-miss`
+- `payment-timeout-upstream`
+- `order-502-transaction-scope`
+
+覆盖内容：
 
 - 首页与后端健康检查
 - Incident 创建

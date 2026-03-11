@@ -1041,7 +1041,7 @@ const DebateResultPanel: React.FC<Props> = ({
         onOk={() => void handleSaveKnowledge()}
         confirmLoading={savingKnowledge}
         width={760}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={knowledgeForm} layout="vertical">
           <Form.Item name="entry_type" label="类型" rules={[{ required: true, message: '请选择类型' }]}>

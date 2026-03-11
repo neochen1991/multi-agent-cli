@@ -492,7 +492,7 @@ const KnowledgePage: React.FC = () => {
         }}
         onOk={() => void handleSave()}
         confirmLoading={saving}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" initialValues={emptyFormValues}>
           <Row gutter={12}>

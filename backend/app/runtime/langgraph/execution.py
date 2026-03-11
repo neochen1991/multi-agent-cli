@@ -21,7 +21,13 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt,
 
 from app.config import settings
 from app.core.llm_client import LLMClient
-from app.runtime.langgraph.parsers import normalize_agent_output
+from app.runtime.langgraph.nodes.expert_subgraph import (
+    build_investigation_plan_prompt,
+    build_reflection_prompt,
+    build_synthesis_prompt,
+    should_run_expert_subgraph,
+)
+from app.runtime.langgraph.parsers import extract_mixed_json_dict, extract_readable_text, normalize_agent_output
 from app.runtime.langgraph.output_truncation import (
     save_output_reference,
     truncate_payload,
@@ -128,6 +134,181 @@ def _is_transient_llm_error(error_text: str) -> bool:
     return any(marker in lowered for marker in transient_markers)
 
 
+async def _invoke_agent_once_with_limits(
+    orchestrator: Any,
+    *,
+    spec: AgentSpec,
+    prompt: str,
+    max_tokens: int,
+    timeout_seconds: float,
+) -> AgentInvokeResult:
+    """以统一的队列与超时约束执行一次模型调用。"""
+    queue_timeout = float(orchestrator._agent_queue_timeout(spec.name))
+    session_budget = orchestrator._remaining_session_budget_seconds()
+    if session_budget is not None:
+        queue_timeout = min(queue_timeout, max(0.5, float(session_budget)))
+        timeout_seconds = min(float(timeout_seconds), max(1.0, float(session_budget) - 1.0))
+    semaphore = orchestrator._get_llm_semaphore()
+    acquired = False
+    try:
+        await asyncio.wait_for(semaphore.acquire(), timeout=queue_timeout)
+        acquired = True
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                run_agent_once,
+                orchestrator,
+                spec,
+                prompt,
+                max_tokens,
+            ),
+            timeout=timeout_seconds,
+        )
+    finally:
+        if acquired:
+            semaphore.release()
+
+
+def _normalize_investigation_memo(raw_content: str) -> Dict[str, Any]:
+    """把中间调查步骤尽量归一成 JSON 备忘录，便于继续压回最终 prompt。"""
+    parsed = extract_mixed_json_dict(raw_content)
+    if parsed:
+        return parsed
+    readable = extract_readable_text(raw_content, fallback="未获得有效调查备忘录")
+    return {"summary": readable}
+
+
+async def _run_expert_investigation_subgraph(
+    orchestrator: Any,
+    *,
+    spec: AgentSpec,
+    prompt: str,
+    round_number: int,
+    loop_round: int,
+    execution_context: Dict[str, Any] | None,
+    agent_max_tokens: int,
+) -> str:
+    """为关键专家补一层“计划 -> 复核 -> 综合”的最小闭环。"""
+    analysis_depth_mode = str(getattr(orchestrator, "analysis_depth_mode", "standard") or "standard").strip().lower()
+    fast_execution_mode = bool(
+        getattr(orchestrator, "_is_fast_execution_mode", lambda: False)()
+    )
+    if not should_run_expert_subgraph(
+        spec=spec,
+        execution_context=execution_context,
+        analysis_depth_mode=analysis_depth_mode,
+        fast_execution_mode=fast_execution_mode,
+    ):
+        return prompt
+
+    timeout_plan = list(orchestrator._agent_timeout_plan(spec.name) or [5.0])
+    step_timeout = float(timeout_plan[0])
+    plan_prompt = build_investigation_plan_prompt(
+        spec=spec,
+        base_prompt=prompt,
+        execution_context=execution_context,
+        analysis_depth_mode=analysis_depth_mode,
+    )
+    step_count = 2 if analysis_depth_mode == "deep" else 1
+    await orchestrator._emit_event(
+        {
+            "type": "expert_investigation_started",
+            "phase": spec.phase,
+            "agent_name": spec.name,
+            "session_id": orchestrator.session_id,
+            "loop_round": loop_round,
+            "round_number": round_number,
+            "analysis_depth_mode": analysis_depth_mode,
+            "step_count": step_count,
+        }
+    )
+    try:
+        # 第一步先让专家拆出调查假设和验证路径，避免一上来就给结论。
+        plan_result = await _invoke_agent_once_with_limits(
+            orchestrator,
+            spec=spec,
+            prompt=plan_prompt,
+            max_tokens=max(192, min(int(agent_max_tokens or 256), 320)),
+            timeout_seconds=step_timeout,
+        )
+        plan_memo = _normalize_investigation_memo(str(plan_result.content or ""))
+        await orchestrator._emit_event(
+            {
+                "type": "expert_investigation_step_completed",
+                "phase": spec.phase,
+                "agent_name": spec.name,
+                "session_id": orchestrator.session_id,
+                "loop_round": loop_round,
+                "round_number": round_number,
+                "stage": "plan",
+                "response_preview": str(plan_result.content or "")[:800],
+                "memo_preview": plan_memo,
+            }
+        )
+
+        reflection_memo: Dict[str, Any] | None = None
+        if analysis_depth_mode == "deep":
+            # deep 模式要求额外做一次反证复核，尽量避免线性确认偏误。
+            reflection_prompt = build_reflection_prompt(
+                spec=spec,
+                base_prompt=prompt,
+                investigation_memo=plan_memo,
+            )
+            reflection_result = await _invoke_agent_once_with_limits(
+                orchestrator,
+                spec=spec,
+                prompt=reflection_prompt,
+                max_tokens=max(160, min(int(agent_max_tokens or 256), 280)),
+                timeout_seconds=step_timeout,
+            )
+            reflection_memo = _normalize_investigation_memo(str(reflection_result.content or ""))
+            await orchestrator._emit_event(
+                {
+                    "type": "expert_investigation_step_completed",
+                    "phase": spec.phase,
+                    "agent_name": spec.name,
+                    "session_id": orchestrator.session_id,
+                    "loop_round": loop_round,
+                    "round_number": round_number,
+                    "stage": "reflection",
+                    "response_preview": str(reflection_result.content or "")[:800],
+                    "memo_preview": reflection_memo,
+                }
+            )
+
+        synthesized_prompt = build_synthesis_prompt(
+            spec=spec,
+            base_prompt=prompt,
+            investigation_memo=plan_memo,
+            reflection_memo=reflection_memo,
+        )
+        await orchestrator._emit_event(
+            {
+                "type": "expert_investigation_completed",
+                "phase": spec.phase,
+                "agent_name": spec.name,
+                "session_id": orchestrator.session_id,
+                "loop_round": loop_round,
+                "round_number": round_number,
+                "analysis_depth_mode": analysis_depth_mode,
+            }
+        )
+        return synthesized_prompt
+    except Exception as exc:
+        # 多步调查是增强能力，不应该因为中间步骤失败而让整轮分析直接中断。
+        await orchestrator._emit_event(
+            {
+                "type": "expert_investigation_failed",
+                "phase": spec.phase,
+                "agent_name": spec.name,
+                "session_id": orchestrator.session_id,
+                "loop_round": loop_round,
+                "round_number": round_number,
+                "error": str(exc).strip() or exc.__class__.__name__,
+            }
+        )
+        return prompt
+
+
 async def emit_stream_deltas(
     orchestrator: Any,
     *,
@@ -192,7 +373,8 @@ def run_agent_once(orchestrator: Any, spec: AgentSpec, prompt: str, max_tokens: 
         timeout=orchestrator._agent_http_timeout(spec.name),
         max_retries=max(0, int(settings.LLM_MAX_RETRIES)),
         max_tokens=max(128, int(max_tokens or 256)),
-        model_kwargs={"extra_body": {"thinking": {"type": "disabled"}}},
+        # 显式关闭 thinking，避免 LangChain 将 extra_body 视为未知 model_kwargs 并反复报警。
+        extra_body={"thinking": {"type": "disabled"}},
     )
     reply = llm.invoke(
         [
@@ -230,7 +412,8 @@ def run_agent_with_structured_output(
         timeout=orchestrator._agent_http_timeout(spec.name),
         max_retries=max(0, int(settings.LLM_MAX_RETRIES)),
         max_tokens=max(128, int(max_tokens or 256)),
-        model_kwargs={"extra_body": {"thinking": {"type": "disabled"}}},
+        # 结构化输出路径与 direct 路径保持一致，统一显式传 extra_body。
+        extra_body={"thinking": {"type": "disabled"}},
     )
 
     # 为不同 Agent 选择对应 schema，避免所有 Agent 共用一个过宽结构。
@@ -284,6 +467,7 @@ async def call_agent(
     round_number: int,
     loop_round: int,
     history_cards_context: Optional[list[Any]] = None,
+    execution_context: Optional[Dict[str, Any]] = None,
 ) -> DebateTurn:
     """
     执行一次完整 Agent 调用，并把模型输出归一化成 DebateTurn。
@@ -300,7 +484,15 @@ async def call_agent(
     model_name = settings.llm_model
     endpoint = orchestrator._chat_endpoint()
     agent_max_tokens = orchestrator._agent_max_tokens(spec.name)
-    attempt_prompt = prompt
+    attempt_prompt = await _run_expert_investigation_subgraph(
+        orchestrator,
+        spec=spec,
+        prompt=prompt,
+        round_number=round_number,
+        loop_round=loop_round,
+        execution_context=execution_context,
+        agent_max_tokens=agent_max_tokens,
+    )
     attempt_max_tokens = agent_max_tokens
     timeout_plan = orchestrator._agent_timeout_plan(spec.name)
     max_attempts = max(1, len(timeout_plan))
@@ -324,7 +516,7 @@ async def call_agent(
         phase=spec.phase,
         round_number=round_number,
         loop_round=loop_round,
-        prompt=prompt,
+        prompt=attempt_prompt,
         system_prompt=str(spec.system_prompt or ""),
     )
 
@@ -333,8 +525,8 @@ async def call_agent(
         {
             "type": "llm_call_started",
             **event_common,
-            "prompt_preview": prompt[:1200],
-            "prompt_length": len(prompt),
+            "prompt_preview": attempt_prompt[:1200],
+            "prompt_length": len(attempt_prompt),
             "max_tokens": agent_max_tokens,
             "timeout_plan": timeout_plan,
             "max_attempts": max_attempts,
@@ -345,8 +537,8 @@ async def call_agent(
         {
             "type": "llm_request_started",
             **event_common,
-            "prompt_preview": prompt[:1200],
-            "prompt_length": len(prompt),
+            "prompt_preview": attempt_prompt[:1200],
+            "prompt_length": len(attempt_prompt),
             "max_tokens": agent_max_tokens,
             "timeout_plan": timeout_plan,
             "max_attempts": max_attempts,
@@ -362,8 +554,8 @@ async def call_agent(
                 "model": model_name,
                 "max_tokens": agent_max_tokens,
                 "message_count": 2,
-                "prompt_length": len(prompt),
-                "prompt_preview": prompt[:1200],
+                "prompt_length": len(attempt_prompt),
+                "prompt_preview": attempt_prompt[:1200],
                 **prompt_refs,
             },
             **prompt_refs,

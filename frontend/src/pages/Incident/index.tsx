@@ -15,6 +15,8 @@ import { useParams, useSearchParams } from 'react-router-dom';
 import {
   buildDebateWsUrl,
   debateApi,
+  getDefaultMaxRoundsForDepthMode,
+  getStoredAnalysisDepthMode,
   incidentApi,
   reportApi,
   type DebateDetail,
@@ -146,7 +148,10 @@ const IncidentPage: React.FC = () => {
   const [selectedNetworkStep, setSelectedNetworkStep] = useState<AgentNetworkStep | null>(null);
   const [activeProcessTab, setActiveProcessTab] = useState('dialogue');
   const [running, setRunning] = useState(false);
-  const [debateMaxRounds, setDebateMaxRounds] = useState<number>(1);
+  // 新会话默认轮次直接跟随设置页保存的分析深度模式，避免每次都手动同步。
+  const [debateMaxRounds, setDebateMaxRounds] = useState<number>(() =>
+    getDefaultMaxRoundsForDepthMode(getStoredAnalysisDepthMode()),
+  );
   const [executionMode, setExecutionMode] = useState<'standard' | 'quick' | 'background' | 'async'>('standard');
   const [logUploadMeta, setLogUploadMeta] = useState<{ name: string; size: number; lines: number } | null>(null);
   const [bootstrapping, setBootstrapping] = useState(false);

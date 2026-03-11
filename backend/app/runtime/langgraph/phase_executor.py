@@ -63,6 +63,7 @@ class PhaseExecutor:
         agent_commands: Optional[Dict[str, Dict[str, Any]]] = None,
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         agent_mailbox: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        agent_local_state: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> None:
         """
         执行 analysis 阶段的并行分析波次。
@@ -91,6 +92,7 @@ class PhaseExecutor:
         if not parallel_specs:
             return
         mailbox = agent_mailbox if agent_mailbox is not None else {}
+        local_state = agent_local_state if agent_local_state is not None else {}
         round_cursor = len(orchestrator.turns) + 1
         parallel_history = list(history_cards)
         # round_plans 保存“准备执行但尚未真正调用 LLM”的计划项，
@@ -148,6 +150,11 @@ class PhaseExecutor:
                 loop_round=loop_round,
                 round_number=round_number,
                 assigned_command=assigned_command,
+            )
+            context_with_tools = orchestrator._attach_agent_local_context(
+                context_with_tools=context_with_tools,
+                agent_name=spec.name,
+                agent_local_state=local_state,
             )
             effective_spec = orchestrator._apply_tool_switch_to_spec(
                 spec=spec,
@@ -213,6 +220,7 @@ class PhaseExecutor:
                         round_number=int(item["round_number"]),
                         loop_round=loop_round,
                         history_cards_context=history_cards,
+                        execution_context=item.get("context_with_tools"),
                     )
                 )
                 for item in batch_inputs
@@ -284,6 +292,13 @@ class PhaseExecutor:
             if bool((turn.output_content or {}).get("degraded")):
                 degraded_count += 1
             await orchestrator._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
+            updated_local_state = orchestrator._build_agent_local_state_update(
+                agent_name=spec.name,
+                turn=turn,
+                agent_local_state=local_state,
+            )
+            local_state.clear()
+            local_state.update(updated_local_state)
             fan_in_items.append(
                 {
                     "agent_name": spec.name,
@@ -320,7 +335,12 @@ class PhaseExecutor:
                 )
             conclusion = str((turn.output_content or {}).get("conclusion") or "")[:280]
             evidence = list((turn.output_content or {}).get("evidence_chain") or [])[:3]
-            for receiver in ["ProblemAnalysisAgent", *target_names]:
+            for receiver in orchestrator._evidence_recipients(
+                sender=spec.name,
+                turn=turn,
+                assigned_command=assigned_command,
+                context_with_tools=context_with_tools,
+            ):
                 if receiver == spec.name:
                     continue
                 enqueue_message(
@@ -373,6 +393,7 @@ class PhaseExecutor:
         history_cards: List[AgentEvidence],
         dialogue_items: Optional[List[Dict[str, Any]]] = None,
         agent_mailbox: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        agent_local_state: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> None:
         """
         执行 analysis 后的协作阶段。
@@ -389,6 +410,7 @@ class PhaseExecutor:
         if not parallel_specs:
             return
         mailbox = agent_mailbox if agent_mailbox is not None else {}
+        local_state = agent_local_state if agent_local_state is not None else {}
         # 协作阶段只围绕“本轮已有结论”的专家展开，不重新拉起一整轮分析。
         peer_cards = orchestrator._latest_cards_for_agents(
             history_cards=history_cards,
@@ -396,7 +418,7 @@ class PhaseExecutor:
             limit=orchestrator.COLLABORATION_PEER_LIMIT,
         )
         round_cursor = len(orchestrator.turns) + 1
-        collab_inputs: List[tuple[AgentSpec, int, str, List[Dict[str, Any]]]] = []
+        collab_inputs: List[Dict[str, Any]] = []
         for spec in parallel_specs:
             round_number = round_cursor
             round_cursor += 1
@@ -407,6 +429,11 @@ class PhaseExecutor:
                 loop_round=loop_round,
                 round_number=round_number,
                 assigned_command=None,
+            )
+            context_with_tools = orchestrator._attach_agent_local_context(
+                context_with_tools=context_with_tools,
+                agent_name=spec.name,
+                agent_local_state=local_state,
             )
             effective_spec = orchestrator._apply_tool_switch_to_spec(
                 spec=spec,
@@ -420,7 +447,15 @@ class PhaseExecutor:
                 dialogue_items=dialogue_items,
                 inbox_messages=inbox_messages,
             )
-            collab_inputs.append((effective_spec, round_number, prompt, inbox_messages))
+            collab_inputs.append(
+                {
+                    "spec": effective_spec,
+                    "round_number": round_number,
+                    "prompt": prompt,
+                    "inbox_messages": inbox_messages,
+                    "context_with_tools": context_with_tools,
+                }
+            )
 
         # 协作阶段也要成组发事件，方便前端区分“第一次分析”和“二次协作”。
         await orchestrator._emit_event(
@@ -429,7 +464,7 @@ class PhaseExecutor:
                 "phase": "analysis",
                 "loop_round": loop_round,
                 "session_id": orchestrator.session_id,
-                "agents": [spec.name for spec, _, _, _ in collab_inputs],
+                "agents": [str(item["spec"].name) for item in collab_inputs],
             }
         )
 
@@ -438,21 +473,21 @@ class PhaseExecutor:
             "collaboration_phase_executing",
             session_id=orchestrator.session_id,
             loop_round=loop_round,
-            agents=[spec.name for spec, _, _, _ in collab_inputs],
+            agents=[str(item["spec"].name) for item in collab_inputs],
         )
 
         priority_batches = [list(batch) for batch in getattr(orchestrator, "ANALYSIS_PRIORITY_BATCHES", ())]
         # 协作阶段比 analysis 更克制，默认批次更小，优先保障收口链路。
         batch_limit = int(orchestrator._analysis_batch_limit(collaboration=True))
         batch_names = self._analysis_batches(
-            [spec.name for spec, _, _, _ in collab_inputs],
+            [str(item["spec"].name) for item in collab_inputs],
             priority_batches,
             batch_limit,
         )
         collab_result_map: Dict[str, Any] = {}
         # 协作阶段同样使用批次控制，避免分析刚结束又把收口链路挤出队列。
         for batch_index, names in enumerate(batch_names, start=1):
-            batch_inputs = [item for item in collab_inputs if item[0].name in set(names)]
+            batch_inputs = [item for item in collab_inputs if str(item["spec"].name) in set(names)]
             await orchestrator._emit_event(
                 {
                     "type": "parallel_analysis_collaboration_batch_started",
@@ -467,14 +502,15 @@ class PhaseExecutor:
             collab_tasks = [
                 asyncio.create_task(
                     orchestrator._agent_runner.run_agent(
-                        spec=spec,
-                        prompt=prompt,
-                        round_number=round_number,
+                        spec=item["spec"],
+                        prompt=item["prompt"],
+                        round_number=int(item["round_number"]),
                         loop_round=loop_round,
                         history_cards_context=history_cards,
+                        execution_context=item.get("context_with_tools"),
                     )
                 )
-                for spec, round_number, prompt, _ in batch_inputs
+                for item in batch_inputs
             ]
             batch_results = await asyncio.gather(*collab_tasks, return_exceptions=True)
             await orchestrator._emit_event(
@@ -489,7 +525,7 @@ class PhaseExecutor:
                 }
             )
             for item, result in zip(batch_inputs, batch_results):
-                collab_result_map[item[0].name] = result
+                collab_result_map[str(item["spec"].name)] = result
 
         collab_duration = (datetime.utcnow() - collab_start_time).total_seconds()
         logger.info(
@@ -502,7 +538,10 @@ class PhaseExecutor:
 
         success_count = 0
         error_count = 0
-        for spec, round_number, prompt, _ in collab_inputs:
+        for item in collab_inputs:
+            spec = item["spec"]
+            round_number = int(item["round_number"])
+            prompt = str(item["prompt"])
             result = collab_result_map.get(spec.name)
             if isinstance(result, Exception):
                 error_count += 1
@@ -525,9 +564,21 @@ class PhaseExecutor:
                 success_count += 1
                 turn = result
             await orchestrator._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
+            updated_local_state = orchestrator._build_agent_local_state_update(
+                agent_name=spec.name,
+                turn=turn,
+                agent_local_state=local_state,
+            )
+            local_state.clear()
+            local_state.update(updated_local_state)
             conclusion = str((turn.output_content or {}).get("conclusion") or "")[:280]
             evidence = list((turn.output_content or {}).get("evidence_chain") or [])[:3]
-            for receiver in ["ProblemAnalysisAgent", *list(orchestrator.PARALLEL_ANALYSIS_AGENTS)]:
+            for receiver in orchestrator._evidence_recipients(
+                sender=spec.name,
+                turn=turn,
+                assigned_command=None,
+                context_with_tools=item.get("context_with_tools"),
+            ):
                 if receiver == spec.name:
                     continue
                 enqueue_message(

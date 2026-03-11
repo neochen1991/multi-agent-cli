@@ -11,11 +11,13 @@ from app.runtime.langgraph.state import AgentSpec
 
 class _FakeLLM:
     """为测试场景提供FakeLLM辅助对象。"""
-    
+    last_kwargs = None
+
     def __init__(self, *args, **kwargs):
         """为测试场景提供init辅助逻辑。"""
-        
-        _ = args, kwargs
+
+        _ = args
+        type(self).last_kwargs = kwargs
 
     def invoke(self, messages):
         """为测试场景提供invoke辅助逻辑。"""
@@ -94,23 +96,22 @@ def _spec_with_tools() -> AgentSpec:
     )
 
 
-def test_run_agent_once_prefers_factory_when_available(monkeypatch):
-    """验证runAgentonceprefers工厂当available。"""
-    
+def test_run_agent_once_uses_direct_even_when_factory_is_available(monkeypatch):
+    """run_agent_once 现在是纯 direct 入口，不再承担 factory 分支。"""
+
     monkeypatch.setattr("app.runtime.langgraph.execution.ChatOpenAI", _FakeLLM)
     monkeypatch.setattr(settings, "AGENT_USE_FACTORY", True)
     orchestrator = _FakeOrchestrator(factory=_FakeFactory(content="factory-mode-reply"))
 
     result = run_agent_once(orchestrator, _spec_with_tools(), "prompt", 256)
 
-    assert result.invoke_mode == "factory"
-    assert "factory-mode-reply" in result.content
-    assert result.factory_error == ""
+    assert result.invoke_mode == "direct"
+    assert "direct-mode-reply" in result.content
 
 
 def test_run_agent_once_falls_back_to_direct_when_factory_fails(monkeypatch):
-    """验证runAgentoncefallsbacktodirect当工厂fails。"""
-    
+    """即使外部 factory 不可用，direct 入口也应保持可执行。"""
+
     monkeypatch.setattr("app.runtime.langgraph.execution.ChatOpenAI", _FakeLLM)
     monkeypatch.setattr(settings, "AGENT_USE_FACTORY", True)
     orchestrator = _FakeOrchestrator(factory=_FakeFactory(fail=True))
@@ -119,7 +120,6 @@ def test_run_agent_once_falls_back_to_direct_when_factory_fails(monkeypatch):
 
     assert result.invoke_mode == "direct"
     assert "direct-mode-reply" in result.content
-    assert "factory-create-failed" in result.factory_error
 
 
 def test_run_agent_once_uses_direct_when_factory_disabled(monkeypatch):
@@ -133,3 +133,19 @@ def test_run_agent_once_uses_direct_when_factory_disabled(monkeypatch):
 
     assert result.invoke_mode == "direct"
     assert "direct-mode-reply" in result.content
+
+
+def test_run_agent_once_passes_extra_body_explicitly(monkeypatch):
+    """direct 模式应显式传 extra_body，避免 LangChain 运行时 warning。"""
+
+    _FakeLLM.last_kwargs = None
+    monkeypatch.setattr("app.runtime.langgraph.execution.ChatOpenAI", _FakeLLM)
+    monkeypatch.setattr(settings, "AGENT_USE_FACTORY", False)
+    orchestrator = _FakeOrchestrator(factory=_FakeFactory(content="factory-mode-reply"))
+
+    result = run_agent_once(orchestrator, _spec_with_tools(), "prompt", 256)
+
+    assert result.invoke_mode == "direct"
+    assert _FakeLLM.last_kwargs is not None
+    assert _FakeLLM.last_kwargs.get("extra_body") == {"thinking": {"type": "disabled"}}
+    assert "model_kwargs" not in _FakeLLM.last_kwargs

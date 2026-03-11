@@ -130,6 +130,32 @@ def merge_context(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]
     return result
 
 
+def merge_agent_local_state(left: Dict[str, Dict[str, Any]], right: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """
+    合并各 Agent 的私有工作记忆。
+
+    这里不是简单替换整个字典，而是按 agent_name 粒度做浅合并，
+    这样单个 Agent 更新自己的私有记忆时，不会覆盖其他 Agent 的状态。
+    """
+    if left is None:
+        return right or {}
+    if right is None:
+        return left or {}
+    merged: Dict[str, Dict[str, Any]] = {
+        str(agent_name): dict(payload or {})
+        for agent_name, payload in dict(left or {}).items()
+    }
+    for agent_name, payload in dict(right or {}).items():
+        key = str(agent_name or "").strip()
+        if not key:
+            continue
+        merged[key] = {
+            **dict(merged.get(key) or {}),
+            **dict(payload or {}),
+        }
+    return merged
+
+
 def take_latest(left: Any, right: Any) -> Any:
     """
     取最新值的 Reducer。
@@ -190,6 +216,7 @@ class PhaseState(TypedDict, total=False):
     executed_rounds: int
     consensus_reached: bool
     continue_next_round: bool
+    debate_stability_score: float
 
 
 class RoutingState(TypedDict, total=False):
@@ -208,6 +235,8 @@ class RoutingState(TypedDict, total=False):
     human_review_reason: str
     human_review_payload: Dict[str, Any]
     resume_from_step: str
+    round_objectives: List[str]
+    round_gap_summary: List[str]
 
 
 class OutputState(TypedDict, total=False):
@@ -219,6 +248,9 @@ class OutputState(TypedDict, total=False):
     claims: List[Dict[str, Any]]
     open_questions: List[str]
     final_payload: Dict[str, Any]
+    top_k_hypotheses: List[Dict[str, Any]]
+    evidence_coverage: Dict[str, Any]
+    agent_local_state: Dict[str, Dict[str, Any]]
 
 
 _PHASE_KEY_MAP: Dict[str, str] = {
@@ -226,6 +258,7 @@ _PHASE_KEY_MAP: Dict[str, str] = {
     "executed_rounds": "executed_rounds",
     "consensus_reached": "consensus_reached",
     "continue_next_round": "continue_next_round",
+    "debate_stability_score": "debate_stability_score",
 }
 
 _ROUTING_KEY_MAP: Dict[str, str] = {
@@ -242,6 +275,8 @@ _ROUTING_KEY_MAP: Dict[str, str] = {
     "human_review_reason": "human_review_reason",
     "human_review_payload": "human_review_payload",
     "resume_from_step": "resume_from_step",
+    "round_objectives": "round_objectives",
+    "round_gap_summary": "round_gap_summary",
 }
 
 _OUTPUT_KEY_MAP: Dict[str, str] = {
@@ -251,6 +286,9 @@ _OUTPUT_KEY_MAP: Dict[str, str] = {
     "claims": "claims",
     "open_questions": "open_questions",
     "final_payload": "final_payload",
+    "top_k_hypotheses": "top_k_hypotheses",
+    "evidence_coverage": "evidence_coverage",
+    "agent_local_state": "agent_local_state",
 }
 
 
@@ -290,6 +328,13 @@ def flatten_structured_state_view(state: Mapping[str, Any]) -> Dict[str, Any]:
             flat[flat_key] = output.get(nested_key)
         elif flat_key in payload:
             flat[flat_key] = payload.get(flat_key)
+    # 除 phase/routing/output 三个结构化容器外，其余顶层字段也需要透传，
+    # 否则 `context` / `context_summary` / `messages` 这类图初始输入会在兼容层里被吞掉，
+    # 导致首轮 commander 和后续专家只能看到“空上下文”。
+    for key, value in payload.items():
+        if key in {"phase_state", "routing_state", "output_state"}:
+            continue
+        flat.setdefault(str(key), value)
     return flat
 
 
@@ -493,6 +538,7 @@ class DebateExecState(DebateMessagesState):
     # 是否继续下一回合（取最新）
     # 控制多回合循环
     continue_next_round: Annotated[bool, take_latest]
+    debate_stability_score: Annotated[float, take_latest]
 
     # ==================== 路由控制 ====================
 
@@ -547,6 +593,8 @@ class DebateExecState(DebateMessagesState):
 
     # 审核通过后的恢复步骤（取最新）
     resume_from_step: Annotated[str, take_latest]
+    round_objectives: Annotated[List[str], take_latest]
+    round_gap_summary: Annotated[List[str], take_latest]
 
     # ==================== 输出 ====================
 
@@ -557,6 +605,10 @@ class DebateExecState(DebateMessagesState):
     # 未决问题列表（取最新快照）
     # 记录尚未解决的问题，引导后续分析
     open_questions: Annotated[List[str], take_latest]
+    top_k_hypotheses: Annotated[List[Dict[str, Any]], take_latest]
+    evidence_coverage: Annotated[Dict[str, Any], take_latest]
+    # 各 Agent 的私有工作记忆，只允许当前 Agent 或主控逻辑按需读取。
+    agent_local_state: Annotated[Dict[str, Dict[str, Any]], merge_agent_local_state]
 
 
 # ============================================================================
@@ -666,6 +718,7 @@ def create_initial_state(
             "executed_rounds": 0,
             "consensus_reached": False,
             "continue_next_round": True,
+            "debate_stability_score": 0.0,
         },
         routing_state={
             "next_step": "",
@@ -681,6 +734,8 @@ def create_initial_state(
             "human_review_reason": "",
             "human_review_payload": {},
             "resume_from_step": "",
+            "round_objectives": [],
+            "round_gap_summary": [],
         },
         output_state={
             "history_cards": [],
@@ -689,6 +744,9 @@ def create_initial_state(
             "claims": [],
             "open_questions": [],
             "final_payload": {},
+            "top_k_hypotheses": [],
+            "evidence_coverage": {},
+            "agent_local_state": {},
         },
         history_cards=[],
         agent_outputs={},
@@ -699,6 +757,7 @@ def create_initial_state(
         executed_rounds=0,
         consensus_reached=False,
         continue_next_round=True,
+        debate_stability_score=0.0,
         agent_commands={},
         next_step="",
         round_start_turn_index=0,
@@ -712,7 +771,12 @@ def create_initial_state(
         human_review_reason="",
         human_review_payload={},
         resume_from_step="",
+        round_objectives=[],
+        round_gap_summary=[],
         final_payload={},
+        top_k_hypotheses=[],
+        evidence_coverage={},
+        agent_local_state={},
     )
 
 
@@ -733,9 +797,12 @@ def get_state_summary(state: DebateExecState) -> Dict[str, Any]:
         "agent_outputs_count": len(state.get("agent_outputs", {})),
         "evidence_chain_count": len(state.get("evidence_chain", [])),
         "consensus_reached": state.get("consensus_reached", False),
+        "debate_stability_score": state.get("debate_stability_score", 0.0),
         "supervisor_stop_requested": state.get("supervisor_stop_requested", False),
         "next_step": state.get("next_step", ""),
         "agent_mailbox_targets": len(state.get("agent_mailbox", {})),
+        "top_k_hypotheses_count": len(state.get("top_k_hypotheses", [])),
+        "agent_local_state_count": len(state.get("agent_local_state", {})),
         "phase_state_keys": list((state.get("phase_state") or {}).keys()),
         "routing_state_keys": list((state.get("routing_state") or {}).keys()),
         "output_state_keys": list((state.get("output_state") or {}).keys()),
@@ -758,6 +825,7 @@ def structured_state_snapshot(state: Mapping[str, Any]) -> Dict[str, Dict[str, A
         "executed_rounds": int(flat.get("executed_rounds") or 0),
         "consensus_reached": bool(flat.get("consensus_reached") or False),
         "continue_next_round": bool(flat.get("continue_next_round") or False),
+        "debate_stability_score": float(flat.get("debate_stability_score") or 0.0),
     }
     routing_state: RoutingState = {
         "next_step": str(flat.get("next_step") or ""),
@@ -773,6 +841,8 @@ def structured_state_snapshot(state: Mapping[str, Any]) -> Dict[str, Dict[str, A
         "human_review_reason": str(flat.get("human_review_reason") or ""),
         "human_review_payload": dict(flat.get("human_review_payload") or {}),
         "resume_from_step": str(flat.get("resume_from_step") or ""),
+        "round_objectives": list(flat.get("round_objectives") or []),
+        "round_gap_summary": list(flat.get("round_gap_summary") or []),
     }
     output_state: OutputState = {
         "history_cards": list(flat.get("history_cards") or []),
@@ -781,6 +851,9 @@ def structured_state_snapshot(state: Mapping[str, Any]) -> Dict[str, Dict[str, A
         "claims": list(flat.get("claims") or []),
         "open_questions": list(flat.get("open_questions") or []),
         "final_payload": dict(flat.get("final_payload") or {}),
+        "top_k_hypotheses": list(flat.get("top_k_hypotheses") or []),
+        "evidence_coverage": dict(flat.get("evidence_coverage") or {}),
+        "agent_local_state": dict(flat.get("agent_local_state") or {}),
     }
     return {
         "phase_state": phase_state,
@@ -812,6 +885,7 @@ def build_session_init_update(max_discussion_steps: int) -> Dict[str, Any]:
         "executed_rounds": 0,
         "current_round": 0,
         "continue_next_round": False,
+        "debate_stability_score": 0.0,
         "agent_commands": {},
         "next_step": "",
         "round_start_turn_index": 0,
@@ -825,6 +899,11 @@ def build_session_init_update(max_discussion_steps: int) -> Dict[str, Any]:
         "human_review_reason": "",
         "human_review_payload": {},
         "resume_from_step": "",
+        "round_objectives": [],
+        "round_gap_summary": [],
+        "top_k_hypotheses": [],
+        "evidence_coverage": {},
+        "agent_local_state": {},
     }
     return sync_structured_state(seed)
 

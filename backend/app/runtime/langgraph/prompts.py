@@ -19,7 +19,7 @@ _STRICT_OUTPUT_RULES = (
     "输出协议：\n"
     "1) 只输出一个 JSON 对象；\n"
     "2) chat_message 用自然语言短句；\n"
-    "3) 证据不足时降低 confidence（<=0.55）并补 next_checks；\n"
+    "3) 证据不足时降低 confidence（<=0.55）并补 next_checks；若共享上下文已给出明确日志/代码/数据库证据，可保留中等置信度（0.56~0.75），但必须写清受限边界；\n"
     "4) 有冲突证据时写 counter_evidence。\n"
 )
 
@@ -55,6 +55,8 @@ def _tool_limited_instruction(context: Dict[str, Any], *, to_json: ToJsonFn) -> 
         "工具受限说明：\n"
         "当前命令允许你使用工具，但工具不可用。你仍然必须基于现有证据完成分析，"
         "同时在 analysis/conclusion/next_checks 中明确写出缺失证据和后续补采动作。\n"
+        "如果 shared_context / focused_context 已经提供了明确日志、代码 diff、数据库等待或指标证据，"
+        "不要机械把 confidence 压到 0.45；应把它写成“基于已提供证据的受限但可用结论”。\n"
         "不要假装已经完成实时取证，不要把受限推理包装成已验证结论。\n"
         f"```json\n{to_json(limited_ctx)}\n```\n\n"
     )
@@ -66,6 +68,60 @@ def _focused_context_block(context: Dict[str, Any], *, to_json: ToJsonFn) -> str
     if not isinstance(focused, dict) or not focused:
         return ""
     return f"Agent 专属分析上下文：\n```json\n{to_json(focused)}\n```\n\n"
+
+
+def _agent_local_context_block(context: Dict[str, Any], *, to_json: ToJsonFn) -> str:
+    """把当前 Agent 的私有工作记忆单独展示，避免误当成全局共识。"""
+    local_ctx = context.get("agent_local_context")
+    if not isinstance(local_ctx, dict) or not local_ctx:
+        return ""
+    return f"Agent 私有工作记忆：\n```json\n{to_json(local_ctx)}\n```\n\n"
+
+
+def _shared_context_payload(context: Dict[str, Any]) -> Dict[str, Any]:
+    """提取专家 Prompt 可见的共享上下文，避免直接倾倒原始 incident 全量对象。"""
+    if not isinstance(context, dict):
+        return {}
+    shared = context.get("shared_context")
+    if isinstance(shared, dict) and shared:
+        return shared
+    hidden_keys = {
+        "shared_context",
+        "focused_context",
+        "tool_context",
+        "peer_context",
+        "mailbox_context",
+        "work_log_context",
+        "agent_local_context",
+        "incident",
+        "context",
+    }
+    return {
+        str(key): value
+        for key, value in context.items()
+        if str(key) not in hidden_keys
+    }
+
+
+def _shared_context_block(context: Dict[str, Any], *, to_json: ToJsonFn) -> str:
+    """把共享上下文单独展示，并明确这是裁剪后的会话摘要。"""
+    shared = _shared_context_payload(context)
+    if not shared:
+        return ""
+    return f"共享上下文：\n```json\n{to_json(shared)}\n```\n\n"
+
+
+def _independent_first_analysis(spec: AgentSpec) -> bool:
+    """判断当前 Agent 是否应先做独立取证，再进入同伴观点对照。"""
+    if str(spec.phase or "").strip().lower() != "analysis":
+        return False
+    return str(spec.name or "").strip() not in {
+        "ProblemAnalysisAgent",
+        "CriticAgent",
+        "RebuttalAgent",
+        "JudgeAgent",
+        "VerificationAgent",
+    }
 
 
 def coordinator_command_schema() -> Dict[str, Any]:
@@ -393,9 +449,17 @@ def build_agent_prompt(
         skill_block = f"RCA 技能模板与场景参数：\n```json\n{to_json(skill_context)}\n```\n\n"
     tool_limited_block = _tool_limited_instruction(context, to_json=to_json)
     focused_block = _focused_context_block(context, to_json=to_json)
+    local_block = _agent_local_context_block(context, to_json=to_json)
+    shared_block = _shared_context_block(context, to_json=to_json)
+    analysis_mode_intro = (
+        "先基于你的专属上下文独立取证，再按需要引用最近交互摘要补充或修正判断。\n"
+        "优先输出你亲自确认的证据，不要为了迎合同伴而放弃独立判断。\n"
+        if _independent_first_analysis(spec)
+        else "只需要基于核心观点与结论推理，不要复述全部历史，结论请简短。\n"
+    )
     return (
         f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段={spec.phase}。\n"
-        "只需要基于核心观点与结论推理，不要复述全部历史，结论请简短。\n"
+        f"{analysis_mode_intro}"
         "请以真人讨论口吻在 chat_message 中表达你的发言（1-3句），然后输出 JSON。\n\n"
         f"{_STRICT_OUTPUT_RULES}\n"
         f"{output_constraints}"
@@ -403,10 +467,11 @@ def build_agent_prompt(
         f"{dialogue_block}"
         f"{inbox_block}"
         f"{skill_block}"
+        f"{shared_block}"
         f"{focused_block}"
+        f"{local_block}"
         f"{tool_limited_block}"
         f"{work_log_block}"
-        f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
         f"最近交互摘要：\n```json\n{to_json(history_items[-5:])}\n```\n\n"
         f"请仅输出 JSON，格式示例：\n```json\n{to_json(output_schema)}\n```"
     )
@@ -463,6 +528,8 @@ def build_collaboration_prompt(
     if skill_context:
         skill_block = f"RCA 技能模板与场景参数：\n```json\n{to_json(skill_context)}\n```\n\n"
     focused_block = _focused_context_block(context, to_json=to_json)
+    local_block = _agent_local_context_block(context, to_json=to_json)
+    shared_block = _shared_context_block(context, to_json=to_json)
     return (
         f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段=analysis。\n"
         "现在进入协同复核阶段：你必须基于其他 Agent 的结论进行交叉校验并修正自己的判断。\n"
@@ -476,9 +543,10 @@ def build_collaboration_prompt(
         f"{dialogue_block}"
         f"{inbox_block}"
         f"{skill_block}"
+        f"{shared_block}"
         f"{focused_block}"
+        f"{local_block}"
         f"{work_log_block}"
-        f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
         f"同伴结论：\n```json\n{to_json(peer_items[-4:])}\n```\n\n"
         f"输出格式：\n```json\n{to_json(_normal_output_schema())}\n```"
     )
@@ -512,6 +580,8 @@ def build_peer_driven_prompt(
     if skill_context:
         skill_block = f"RCA 技能模板与场景参数：\n```json\n{to_json(skill_context)}\n```\n\n"
     focused_block = _focused_context_block(context, to_json=to_json)
+    local_block = _agent_local_context_block(context, to_json=to_json)
+    shared_block = _shared_context_block(context, to_json=to_json)
     if spec.name == "JudgeAgent":
         command_block = ""
         if assigned_command:
@@ -529,9 +599,10 @@ def build_peer_driven_prompt(
             f"{dialogue_block}"
             f"{inbox_block}"
             f"{skill_block}"
+            f"{shared_block}"
             f"{focused_block}"
+            f"{local_block}"
             f"{work_log_block}"
-            f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
             f"同伴结论：\n```json\n{to_json(peer_items[-5:])}\n```\n\n"
             f"输出格式：\n```json\n{to_json(judge_output_schema())}\n```"
         )
@@ -552,9 +623,10 @@ def build_peer_driven_prompt(
             f"{dialogue_block}"
             f"{inbox_block}"
             f"{skill_block}"
+            f"{shared_block}"
             f"{focused_block}"
+            f"{local_block}"
             f"{work_log_block}"
-            f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
             f"同伴结论：\n```json\n{to_json(peer_items[-5:])}\n```\n\n"
             f"输出格式：\n```json\n{to_json(verification_output_schema())}\n```"
         )
@@ -565,6 +637,28 @@ def build_peer_driven_prompt(
             f"\n主Agent命令：\n```json\n{to_json(assigned_command)}\n```\n"
             "你必须先在 chat_message 中确认收到主Agent命令，再给出执行结果。\n"
         )
+    if _independent_first_analysis(spec):
+        return (
+            f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段={spec.phase}。\n"
+            "先基于你的专属上下文独立取证，再参考同伴结论判断哪些观点值得采纳、补强或反驳。\n"
+            "请以真人讨论口吻在 chat_message 中先说你的独立判断（1-3句），再给结构化字段。\n"
+            "要求：\n"
+            "1) 优先输出你亲自确认的证据；\n"
+            "2) 若引用同伴观点，要明确说明采纳或保留意见；\n"
+            "3) 仅输出 JSON，内容尽量简短。\n\n"
+            f"{_STRICT_OUTPUT_RULES}\n"
+            f"{command_block}"
+            f"{dialogue_block}"
+            f"{inbox_block}"
+            f"{skill_block}"
+            f"{shared_block}"
+            f"{focused_block}"
+            f"{local_block}"
+            f"{work_log_block}"
+            f"同伴结论（仅供对照）：\n```json\n{to_json(peer_items[-5:])}\n```\n\n"
+            f"输出格式：\n```json\n{to_json(_normal_output_schema())}\n```"
+        )
+
     return (
         f"你是 {spec.name}（{spec.role}）。当前第 {loop_round}/{max_rounds} 轮，阶段={spec.phase}。\n"
         "必须基于其他 Agent 的结论进行分析，禁止独立分析。\n"
@@ -578,9 +672,10 @@ def build_peer_driven_prompt(
         f"{dialogue_block}"
         f"{inbox_block}"
         f"{skill_block}"
+        f"{shared_block}"
         f"{focused_block}"
+        f"{local_block}"
         f"{work_log_block}"
-        f"故障上下文：\n```json\n{to_json(context)}\n```\n\n"
         f"同伴结论：\n```json\n{to_json(peer_items[-5:])}\n```\n\n"
         f"输出格式：\n```json\n{to_json(_normal_output_schema())}\n```"
     )

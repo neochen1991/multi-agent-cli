@@ -102,6 +102,29 @@ def test_create_debate_session_supports_configurable_max_rounds():
     assert debate_config.get("max_rounds") == 4
 
 
+def test_create_debate_session_uses_analysis_depth_mode_defaults():
+    """验证分析深度模式会为会话填充默认轮次与模式。"""
+
+    _reset_state()
+    client = TestClient(app)
+
+    created = client.post("/api/v1/incidents/", json={"title": "depth mode defaults"})
+    assert created.status_code == 201
+    incident_id = created.json()["id"]
+
+    session_resp = client.post(f"/api/v1/debates/?incident_id={incident_id}&analysis_depth_mode=deep")
+    assert session_resp.status_code == 201
+    session_id = session_resp.json()["id"]
+
+    detail_resp = client.get(f"/api/v1/debates/{session_id}")
+    assert detail_resp.status_code == 200
+    debate_context = detail_resp.json().get("context") or {}
+    debate_config = debate_context.get("debate_config") or {}
+    assert debate_context.get("analysis_depth_mode") == "deep"
+    assert debate_config.get("analysis_depth_mode") == "deep"
+    assert int(debate_config.get("max_rounds") or 0) >= 4
+
+
 def test_cancel_debate_closes_incident():
     """验证cancel辩论closes故障。"""
     

@@ -1,8 +1,22 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://127.0.0.1:5173';
 const BACKEND_URL = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
 const WS_TIMEOUT_MS = Number(process.env.WS_TIMEOUT_MS || 720000);
 const SMOKE_SCENARIO = String(process.env.SMOKE_SCENARIO || '').trim();
 const REQUIRE_FRONTEND_HTTP = String(process.env.REQUIRE_FRONTEND_HTTP || '').trim() === 'true';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+function loadIncidentFixture(filename) {
+  const fixturePath = path.join(__dirname, '..', 'backend', 'tests', 'fixtures', 'incidents', filename);
+  return JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+}
+
+const paymentTimeoutFixture = loadIncidentFixture('inc_22.json');
 
 const scenarios = [
   {
@@ -23,11 +37,28 @@ const scenarios = [
   },
   {
     id: 'payment-timeout-upstream',
-    title: '支付接口超时',
-    description: '支付接口调用上游风控服务超时',
+    title: paymentTimeoutFixture.title,
+    description: paymentTimeoutFixture.symptom,
     service_name: 'payment-service',
+    // 中文注释：这个场景改用 richer fixture，避免只靠一条摘要日志让系统“方向猜对但证据偏弱”。
+    log_content: paymentTimeoutFixture.log_excerpt,
+    exception_stack: paymentTimeoutFixture.stacktrace,
+    trace_id: paymentTimeoutFixture.trace_id,
+    metadata: {
+      scenario: paymentTimeoutFixture.scenario,
+      expected_root_cause: paymentTimeoutFixture.expected_root_cause,
+      must_include: paymentTimeoutFixture.must_include,
+      must_exclude: paymentTimeoutFixture.must_exclude,
+    },
+  },
+  {
+    id: 'order-502-transaction-scope',
+    title: '下单 502 + 数据库锁等待误导',
+    description: '发布后下单失败，数据库锁与连接池告警明显，但真实根因是代码把远程调用放进事务导致事务边界过长',
+    service_name: 'order-service',
+    // 这个 smoke 场景刻意把数据库锁等待写得很显眼，用来验证系统是否会被表象带偏。
     log_content:
-      '2026-02-20T16:42:10+08:00 ERROR /api/v1/payments timeout after 30000ms cause=RiskService timeout retries=3',
+      '2026-03-10T10:08:09+08:00 WARN promotionClient.checkQuota cost=1847ms sku=sku_10017; 2026-03-10T10:08:10+08:00 WARN inventory reservation update waiting lock sku=sku_10017 txId=7812231; 2026-03-10T10:08:11+08:00 ERROR HikariPool connection timeout after 3000ms; 2026-03-10T10:08:12+08:00 ERROR gateway upstream timeout 502 /api/v1/orders; top sql=update inventory_reservation set reserved=reserved+? where sku_id=?; explain uses idx_inventory_reservation_sku_id',
   },
 ];
 
@@ -88,27 +119,37 @@ async function waitForDebateArtifacts(sessionId, incidentId, token = '', timeout
       lastDetail = null;
     }
 
-    try {
-      lastResult = await jsonRequest(
-        `${BACKEND_URL}/api/v1/debates/${sessionId}/result`,
-        { method: 'GET' },
-        token,
-      );
-    } catch (_) {
+    const status = String(lastDetail?.status || '');
+
+    // 只有会话进入终态后再取 result，避免运行中每 2 秒刷一次 404 污染后端日志。
+    if (status === 'completed') {
+      try {
+        lastResult = await jsonRequest(
+          `${BACKEND_URL}/api/v1/debates/${sessionId}/result`,
+          { method: 'GET' },
+          token,
+        );
+      } catch (_) {
+        lastResult = null;
+      }
+    } else {
       lastResult = null;
     }
 
-    try {
-      lastReport = await jsonRequest(
-        `${BACKEND_URL}/api/v1/reports/${incidentId}`,
-        { method: 'GET' },
-        token,
-      );
-    } catch (_) {
+    if (status === 'completed') {
+      try {
+        lastReport = await jsonRequest(
+          `${BACKEND_URL}/api/v1/reports/${incidentId}`,
+          { method: 'GET' },
+          token,
+        );
+      } catch (_) {
+        lastReport = null;
+      }
+    } else {
       lastReport = null;
     }
 
-    const status = String(lastDetail?.status || '');
     const hasResult = Boolean(lastResult && Object.keys(lastResult).length > 0);
     const hasReport = Boolean(lastReport?.report_id);
     if (status === 'completed' && hasResult && hasReport) {
@@ -211,6 +252,9 @@ async function runScenario(scenario, token) {
         service_name: scenario.service_name,
         environment: 'production',
         log_content: scenario.log_content,
+        exception_stack: scenario.exception_stack,
+        trace_id: scenario.trace_id,
+        metadata: scenario.metadata,
       }),
     },
     token,

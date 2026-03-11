@@ -1,6 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Card, Collapse, Form, Input, InputNumber, Select, Space, Switch, Typography, message } from 'antd';
-import { authApi, settingsApi, type AgentToolingConfig } from '@/services/api';
+import { Alert, Button, Card, Collapse, Divider, Form, Input, InputNumber, Select, Space, Switch, Typography, message } from 'antd';
+import {
+  authApi,
+  getDefaultMaxRoundsForDepthMode,
+  getStoredAnalysisDepthMode,
+  setStoredAnalysisDepthMode,
+  settingsApi,
+  type AgentToolingConfig,
+  type AnalysisDepthMode,
+} from '@/services/api';
 
 const { Paragraph, Text, Title } = Typography;
 const { Panel } = Collapse;
@@ -46,6 +54,8 @@ const SettingsPage: React.FC = () => {
   const [toolingLoading, setToolingLoading] = useState(false);
   const [username, setUsername] = useState('');
   const [role, setRole] = useState('');
+  // 分析深度模式是纯前端偏好，用于初始化新会话的默认轮次和分析强度。
+  const [analysisDepthMode, setAnalysisDepthMode] = useState<AnalysisDepthMode>(() => getStoredAnalysisDepthMode());
   const [tooling, setTooling] = useState<AgentToolingConfig | null>(null);
   const [toolingForm] = Form.useForm<AgentToolingConfig>();
   const token = useMemo(() => localStorage.getItem('sre_token') || '', []);
@@ -246,6 +256,28 @@ const SettingsPage: React.FC = () => {
               <Text>LLM Runtime：LangGraph Multi-Agent</Text>
               <br />
               <Text>LLM Base URL：https://coding.dashscope.aliyuncs.com/v1</Text>
+              <Divider style={{ margin: '16px 0' }} />
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                <Text strong>分析深度模式</Text>
+                <Select<AnalysisDepthMode>
+                  value={analysisDepthMode}
+                  style={{ width: 260 }}
+                  onChange={(value) => {
+                    // 设置页切换后立即落本地存储，Incident 页新建会话时直接读取。
+                    setAnalysisDepthMode(value);
+                    setStoredAnalysisDepthMode(value);
+                    message.success(`分析深度已切换为 ${value}`);
+                  }}
+                  options={[
+                    { label: 'Quick（默认 1 轮，适合快速止血）', value: 'quick' },
+                    { label: 'Standard（默认 2 轮，适合常规排障）', value: 'standard' },
+                    { label: 'Deep（默认 4 轮，适合复杂根因追问）', value: 'deep' },
+                  ]}
+                />
+                <Text type="secondary">
+                  当前模式默认辩论轮次：{getDefaultMaxRoundsForDepthMode(analysisDepthMode)}。Incident 页新建会话时会自动带上这个深度偏好。
+                </Text>
+              </Space>
             </Panel>
             <Panel key="auth" header={renderPanelHeader('登录凭证', token ? '已保存 Token' : '未登录')}>
               <Form layout="inline" onFinish={login}>

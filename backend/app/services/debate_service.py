@@ -39,7 +39,11 @@ from app.models.debate import (
     RootCauseCandidate,
 )
 from app.models.incident import Incident
-from app.flows.debate_flow import create_ai_debate_orchestrator
+from app.flows.debate_flow import (
+    create_ai_debate_orchestrator,
+    normalize_analysis_depth_mode,
+    resolve_analysis_depth_max_rounds,
+)
 from app.flows.context import context_manager
 from app.services.asset_collection_service import asset_collection_service
 from app.services.asset_service import asset_service
@@ -244,6 +248,7 @@ class DebateService:
         incident: Incident,
         max_rounds: Optional[int] = None,
         execution_mode: str = "standard",
+        analysis_depth_mode: Optional[str] = None,
         deployment_profile: str = "",
     ) -> DebateSession:
         """
@@ -279,12 +284,11 @@ class DebateService:
             execution_mode=normalized_mode,
             requested_profile=deployment_profile,
         )
-        # 确定最大轮次（优先使用传入值，否则使用策略建议）
-        strategy_suggest_rounds = int(selected_strategy.get("suggested_max_rounds") or settings.DEBATE_MAX_ROUNDS)
-        if max_rounds is not None:
-            debate_config["max_rounds"] = max(1, min(8, int(max_rounds)))
-        else:
-            debate_config["max_rounds"] = max(1, min(8, strategy_suggest_rounds))
+        # quick 执行模式始终强制走最浅分析深度，其他模式则沿用用户或设置页传入的深度偏好。
+        requested_depth_mode = normalize_analysis_depth_mode(analysis_depth_mode)
+        effective_depth_mode = "quick" if normalized_mode == "quick" else requested_depth_mode
+        debate_config["analysis_depth_mode"] = effective_depth_mode
+        debate_config["max_rounds"] = resolve_analysis_depth_max_rounds(max_rounds, effective_depth_mode)
 
         # 构建会话上下文
         session_context: Dict[str, Any] = {
@@ -294,6 +298,7 @@ class DebateService:
             "parsed_data": incident.parsed_data,
             "_event_sequence": 0,  # 事件序号计数器
             "execution_mode": normalized_mode,
+            "analysis_depth_mode": effective_depth_mode,
             "runtime_strategy": selected_strategy,
             "deployment_profile": selected_deployment,
         }
@@ -321,6 +326,7 @@ class DebateService:
             session_id=session_id,
             incident_id=incident.id,
             max_rounds=debate_config.get("max_rounds"),
+            analysis_depth_mode=effective_depth_mode,
             execution_mode=normalized_mode,
             runtime_strategy=str(selected_strategy.get("name") or ""),
             deployment_profile=str(selected_deployment.get("name") or ""),
@@ -1387,7 +1393,9 @@ class DebateService:
         orchestrator = create_ai_debate_orchestrator(
             max_rounds=max_rounds,
             consensus_threshold=settings.DEBATE_CONSENSUS_THRESHOLD,
+            analysis_depth_mode=debate_context.get("analysis_depth_mode"),
         )
+        # 先把本次会话实际采用的深度模式和轮次发回前端，保证回放和报告读取同一套配置。
 
         async def _forward_event(event: Dict[str, Any]):
             """执行forward事件相关逻辑，并为当前模块提供可复用的处理能力。"""
@@ -1404,6 +1412,7 @@ class DebateService:
                 "type": "debate_config_applied",
                 "phase": "debating",
                 "max_rounds": max_rounds,
+                "analysis_depth_mode": str(debate_context.get("analysis_depth_mode") or "standard"),
                 "consensus_threshold": settings.DEBATE_CONSENSUS_THRESHOLD,
             },
         )
@@ -2227,9 +2236,11 @@ class DebateService:
                 max_len=420,
             ) or "Unknown"
             root_cause_category = root_cause_raw.get("category")
+            root_cause_confidence = self._coerce_confidence(root_cause_raw.get("confidence"), default=0.0)
         else:
             root_cause_summary = extract_readable_text(root_cause_raw, fallback="Unknown", max_len=420) or "Unknown"
             root_cause_category = None
+            root_cause_confidence = 0.0
 
         # 构建证据链（统一标准化模型）
         evidence_chain: List[EvidenceItem] = []
@@ -2367,8 +2378,18 @@ class DebateService:
                         verification_plan.append({"objective": text, "steps": [text]})
 
         confidence = self._coerce_confidence(flow_result.get("confidence"), default=0.0)
-        if confidence <= 0.0 and isinstance(root_cause_raw, dict):
-            confidence = self._coerce_confidence(root_cause_raw.get("confidence"), default=0.0)
+        has_effective_root = (
+            bool(root_cause_summary)
+            and not self._is_placeholder_conclusion(root_cause_summary)
+            and (root_cause_confidence >= 0.45 or bool(evidence_chain))
+        )
+        if has_effective_root:
+            # 中文注释：runtime 顶层 confidence 可能仍是旧的保守门槛值，
+            # 但 final_judgment.root_cause.confidence 才是 Judge 收口后的最新裁决。
+            # 这里优先保留“有效根因”的置信度，避免结果出库时被错误压回 0.45。
+            confidence = max(confidence, root_cause_confidence)
+        elif confidence <= 0.0 and isinstance(root_cause_raw, dict):
+            confidence = root_cause_confidence
         if confidence <= 0.0:
             judge_turn = next(
                 (turn for turn in reversed(session.rounds) if turn.agent_name == "JudgeAgent"),

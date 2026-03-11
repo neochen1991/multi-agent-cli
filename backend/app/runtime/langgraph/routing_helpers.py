@@ -15,6 +15,81 @@ from app.runtime.messages import AgentEvidence
 
 KEY_EVIDENCE_AGENTS = ("LogAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent")
 
+_AGENT_KEYWORD_MAP = {
+    "LogAgent": ("日志", "log", "trace", "exception", "error", "首错", "超时", "502", "500"),
+    "CodeAgent": ("代码", "controller", "service", "dao", "事务", "调用链", "连接释放", "线程池", "method", "class"),
+    "DatabaseAgent": ("数据库", "db", "sql", "锁", "deadlock", "session", "top sql", "连接池", "hikari"),
+    "MetricsAgent": ("指标", "cpu", "内存", "latency", "rt", "p99", "监控", "qps"),
+    "DomainAgent": ("领域", "聚合", "责任田", "owner", "归属"),
+    "ChangeAgent": ("发布", "变更", "配置", "deploy", "release", "commit"),
+    "RunbookAgent": ("runbook", "sop", "案例", "止血", "回滚"),
+}
+
+
+def infer_relevant_agents_from_texts(
+    texts: Sequence[str],
+    *,
+    available_agents: Sequence[str],
+) -> List[str]:
+    """根据缺口描述和证据文本推断最相关的专家。"""
+    normalized_agents = [str(name or "").strip() for name in available_agents if str(name or "").strip()]
+    if not normalized_agents:
+        return []
+
+    merged_text = " ".join(str(item or "").strip().lower() for item in list(texts or []) if str(item or "").strip())
+    if not merged_text:
+        return []
+
+    matches: List[str] = []
+    for agent_name in normalized_agents:
+        keywords = _AGENT_KEYWORD_MAP.get(agent_name, ())
+        if any(keyword in merged_text for keyword in keywords):
+            matches.append(agent_name)
+    return list(dict.fromkeys(matches))
+
+
+def _gap_target_agent(
+    *,
+    state: Dict[str, Any],
+    round_cards: List[AgentEvidence],
+    parallel_analysis_agents: Sequence[str],
+) -> str:
+    """根据 open_questions / top_k_hypotheses 选择最该被继续追问的专家。"""
+    available_agents = [str(name or "").strip() for name in parallel_analysis_agents if str(name or "").strip()]
+    if not available_agents:
+        return ""
+
+    missing_key_agents = [
+        name
+        for name in KEY_EVIDENCE_AGENTS
+        if name in set(available_agents) and not _agent_has_effective_evidence(round_cards, state, name)
+    ]
+    degraded_agents = [
+        name
+        for name in KEY_EVIDENCE_AGENTS
+        if name in set(available_agents) and _payload_is_degraded(_agent_output_from_state(state, name))
+    ]
+    open_questions = [str(item or "") for item in list(state.get("open_questions") or [])]
+    round_gap_summary = [str(item or "") for item in list(state.get("round_gap_summary") or [])]
+    top_k_hypotheses = [
+        str(item.get("conclusion") or "")
+        for item in list(state.get("top_k_hypotheses") or [])
+        if isinstance(item, dict)
+    ]
+    hinted_agents = infer_relevant_agents_from_texts(
+        [*open_questions, *round_gap_summary, *top_k_hypotheses],
+        available_agents=available_agents,
+    )
+
+    for agent_name in hinted_agents:
+        if agent_name in missing_key_agents or agent_name in degraded_agents:
+            return agent_name
+    if len(missing_key_agents) == 1:
+        return missing_key_agents[0]
+    if len(degraded_agents) == 1:
+        return degraded_agents[0]
+    return hinted_agents[0] if len(hinted_agents) == 1 else ""
+
 
 def _agent_output_from_state(state: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
     """从运行态 state 中提取某个 Agent 最近一次结构化输出。"""
@@ -322,8 +397,20 @@ def fallback_supervisor_route(
     effective_key_agents = sum(
         1 for name in KEY_EVIDENCE_AGENTS if _agent_has_effective_evidence(round_cards, state, name)
     )
+    gap_target = _gap_target_agent(
+        state=state,
+        round_cards=round_cards,
+        parallel_analysis_agents=parallel_analysis_agents,
+    )
 
     if not all(name in seen_set for name in parallel_analysis_agents):
+        if gap_target:
+            return {
+                "next_step": step_for_agent(gap_target),
+                "reason": f"存在明确证据缺口，优先追问 {gap_target}",
+                "should_stop": False,
+                "stop_reason": "",
+            }
         return {
             "next_step": "analysis_parallel",
             "reason": "分析三专家尚未全部发言，先并行收集证据",
@@ -332,6 +419,13 @@ def fallback_supervisor_route(
         }
 
     if effective_key_agents < 2:
+        if gap_target:
+            return {
+                "next_step": step_for_agent(gap_target),
+                "reason": f"关键证据不足，优先让 {gap_target} 补齐缺口",
+                "should_stop": False,
+                "stop_reason": "",
+            }
         return {
             "next_step": "analysis_parallel",
             "reason": "关键证据Agent有效证据不足，继续补采日志/代码/数据库/指标证据",
@@ -598,6 +692,7 @@ __all__ = [
     "_recent_agent_card",
     "agent_from_step",
     "fallback_supervisor_route",
+    "infer_relevant_agents_from_texts",
     "judge_is_ready",
     "recent_agent_card",
     "recent_judge_card",

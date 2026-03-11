@@ -243,9 +243,26 @@ class HybridRouter:
                 mode="langgraph_supervisor_consensus_shortcut",
             )
 
-        # Stage 3: Deterministic converge path after analysis coverage.
-        # Once all analysis agents have spoken, route directly to critique/rebuttal/judge
-        # to avoid repeated coordinator calls under slow model responses.
+        # 第 3 阶段：只要本轮 JudgeAgent 已经发言，就立刻交给 round_evaluate
+        # 统一判断“继续下一轮还是直接收口”，避免 supervisor 在裁决之后继续补派专家。
+        if judge_started:
+            decision = orchestrator._route_guardrail(
+                state=state,
+                round_cards=round_cards,
+                route_decision={
+                    "next_step": "",
+                    "should_stop": supervisor_stop_requested,
+                    "stop_reason": supervisor_stop_reason,
+                    "reason": "JudgeAgent 已完成本轮裁决，进入 round_evaluate 统一收口",
+                },
+            )
+            return StrategyResult(
+                decision=decision,
+                mode="langgraph_supervisor_post_judge_evaluate",
+            )
+
+        # 第 4 阶段：当关键分析 Agent 都已经发言后，直接进入批判/反驳/裁决链路，
+        # 避免在慢模型场景里继续重复调 commander。
         analysis_done = all(
             str(agent_name).strip() in seen_agents
             for agent_name in list(orchestrator.PARALLEL_ANALYSIS_AGENTS)
@@ -300,9 +317,8 @@ class HybridRouter:
                     mode="langgraph_supervisor_post_critic_rebuttal",
                 )
 
-        # Stage 4: Fast convergence after critique/rebuttal cycle.
-        # If both CriticAgent and RebuttalAgent have completed once in this round,
-        # avoid repeated commander loops and force JudgeAgent to收敛.
+        # 第 5 阶段：批判与反驳都完成后，强制切回 JudgeAgent 做最终收敛，
+        # 防止 discussion 在 critique/rebuttal 之后反复绕回专家分析。
         critique_completed = (
             int(round_counts.get("CriticAgent", 0)) >= 1
             and int(round_counts.get("RebuttalAgent", 0)) >= 1
@@ -323,7 +339,7 @@ class HybridRouter:
                 mode="langgraph_supervisor_post_critique_converge",
             )
 
-        # Stage 5: Check budget limits
+        # 第 6 阶段：如果讨论步数已经打满，就切到预算守卫的回退路由。
         if discussion_step_count >= max_discussion_steps:
             rb = await self._rule.decide(
                 orchestrator=orchestrator,
@@ -342,7 +358,7 @@ class HybridRouter:
             rb.mode = "langgraph_supervisor_budget_guard"
             return rb
 
-        # Stage 6: Try LLM-based dynamic routing
+        # 第 7 阶段：预算尚可时，才继续尝试动态 supervisor 路由。
         try:
             return await self._dynamic.decide(
                 orchestrator=orchestrator,
@@ -363,7 +379,7 @@ class HybridRouter:
                 error=str(e),
                 session_id=getattr(orchestrator, "session_id", None),
             )
-            # Stage 7: Fall back to rule-based routing
+            # 第 8 阶段：动态路由失败时，再回退到规则路由兜底。
             rb = await self._rule.decide(
                 orchestrator=orchestrator,
                 state=state,

@@ -250,6 +250,10 @@ def parse_judge_payload(raw_content: str) -> Dict[str, Any]:
 
 def normalize_normal_output(parsed: Dict[str, Any], raw_content: str) -> Dict[str, Any]:
     """对输入执行归一化normaloutput，将原始数据整理为稳定的内部结构。"""
+    # 一些专家会把有效结论放进 `domain_analysis`、`findings`、`root_cause_assessment`
+    # 这类嵌套字段里。这里先把这些候选块提取出来，避免后续只看顶层字段导致
+    # “明明有结论却被判成低质量输出”。
+    nested_payloads = _collect_nested_analysis_payloads(parsed)
     chat_message = extract_readable_text(parsed.get("chat_message"), fallback="")
     analysis = extract_readable_text(
         parsed.get("analysis"),
@@ -257,19 +261,64 @@ def normalize_normal_output(parsed: Dict[str, Any], raw_content: str) -> Dict[st
         fallback="",
         max_len=600,
     )
+    if not analysis:
+        analysis = _extract_nested_text_by_keys(
+            nested_payloads,
+            preferred_keys=[
+                "reasoning",
+                "causal_inference",
+                "root_cause_chain",
+                "problem",
+                "direct_root_cause",
+                "violation_type",
+                "optimal",
+                "summary",
+                "analysis",
+                "chat_message",
+                "conclusion",
+            ],
+            max_len=600,
+        )
     conclusion = extract_readable_text(
         parsed.get("conclusion") or analysis or "",
         preferred_keys=["summary", "conclusion", "chat_message", "analysis"],
         fallback=analysis,
         max_len=420,
     )
+    if not conclusion:
+        conclusion = _extract_nested_text_by_keys(
+            nested_payloads,
+            preferred_keys=[
+                "direct_root_cause",
+                "reasoning",
+                "causal_inference",
+                "root_cause_chain",
+                "problem",
+                "violation_type",
+                "optimal",
+                "summary",
+                "conclusion",
+                "analysis",
+            ],
+            max_len=420,
+        )
     evidence = _normalize_evidence_items(parsed.get("evidence_chain"), source_hint="analysis", max_items=5)
+    if not evidence:
+        evidence = _normalize_evidence_items(
+            _collect_nested_evidence_texts(nested_payloads),
+            source_hint="analysis",
+            max_items=5,
+        )
 
     confidence = parsed.get("confidence")
     try:
         confidence_value = float(confidence)
     except Exception:
-        confidence_value = 0.66 if analysis or conclusion else 0.45
+        nested_confidences = _collect_nested_confidence_values(nested_payloads)
+        if nested_confidences:
+            confidence_value = max(nested_confidences)
+        else:
+            confidence_value = 0.66 if analysis or conclusion else 0.45
     confidence_value = max(0.0, min(1.0, confidence_value))
 
     if not analysis and raw_content:
@@ -294,14 +343,25 @@ def normalize_normal_output(parsed: Dict[str, Any], raw_content: str) -> Dict[st
             items = []
         return [str(item).strip()[:220] for item in items if str(item).strip()][:limit]
 
+    synthesized_open_questions = _collect_nested_texts_by_keys(
+        nested_payloads,
+        keys=("mapping_gaps", "open_questions", "missing_info"),
+        limit=6,
+    )
+    synthesized_next_checks = _collect_nested_texts_by_keys(
+        nested_payloads,
+        keys=("next_checks", "required", "optional"),
+        limit=6,
+    )
+
     return {
         "chat_message": chat_message[:260],
         "analysis": analysis,
         "conclusion": conclusion,
         "evidence_chain": evidence,
-        "open_questions": _normalize_text_list(parsed.get("open_questions")),
-        "missing_info": _normalize_text_list(parsed.get("missing_info")),
-        "needs_validation": _normalize_text_list(parsed.get("needs_validation")),
+        "open_questions": _normalize_text_list(parsed.get("open_questions") or synthesized_open_questions),
+        "missing_info": _normalize_text_list(parsed.get("missing_info") or synthesized_open_questions),
+        "needs_validation": _normalize_text_list(parsed.get("needs_validation") or synthesized_next_checks),
         "confidence": confidence_value,
         "raw_text": raw_content[:1200],
     }
@@ -819,6 +879,204 @@ def _normalize_evidence_items(raw_evidence: Any, *, source_hint: str, max_items:
             }
         )
     return items
+
+
+def _collect_nested_analysis_payloads(parsed: Dict[str, Any]) -> List[Any]:
+    """收集常见的嵌套分析块，供普通专家输出做二次归一化。"""
+    if not isinstance(parsed, dict):
+        return []
+    payloads: List[Any] = []
+    preferred_keys = (
+        "analysis_result",
+        "domain_analysis",
+        "findings",
+        "evidence",
+        "causal_analysis",
+        "root_cause_assessment",
+        "business_rules_assessment",
+        "recommendation",
+        "business_impact",
+        "cross_source_validation",
+        "cross_validation",
+    )
+    for key in preferred_keys:
+        value = parsed.get(key)
+        if isinstance(value, (dict, list)) and value:
+            payloads.append(value)
+    for key, value in parsed.items():
+        if key in preferred_keys:
+            continue
+        if not isinstance(value, dict) or not value:
+            continue
+        if key.endswith("_analysis") or key.endswith("_assessment") or key.endswith("_validation") or key.endswith("_result"):
+            payloads.append(value)
+    return payloads
+
+
+def _extract_nested_text_by_keys(
+    value: Any,
+    *,
+    preferred_keys: List[str],
+    max_len: int = 420,
+    depth: int = 0,
+) -> str:
+    """递归查找嵌套分析块里的关键文本，避免只认顶层 summary/conclusion。"""
+    if depth > 5:
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            text = _extract_nested_text_by_keys(
+                item,
+                preferred_keys=preferred_keys,
+                max_len=max_len,
+                depth=depth + 1,
+            )
+            if text:
+                return text
+        return ""
+    if isinstance(value, dict):
+        for key in preferred_keys:
+            if key not in value:
+                continue
+            text = extract_readable_text(value.get(key), preferred_keys=preferred_keys, max_len=max_len)
+            if text:
+                return text[:max_len]
+        for nested in value.values():
+            text = _extract_nested_text_by_keys(
+                nested,
+                preferred_keys=preferred_keys,
+                max_len=max_len,
+                depth=depth + 1,
+            )
+            if text:
+                return text
+        return ""
+    return ""
+
+
+def _collect_nested_confidence_values(
+    value: Any,
+    *,
+    depth: int = 0,
+    limit: int = 24,
+    parent_key: str = "",
+) -> List[float]:
+    """递归收集嵌套 payload 里的 confidence，优先保留真正的分析置信度。"""
+    if depth > 5 or limit <= 0:
+        return []
+    values: List[float] = []
+    if isinstance(value, list):
+        for item in value:
+            values.extend(
+                _collect_nested_confidence_values(
+                    item,
+                    depth=depth + 1,
+                    limit=limit - len(values),
+                    parent_key=parent_key,
+                )
+            )
+            if len(values) >= limit:
+                break
+        return values[:limit]
+    if isinstance(value, dict):
+        raw_confidence = value.get("confidence")
+        try:
+            # `interface_mapping.confidence` 这类值描述的是映射命中率，不应盖过
+            # 真正的 RCA 分析置信度，否则会把 DomainAgent 的定位质量高估。
+            if raw_confidence is not None and parent_key not in {"interface_mapping", "responsibility_mapping"}:
+                values.append(max(0.0, min(1.0, float(raw_confidence))))
+        except (TypeError, ValueError):
+            pass
+        for key, nested in value.items():
+            if len(values) >= limit:
+                break
+            values.extend(
+                _collect_nested_confidence_values(
+                    nested,
+                    depth=depth + 1,
+                    limit=limit - len(values),
+                    parent_key=str(key or ""),
+                )
+            )
+        return values[:limit]
+    return values
+
+
+def _collect_nested_texts_by_keys(
+    value: Any,
+    *,
+    keys: tuple[str, ...],
+    limit: int = 6,
+    depth: int = 0,
+) -> List[str]:
+    """递归回收 next_checks / mapping_gaps 等列表型文本，补齐未决问题与校验项。"""
+    if depth > 5 or limit <= 0:
+        return []
+    texts: List[str] = []
+    if isinstance(value, list):
+        for item in value:
+            if len(texts) >= limit:
+                break
+            texts.extend(_collect_nested_texts_by_keys(item, keys=keys, limit=limit - len(texts), depth=depth + 1))
+        return list(dict.fromkeys(texts))[:limit]
+    if isinstance(value, dict):
+        for key in keys:
+            candidate = value.get(key)
+            if isinstance(candidate, list):
+                for item in candidate:
+                    text = _extract_nested_text_by_keys(
+                        item,
+                        preferred_keys=[
+                            "description",
+                            "content",
+                            "evidence",
+                            "interpretation",
+                            "summary",
+                            "reasoning",
+                            "rationale",
+                            "conclusion",
+                            "analysis",
+                        ],
+                        max_len=220,
+                    ) or extract_readable_text(item, max_len=220)
+                    if text:
+                        texts.append(text[:220])
+                        if len(texts) >= limit:
+                            return list(dict.fromkeys(texts))[:limit]
+            elif candidate is not None:
+                text = extract_readable_text(candidate, max_len=220)
+                if text:
+                    texts.append(text[:220])
+        for nested in value.values():
+            if len(texts) >= limit:
+                break
+            texts.extend(_collect_nested_texts_by_keys(nested, keys=keys, limit=limit - len(texts), depth=depth + 1))
+        return list(dict.fromkeys(texts))[:limit]
+    return texts
+
+
+def _collect_nested_evidence_texts(value: Any, *, limit: int = 5) -> List[str]:
+    """把嵌套分析里的时间线、冲突点、关键证据压成顶层 evidence_chain。"""
+    evidence = _collect_nested_texts_by_keys(
+        value,
+        keys=(
+            "log_timestamp_chain",
+            "evidence_sources",
+            "cross_validation",
+            "cross_source_validation",
+            "primary",
+            "content",
+            "interpretation",
+            "problematic_dependencies",
+            "suspicious_tables",
+            "suspicious_sql",
+            "suspicious_sqls",
+            "code_anchors",
+            "mapping_gaps",
+        ),
+        limit=max(limit * 2, 8),
+    )
+    return evidence[:limit]
 
 
 def _evidence_id(description: str, source_ref: str, source: str, index: int) -> str:

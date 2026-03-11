@@ -152,3 +152,32 @@ async def test_hybrid_router_converges_to_judge_after_critique_cycle():
     )
     assert result.mode == "langgraph_supervisor_post_critique_converge"
     assert result.decision["next_step"] == "speak:JudgeAgent"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_router_routes_to_round_evaluate_after_judge_even_without_consensus():
+    """Judge 已经产出裁决后，应先进入 round_evaluate，而不是继续追加专家调度。"""
+
+    router = HybridRouter()
+    orch = _FakeOrchestrator()
+    round_cards = [
+        _card("LogAgent", confidence=0.62),
+        _card("CodeAgent", confidence=0.58),
+        _card("JudgeAgent", confidence=0.52),
+    ]
+    result = await router.decide(
+        orchestrator=orch,
+        state={},
+        history_cards=list(round_cards),
+        round_cards=round_cards,
+        dialogue_items=[],
+        loop_round=1,
+        discussion_step_count=6,
+        max_discussion_steps=12,
+        preseed_step="",
+        supervisor_stop_requested=False,
+        supervisor_stop_reason="",
+    )
+
+    assert result.decision["next_step"] == ""
+    assert result.decision["should_stop"] is False

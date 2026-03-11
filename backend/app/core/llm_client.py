@@ -846,7 +846,8 @@ class LLMClient:
             timeout=self._phase_http_timeout(phase),
             max_retries=max(0, int(settings.LLM_MAX_RETRIES)),
             max_tokens=(max_tokens if isinstance(max_tokens, int) and max_tokens > 0 else None),
-            model_kwargs={"extra_body": {"thinking": {"type": "disabled"}}},
+            # 新版 LangChain 需要显式传 extra_body；继续塞进 model_kwargs 会触发运行时 warning。
+            extra_body={"thinking": {"type": "disabled"}},
         )
 
         messages = [

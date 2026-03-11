@@ -136,3 +136,41 @@ def test_build_result_extracts_readable_text_from_json_wrapped_fields():
     assert result.fix_recommendation is not None
     assert result.fix_recommendation.summary == "先限制热点 SKU 并缩短库存事务"
     assert result.action_items[0]["summary"] == "先对热点 SKU 做限流"
+
+
+def test_build_result_prefers_meaningful_root_cause_confidence_over_stale_top_level_floor():
+    """当顶层 confidence 落后于 Judge 根因置信度时，应优先保留有效根因置信度。"""
+
+    service = DebateService()
+    session = _session()
+    flow_result = {
+        "confidence": 0.45,
+        "final_judgment": {
+            "root_cause": {
+                "summary": "网关路由表未包含 POST /api/v1/orders，或服务注册中心未同步 order-service 实例，导致网关层直接返回 404。",
+                "category": "infrastructure.gateway-route-miss",
+                "confidence": 0.68,
+            },
+            "evidence_chain": [
+                {
+                    "type": "log",
+                    "description": "gateway route not found path=/api/v1/orders method=POST return=404",
+                    "source": "gateway",
+                    "strength": "strong",
+                },
+                {
+                    "type": "domain",
+                    "description": "接口映射确认 POST /api/v1/orders 属于 OrderController#createOrder",
+                    "source": "interface_mapping",
+                    "strength": "strong",
+                },
+            ],
+        },
+        "action_items": [],
+        "responsible_team": {"team": "gateway-team", "owner": "alice"},
+    }
+
+    result = service._build_result(session, flow_result, report={})
+
+    assert result.root_cause_category == "infrastructure.gateway-route-miss"
+    assert result.confidence == pytest.approx(0.68, abs=1e-6)

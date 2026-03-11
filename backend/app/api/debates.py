@@ -252,6 +252,11 @@ async def create_debate_session(
         pattern="^(standard|quick|background|async)$",
         description="会话执行模式：standard|quick|background|async",
     ),
+    analysis_depth_mode: str = Query(
+        default="standard",
+        pattern="^(quick|standard|deep)$",
+        description="分析深度模式：quick|standard|deep",
+    ),
     deployment_profile: str = Query(
         default="",
         pattern="^(|baseline|skill_enabled|investigation_full|production_governed)$",
@@ -272,6 +277,7 @@ async def create_debate_session(
         incident,
         max_rounds=max_rounds,
         execution_mode=normalize_execution_mode(mode).value,
+        analysis_depth_mode=analysis_depth_mode,
         deployment_profile=deployment_profile,
     )
     

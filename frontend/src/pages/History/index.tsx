@@ -30,9 +30,19 @@ const severityColor: Record<string, string> = {
 
 const ACTIVE_STATUSES = ['pending', 'running', 'analyzing', 'debating', 'waiting', 'retrying'];
 const TERMINAL_STATUSES = ['resolved', 'completed', 'closed', 'failed', 'cancelled'];
+const RESULT_READY_STATUSES = ['resolved', 'completed'];
 const compactBeijingDateTime = (value?: string): string =>
   formatBeijingDateTime(value, '--').replace(' (北京时间)', '');
 const compactElapsedDuration = (value: string): string => value.replace(/^进行中\s*[·•]\s*/, '');
+const resolveTaskStartTime = (
+  record: Incident,
+  meta?: {
+    createdAt: string;
+  } | null,
+): string => {
+  // 历史页里的“开始时间”优先展示分析任务真正启动的会话时间，缺失时再回退到事件创建时间。
+  return String(meta?.createdAt || record.created_at || '');
+};
 
 const HistoryPage: React.FC = () => {
   const navigate = useNavigate();
@@ -40,6 +50,29 @@ const HistoryPage: React.FC = () => {
   const [items, setItems] = useState<Incident[]>([]);
   const [nowTs, setNowTs] = useState(() => Date.now());
   const missingResultSessionsRef = useRef<Set<string>>(new Set());
+  const loadInFlightRef = useRef(false);
+  const sessionMetaRef = useRef<
+    Record<
+      string,
+      {
+        mode: string;
+        currentPhase: string;
+        reviewStatus: string;
+        reviewReason: string;
+        createdAt: string;
+        completedAt: string;
+        updatedAt: string;
+        confidence: number | null;
+        limitedAnalysis: boolean;
+        evidenceGap: boolean;
+        evidenceCoverage: {
+          ok: number;
+          degraded: number;
+          missing: number;
+        };
+      }
+    >
+  >({});
   const [sessionMeta, setSessionMeta] = useState<
     Record<
       string,
@@ -63,7 +96,16 @@ const HistoryPage: React.FC = () => {
     >
   >({});
 
+  useEffect(() => {
+    sessionMetaRef.current = sessionMeta;
+  }, [sessionMeta]);
+
   const loadIncidents = async () => {
+    // React StrictMode 下 effect 会重复触发，这里用 in-flight 门禁避免同一时间打出重复请求。
+    if (loadInFlightRef.current) {
+      return;
+    }
+    loadInFlightRef.current = true;
     setLoading(true);
     try {
       const data = await incidentApi.list(1, 50);
@@ -73,20 +115,32 @@ const HistoryPage: React.FC = () => {
         .filter(Boolean)
         .slice(0, 20);
       if (sessionIds.length > 0) {
+        const cachedMeta = sessionMetaRef.current;
         const itemBySessionId = new Map(
           (data.items || [])
             .map((row) => [String(row.debate_session_id || '').trim(), row] as const)
             .filter(([sid]) => Boolean(sid)),
         );
+        // 终态会话的详情和结果在页面上基本不再变化，命中缓存后不再重复拉取，减少后台轮询噪声。
+        const sessionIdsToRefresh = sessionIds.filter((sid) => {
+          const incident = itemBySessionId.get(sid);
+          const normalizedStatus = String(incident?.status || '').toLowerCase();
+          if (ACTIVE_STATUSES.includes(normalizedStatus)) {
+            return true;
+          }
+          return !cachedMeta[sid];
+        });
         const details = await Promise.all(
-          sessionIds.map((sid) =>
+          sessionIdsToRefresh.map((sid) =>
             debateApi.get(sid).catch(() => null),
           ),
         );
         const results = await Promise.all(
-          sessionIds.map(async (sid) => {
+          sessionIdsToRefresh.map(async (sid) => {
             const incident = itemBySessionId.get(sid);
-            if (!incident || !TERMINAL_STATUSES.includes(String(incident.status || '').toLowerCase())) {
+            const normalizedStatus = String(incident?.status || '').toLowerCase();
+            // 只有明确产出了最终结论的会话才请求 result，避免 closed/failed 历史数据持续打 404。
+            if (!incident || !RESULT_READY_STATUSES.includes(normalizedStatus)) {
               return null;
             }
             if (missingResultSessionsRef.current.has(sid)) {
@@ -123,9 +177,15 @@ const HistoryPage: React.FC = () => {
             };
           }
         > = {};
+        // 只保留当前列表中需要展示的缓存，避免会话离开列表后继续占用内存。
+        sessionIds.forEach((sid) => {
+          if (cachedMeta[sid]) {
+            nextMeta[sid] = cachedMeta[sid];
+          }
+        });
         details.forEach((detail, idx) => {
           if (!detail) return;
-          const sid = sessionIds[idx];
+          const sid = sessionIdsToRefresh[idx];
           const result = results[idx];
           const mode = String((detail.context || {}).execution_mode || 'standard');
           const currentPhase = String(detail.current_phase || '');
@@ -185,6 +245,7 @@ const HistoryPage: React.FC = () => {
     } catch (e: any) {
       message.error(e?.response?.data?.detail || e.message || '加载历史失败');
     } finally {
+      loadInFlightRef.current = false;
       setLoading(false);
     }
   };
@@ -354,7 +415,17 @@ const HistoryPage: React.FC = () => {
       },
     },
     {
-      title: '创建时间',
+      title: '开始时间',
+      key: 'started_at',
+      width: 144,
+      responsive: ['xl'],
+      render: (_: unknown, record) => {
+        const sid = String(record.debate_session_id || '');
+        return compactBeijingDateTime(resolveTaskStartTime(record, sid ? sessionMeta[sid] : null));
+      },
+    },
+    {
+      title: '事件创建',
       dataIndex: 'created_at',
       key: 'created_at',
       width: 144,

@@ -41,7 +41,12 @@ class AssetCollectionService:
         """初始化代码仓目录、设计文档目录和日志解析工具。"""
         self.code_repos_path = os.getenv("CODE_REPOS_PATH", "/tmp/repos")
         self.design_docs_path = os.getenv("DESIGN_DOCS_PATH", "/tmp/design_docs")
+        self._design_docs_path_explicit = "DESIGN_DOCS_PATH" in os.environ
         self._log_parser = LogParserTool()
+
+    def _log_optional_path_skip(self, event: str, path: Optional[str], reason: str) -> None:
+        """可选资产未配置时只记 info，避免每次 smoke 都产生误导性 warning。"""
+        logger.info(event, path=path, reason=reason)
     
     # ==================== 运行态资产采集 ====================
     
@@ -342,7 +347,16 @@ class AssetCollectionService:
             repo_path = await self._clone_repo(repo_url)
         
         if not repo_path or not os.path.exists(repo_path):
-            logger.warning("repo_path_not_found", path=repo_path)
+            # 开发态资产是可选增强项；当请求里根本没提供 repo 信息时，直接静默跳过即可。
+            # 只有调用方显式给了 repo_url / repo_path 但路径不可用，才应该记 warning 方便排查。
+            if repo_url or repo_path:
+                logger.warning("repo_path_not_found", path=repo_path)
+            else:
+                self._log_optional_path_skip(
+                    "repo_path_not_configured_skip",
+                    path=repo_path,
+                    reason="未提供 repo_url 或 repo_path，跳过开发态资产采集",
+                )
             return assets
         
         # 采集代码资产
@@ -584,7 +598,15 @@ class AssetCollectionService:
         docs_path = design_docs_path or self.design_docs_path
         
         if not os.path.exists(docs_path):
-            logger.warning("design_docs_path_not_found", path=docs_path)
+            # 设计文档目录默认是可选输入；仅当调用方显式传入，或环境变量明确配置但失效时记 warning。
+            if design_docs_path or self._design_docs_path_explicit:
+                logger.warning("design_docs_path_not_found", path=docs_path)
+            else:
+                self._log_optional_path_skip(
+                    "design_docs_path_not_configured_skip",
+                    path=docs_path,
+                    reason="未配置设计文档目录，跳过设计态资产采集",
+                )
             return assets
         
         # 采集 DDD 文档
