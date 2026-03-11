@@ -116,3 +116,95 @@ async def test_call_agent_runs_multistep_investigation_for_key_expert(monkeypatc
     assert "expert_investigation_step_completed" in event_types
     assert "expert_investigation_completed" in event_types
 
+
+@pytest.mark.asyncio
+async def test_metrics_agent_runs_multistep_investigation_in_standard_mode(monkeypatch):
+    """MetricsAgent 在 standard 模式下也应进入计划 -> 综合闭环。"""
+
+    prompts: List[str] = []
+
+    def _fake_run_agent_once(orchestrator, spec, prompt, max_tokens):  # noqa: ANN001, ANN202
+        _ = orchestrator, max_tokens
+        prompts.append(str(prompt))
+        if spec.name == "MetricsAgent" and "多步调查计划" in str(prompt):
+            return AgentInvokeResult(
+                content='{"hypotheses":["上游重试放大 RT"],"checks":["核对 RT 与 error rate 时间线","核对 DB 指标是否平稳"],"next_focus":"优先确认调用链传播顺序"}',
+                invoke_mode="direct",
+            )
+        return AgentInvokeResult(
+            content='{"chat_message":"我先按计划比对了 RT、错误率和数据库指标。","conclusion":"支付确认超时由上游 RiskService 重试放大，数据库指标保持平稳，不是主因。","confidence":0.79,"evidence_chain":["payment RT 逐次抬升","Risk timeout timeline","DB CPU/slow SQL 平稳"]}',
+            invoke_mode="direct",
+        )
+
+    monkeypatch.setattr("app.runtime.langgraph.execution.run_agent_once", _fake_run_agent_once)
+
+    orchestrator = _StubOrchestrator()
+    turn = await call_agent(
+        orchestrator,
+        spec=AgentSpec(name="MetricsAgent", role="指标分析专家", phase="analysis", system_prompt="你是指标专家"),
+        prompt="请分析支付确认链路的指标传播顺序。",
+        round_number=1,
+        loop_round=1,
+        history_cards_context=[],
+        execution_context={
+            "tool_context": {"name": "metrics_bundle", "summary": "已预取 RT/error rate/DB CPU 时间线"},
+            "focused_context": {
+                "metric_window": {"service": "payment-service", "window": "10:08-10:12"},
+                "causal_timeline": ["Risk timeout spike", "payment RT increase", "DB CPU stable"],
+            },
+        },
+    )
+
+    assert len(prompts) == 2
+    assert "多步调查计划" in prompts[0]
+    assert "调查备忘录" in prompts[1]
+    assert "上游重试放大 RT" in prompts[1]
+    assert "数据库指标保持平稳" in turn.output_content["conclusion"]
+
+
+@pytest.mark.asyncio
+async def test_metrics_agent_runs_reflection_step_in_deep_mode(monkeypatch):
+    """deep 模式下 MetricsAgent 应额外执行一次反证复核。"""
+
+    prompts: List[str] = []
+
+    def _fake_run_agent_once(orchestrator, spec, prompt, max_tokens):  # noqa: ANN001, ANN202
+        _ = orchestrator, max_tokens
+        prompts.append(str(prompt))
+        if "多步调查计划" in str(prompt):
+            return AgentInvokeResult(
+                content='{"hypotheses":["上游重试耗尽预算"],"checks":["核对 timeout timeline"],"next_focus":"确认 DB 是否平稳"}',
+                invoke_mode="direct",
+            )
+        if "反证复核" in str(prompt):
+            return AgentInvokeResult(
+                content='{"contradictions":["数据库 CPU 低于 20%"],"missing_checks":["补网关 p95 时间线"],"revised_focus":"优先保持上游超时假设"}',
+                invoke_mode="direct",
+            )
+        return AgentInvokeResult(
+            content='{"chat_message":"我补过反证后仍维持原结论。","conclusion":"主因是上游重试耗尽预算，数据库仅为被排除项。","confidence":0.81,"evidence_chain":["Risk timeout timeline","DB CPU 18%","slow SQL 0"]}',
+            invoke_mode="direct",
+        )
+
+    monkeypatch.setattr("app.runtime.langgraph.execution.run_agent_once", _fake_run_agent_once)
+
+    orchestrator = _StubOrchestrator()
+    orchestrator.analysis_depth_mode = "deep"
+    turn = await call_agent(
+        orchestrator,
+        spec=AgentSpec(name="MetricsAgent", role="指标分析专家", phase="analysis", system_prompt="你是指标专家"),
+        prompt="请分析支付超时的指标传播链。",
+        round_number=1,
+        loop_round=1,
+        history_cards_context=[],
+        execution_context={
+            "tool_context": {"name": "metrics_bundle", "summary": "已预取 payment/risk/db 三段指标"},
+            "focused_context": {"causal_timeline": ["Risk timeout spike", "payment RT increase", "DB stable"]},
+        },
+    )
+
+    assert len(prompts) == 3
+    assert "多步调查计划" in prompts[0]
+    assert "反证复核" in prompts[1]
+    assert "调查备忘录" in prompts[2]
+    assert turn.output_content["confidence"] == 0.81

@@ -266,9 +266,15 @@ async function runScenario(scenario, token) {
     token,
   );
 
+  // 中文注释：WS 结果并不总是可靠落在同一个时刻返回。
+  // 如果先 await WS，再去轮询 REST，会把“后端已完成但 WS 没给 result”的场景
+  // 额外拖到整段 WS 超时。这里改为并发启动，优先让 REST 负责终态兜底。
+  const artifactPromise = waitForDebateArtifacts(session.id, incident.id, token);
+  const wsPromise = runRealtimeDebate(session.id, token);
+
   let realtime = { result: null, events: [], fallback: false };
   try {
-    realtime = await runRealtimeDebate(session.id, token);
+    realtime = await wsPromise;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (!message.includes('websocket timeout waiting result') && !message.includes('websocket closed before result')) {
@@ -277,7 +283,7 @@ async function runScenario(scenario, token) {
     realtime = { result: null, events: [], fallback: true, ws_error: message };
   }
 
-  const artifacts = await waitForDebateArtifacts(session.id, incident.id, token);
+  const artifacts = await artifactPromise;
   const detail = artifacts.detail;
   const debateResult = artifacts.debateResult;
   const report = artifacts.report;
@@ -290,6 +296,7 @@ async function runScenario(scenario, token) {
     status: detail.status,
     confidence: debateResult.confidence,
     root_cause: debateResult.root_cause,
+    report_id: report.report_id || '',
     effective_root_cause: effective,
     report_generated: Boolean(report.report_id),
     ws_events: realtime.events,

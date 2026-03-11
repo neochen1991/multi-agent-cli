@@ -20,11 +20,12 @@
   - 专家集合
   - token / timeout 预算
   - 收口质量门槛
-- `LogAgent / CodeAgent / DatabaseAgent` 已接入多步调查子流程；`deep` 模式下会增加反证复核。
+- `LogAgent / CodeAgent / DatabaseAgent / MetricsAgent` 已接入多步调查子流程；`deep` 模式下会增加反证复核。
 - 无批判模式下已支持：
   - 重复并行分析拦截
   - 基于证据缺口的定向追问
   - 对已形成有效覆盖专家的直接收口
+  - `quick` 模式下对 `gateway route not found` 这类本地 404 场景的快速收口
 - 前端分析页拆分为三块：
   - `资产映射`
   - `辩论过程`
@@ -151,11 +152,11 @@ sequenceDiagram
 2. 采集上下文并执行接口责任田映射。
 3. 主 Agent 先发言并下发命令（`agent_command_issued`）。
 4. 被指派 Agent 先接收自己的 context envelope，再按命令决定是否调用工具。
-5. `LogAgent / CodeAgent / DatabaseAgent` 在需要时进入多步调查子流程。
+5. `LogAgent / CodeAgent / DatabaseAgent / MetricsAgent` 在需要时进入多步调查子流程。
 6. 路由层按证据缺口决定是整轮并行、定向追问，还是直接切 Judge。
 7. 多 Agent 轮次协作（含质疑/反驳）。
 8. JudgeAgent 裁决并生成最终结果。
-9. 报告生成并可在历史记录回看全过程。
+9. 报告生成并可在历史记录回看全过程；报告侧 `confidence` 会复用 Judge 根因的有效置信度口径。
 
 ## 5. 工具调用机制（重点）
 

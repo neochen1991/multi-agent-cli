@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Dict, Optional
 
@@ -480,7 +480,7 @@ async def call_agent(
     - turn 归一化
     """
     # call_agent 是 execution 层主入口，负责把一次模型调用最终落成标准 DebateTurn。
-    started_at = datetime.utcnow()
+    started_at = datetime.now(UTC)
     model_name = settings.llm_model
     endpoint = orchestrator._chat_endpoint()
     agent_max_tokens = orchestrator._agent_max_tokens(spec.name)
@@ -773,7 +773,7 @@ async def call_agent(
                     )
 
                     # 到这里才把模型输出整理成标准 DebateTurn，交给上层并入 history_cards。
-                    completed_at = datetime.utcnow()
+                    completed_at = datetime.now(UTC)
                     turn = DebateTurn(
                         round_number=round_number,
                         phase=spec.phase,

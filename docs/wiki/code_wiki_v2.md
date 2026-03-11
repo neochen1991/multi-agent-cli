@@ -265,7 +265,7 @@ Service 层会先做责任田映射，包括：
 
 当前还有两点实现已经落地：
 
-1. `LogAgent / CodeAgent / DatabaseAgent` 支持多步调查子流程
+1. `LogAgent / CodeAgent / DatabaseAgent / MetricsAgent` 支持多步调查子流程
    - 入口在 `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/nodes/expert_subgraph.py`
    - `standard / deep` 模式下会先给调查计划，再给结论
    - `deep` 模式下会补一轮反证复核
@@ -292,6 +292,11 @@ Service 层会先做责任田映射，包括：
 2. 最终结果出库时会优先保留 `final_judgment.root_cause.confidence`
    - 这是为了避免 runtime 顶层旧的保守 `confidence` 覆盖 Judge 已经形成的有效根因置信度
    - 最近的 route-miss / upstream-timeout 场景修复都依赖这条规则
+   - 当前 `ReportGenerationService` 也复用了同一口径，避免 result / report 展示不同置信度
+
+3. `quick` 模式下对网关本地 404 现在有专门的快速收口规则
+   - 命中条件是：日志确认 `route not found`、代码/资产确认端点存在、数据库已被排除为主因
+   - 这条规则会优先于“继续定向补数据库证据”，直接切到 `JudgeAgent`
 
 ### 6.7 前端流式展示
 

@@ -534,6 +534,122 @@ def test_route_guardrail_shortcuts_to_judge_when_targeted_reask_hits_already_eff
     assert guarded["should_stop"] is False
 
 
+def test_route_guardrail_shortcuts_route_miss_case_to_judge_in_quick_mode(monkeypatch):
+    """quick 模式的网关本地 404 场景，应在首轮专家完成后直接切 Judge。"""
+
+    orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
+    monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", False)
+    orchestrator._enable_critique = False
+    orchestrator.PARALLEL_ANALYSIS_AGENTS = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent")
+
+    route_decision = {
+        "next_step": "analysis_parallel",
+        "should_stop": False,
+        "stop_reason": "",
+        "reason": "继续并行分析",
+    }
+    state = {
+        "discussion_step_count": 5,
+        "max_discussion_steps": 8,
+        "execution_mode": "quick",
+        "analysis_depth_mode": "quick",
+        "incident": {
+            "title": "网关返回404，怀疑路由缺失",
+            "description": "gateway route not found path=/api/v1/orders method=POST return=404",
+            "service_name": "gateway",
+        },
+        "log_excerpt": "2026-02-20T10:11:01+08:00 WARN gateway route not found path=/api/v1/orders method=POST return=404",
+        "agent_outputs": {
+            "ProblemAnalysisAgent": {
+                "confidence": 0.45,
+                "open_questions": [],
+                "missing_info": [],
+            },
+            "LogAgent": {
+                "confidence": 0.72,
+                "conclusion": "日志确认 404 发生在 gateway route lookup 阶段，请求未转发到下游。",
+                "evidence_chain": ["route not found", "return=404", "无下游 trace"],
+                "evidence_status": "context_grounded_without_tool",
+                "tool_limited": True,
+            },
+            "DomainAgent": {
+                "confidence": 0.45,
+                "conclusion": "责任田映射命中 order-domain-team，但仍需注册中心补证。",
+                "degraded": True,
+                "evidence_status": "degraded",
+            },
+            "CodeAgent": {
+                "confidence": 0.62,
+                "conclusion": "OrderController#createOrder 存在，但运行时路由未正确注册到网关。",
+                "evidence_chain": ["OrderController#createOrder", "endpoint exists"],
+                "evidence_status": "context_grounded_without_tool",
+                "tool_limited": True,
+            },
+            "DatabaseAgent": {
+                "confidence": 0.51,
+                "conclusion": "数据库不是本次 404 的直接根因，但实时数据库证据未采集完成。",
+                "evidence_status": "missing",
+                "degraded": True,
+                "tool_limited": True,
+            },
+        },
+    }
+    round_cards = [
+        _card(
+            "ProblemAnalysisAgent",
+            "analysis",
+            0.45,
+            conclusion="网关 route not found 已较强指向本地路由问题，剩余仅是注册中心/配置补证。",
+            open_questions=[],
+            missing_info=[],
+        ),
+        _card(
+            "LogAgent",
+            "analysis",
+            0.72,
+            conclusion="日志确认 404 发生在 gateway route lookup 阶段，请求未转发到下游。",
+            evidence_chain=["route not found", "return=404", "无下游 trace"],
+            evidence_status="context_grounded_without_tool",
+            tool_limited=True,
+        ),
+        _card(
+            "DomainAgent",
+            "analysis",
+            0.45,
+            conclusion="责任田映射命中 order-domain-team，但仍需注册中心补证。",
+            degraded=True,
+            evidence_status="degraded",
+        ),
+        _card(
+            "CodeAgent",
+            "analysis",
+            0.62,
+            conclusion="OrderController#createOrder 存在，但运行时路由未正确注册到网关。",
+            evidence_chain=["OrderController#createOrder", "endpoint exists"],
+            evidence_status="context_grounded_without_tool",
+            tool_limited=True,
+        ),
+        _card(
+            "DatabaseAgent",
+            "analysis",
+            0.51,
+            conclusion="数据库不是本次 404 的直接根因，但实时数据库证据未采集完成。",
+            evidence_status="missing",
+            degraded=True,
+            tool_limited=True,
+        ),
+    ]
+
+    guarded = orchestrator._route_guardrail(
+        state=state,
+        round_cards=round_cards,
+        route_decision=route_decision,
+    )
+
+    assert guarded["next_step"] == "speak:JudgeAgent"
+    assert guarded["should_stop"] is False
+
+
 def test_route_guardrail_shortcuts_route_miss_cases_to_judge(monkeypatch):
     """网关本地 404 路由缺失场景下，不应继续重复追问专家。"""
 

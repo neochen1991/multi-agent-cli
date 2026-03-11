@@ -93,6 +93,50 @@ def _has_effective_parallel_coverage(ctx: RoutingContext) -> bool:
     return effective_count >= min(3, len(parallel_agents))
 
 
+def _looks_like_quick_route_miss(ctx: RoutingContext) -> bool:
+    """识别 quick 模式下“网关本地路由缺失”的收口型场景。"""
+    mode = str(ctx.state.get("execution_mode") or ctx.state.get("analysis_depth_mode") or "").strip().lower()
+    if mode != "quick":
+        return False
+
+    incident = ctx.state.get("incident") if isinstance(ctx.state.get("incident"), dict) else {}
+    merged_text = " ".join(
+        [
+            str(incident.get("title") or ""),
+            str(incident.get("description") or ""),
+            str(ctx.state.get("log_excerpt") or ""),
+        ]
+    ).lower()
+    route_tokens = ("404", "route", "路由", "not found", "gateway", "网关")
+    return any(token in merged_text for token in route_tokens)
+
+
+def _supports_gateway_local_404(payload: Dict[str, Any]) -> bool:
+    """判断输出是否已经指向“404 发生在网关本地，未转发到下游”这一关键信号。"""
+    if not isinstance(payload, dict):
+        return False
+    merged_text = " ".join(
+        [
+            str(payload.get("conclusion") or ""),
+            " ".join(str(item or "") for item in list(payload.get("evidence_chain") or [])),
+        ]
+    ).lower()
+    required_any = ("route not found", "gateway route", "route lookup", "未转发到下游", "本地路由", "网关")
+    return "404" in merged_text and any(token in merged_text for token in required_any)
+
+
+def _rules_out_database_as_primary(payload: Dict[str, Any]) -> bool:
+    """判断数据库专家是否已经给出“数据库不是主因”的排除性结论。"""
+    if not isinstance(payload, dict):
+        return False
+    conclusion = str(payload.get("conclusion") or "").strip().lower()
+    if not conclusion:
+        return False
+    return ("数据库" in conclusion or "db" in conclusion) and any(
+        token in conclusion for token in ("不是", "非", "not", "排除", "主因")
+    )
+
+
 class ConsensusRule(RoutingRule):
     """Rule that stops execution when judge confidence reaches threshold."""
 
@@ -602,6 +646,71 @@ class NoCritiqueTargetedSettleRule(RoutingRule):
         )
 
 
+class NoCritiqueRouteMissSettleRule(RoutingRule):
+    """无批判模式下，quick 路由缺失类故障满足最小证据链时直接交给 Judge。"""
+
+    def __init__(self, min_steps: int = 4, priority: int = 57):
+        """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
+        self._min_steps = min_steps
+        self._priority = priority
+
+    @property
+    def name(self) -> str:
+        """执行name相关逻辑，并为当前模块提供可复用的处理能力。"""
+        return "no_critique_route_miss_settle"
+
+    @property
+    def priority(self) -> int:
+        """执行priority相关逻辑，并为当前模块提供可复用的处理能力。"""
+        return self._priority
+
+    def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
+        """执行evaluate相关逻辑，并为当前模块提供可复用的处理能力。"""
+        if ctx.debate_enable_critique:
+            return None
+        if ctx.judge_card is not None:
+            return None
+        if ctx.discussion_step < self._min_steps:
+            return None
+        if ctx.next_step not in ("analysis_parallel", "parallel_analysis"):
+            return None
+        if not _looks_like_quick_route_miss(ctx):
+            return None
+
+        # 中文注释：这条规则只处理“网关本地 404”这一类非常窄的 quick 场景。
+        # 当日志已确认请求停在 gateway route lookup，代码又确认下游端点实际存在，
+        # 同时数据库专家已经给出“数据库不是主因”的排除性结论时，
+        # 再追问注册中心/数据库只会补细节，不会改变根因归属，应直接切 Judge 收口。
+        outputs = ctx.state.get("agent_outputs", {}) if isinstance(ctx.state.get("agent_outputs"), dict) else {}
+        log_payload = outputs.get("LogAgent") if isinstance(outputs.get("LogAgent"), dict) else {}
+        code_payload = outputs.get("CodeAgent") if isinstance(outputs.get("CodeAgent"), dict) else {}
+        db_payload = outputs.get("DatabaseAgent") if isinstance(outputs.get("DatabaseAgent"), dict) else {}
+
+        if not _supports_gateway_local_404(log_payload):
+            return None
+        if not code_payload or _output_confidence(code_payload) < 0.55:
+            return None
+        if not _supports_gateway_local_404(
+            {
+                "conclusion": str(code_payload.get("conclusion") or ""),
+                "evidence_chain": list(code_payload.get("evidence_chain") or []),
+            }
+        ) and "endpoint exists" not in " ".join(str(item or "").lower() for item in list(code_payload.get("evidence_chain") or [])):
+            return None
+        if not _rules_out_database_as_primary(db_payload):
+            return None
+
+        return RoutingDecision(
+            next_step=step_for_agent("JudgeAgent"),
+            should_stop=False,
+            reason="quick 模式下网关本地 404 证据链已闭合，停止重复补证并切换 JudgeAgent",
+            metadata={
+                "discussion_step": ctx.discussion_step,
+                "scenario": "gateway_route_miss",
+            },
+        )
+
+
 class NoCritiqueParallelSettleRule(RoutingRule):
     """无批判模式下，避免在已有充分分析覆盖后重复整轮并行分析。"""
 
@@ -704,6 +813,7 @@ __all__ = [
     "CommanderSettleRule",
     "NoCritiqueRevisitRule",
     "NoCritiqueTargetedSettleRule",
+    "NoCritiqueRouteMissSettleRule",
     "NoCritiqueParallelSettleRule",
     "JudgeCoverageRule",
 ]

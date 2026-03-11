@@ -3,11 +3,11 @@
 Incident Models
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class IncidentStatus(str, Enum):
@@ -106,13 +106,12 @@ class Incident(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="元数据")
     
     # 时间戳
-    created_at: datetime = Field(default_factory=datetime.utcnow, description="创建时间")
-    updated_at: datetime = Field(default_factory=datetime.utcnow, description="更新时间")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="创建时间")
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="更新时间")
     resolved_at: Optional[datetime] = Field(None, description="解决时间")
-    
-    class Config:
-        """提供模型配置项，统一对象序列化与字段行为。"""
-        json_schema_extra = {
+
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "id": "inc_001",
                 "title": "订单服务 NullPointerException",
@@ -123,9 +122,10 @@ class Incident(BaseModel):
                 "log_content": "2024-01-15 10:30:00 ERROR [OrderService] NullPointerException...",
                 "exception_stack": "java.lang.NullPointerException\n\tat com.example.OrderService.createOrder...",
                 "service_name": "order-service",
-                "environment": "production"
+                "environment": "production",
             }
         }
+    )
 
 
 class IncidentList(BaseModel):

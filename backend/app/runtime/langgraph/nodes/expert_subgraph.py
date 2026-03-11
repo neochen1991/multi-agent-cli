@@ -7,7 +7,7 @@ from typing import Any, Dict, Mapping
 
 from app.runtime.langgraph.state import AgentSpec
 
-KEY_EXPERT_AGENTS = frozenset({"LogAgent", "CodeAgent", "DatabaseAgent"})
+KEY_EXPERT_AGENTS = frozenset({"LogAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent"})
 
 
 def _compact_value(value: Any, *, depth: int = 0) -> Any:

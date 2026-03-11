@@ -32,3 +32,21 @@ def test_smoke_script_forwards_optional_incident_context_fields():
     assert "exception_stack: scenario.exception_stack" in content
     assert "trace_id: scenario.trace_id" in content
     assert "metadata: scenario.metadata" in content
+
+
+def test_smoke_script_polls_artifacts_without_blocking_on_websocket_result():
+    """WS 不返回最终 result 时，smoke 也应继续走 REST 轮询并及时退出。"""
+
+    content = SMOKE_SCRIPT.read_text()
+
+    assert "const artifactPromise = waitForDebateArtifacts(session.id, incident.id, token);" in content
+    assert "const wsPromise = runRealtimeDebate(session.id, token);" in content
+    assert "const artifacts = await artifactPromise;" in content
+
+
+def test_smoke_script_prints_report_id_in_summary():
+    """smoke 输出摘要时应包含 report_id，方便人工定位结果。"""
+
+    content = SMOKE_SCRIPT.read_text()
+
+    assert "report_id:" in content

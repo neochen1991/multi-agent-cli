@@ -8,7 +8,7 @@ Report Generation Service
 import json
 import os
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from pathlib import Path
 import time
@@ -30,6 +30,45 @@ class ReportGenerationService:
         """初始化报告输出目录。"""
         self.reports_path = os.getenv("REPORTS_PATH", "/tmp/reports")
         os.makedirs(self.reports_path, exist_ok=True)
+
+    @staticmethod
+    def _utc_now() -> datetime:
+        """统一使用带时区的 UTC 时间，避免 datetime.utcnow 弃用告警。"""
+        return datetime.now(UTC)
+
+    @staticmethod
+    def _effective_debate_confidence(debate_result: Dict[str, Any]) -> float:
+        """
+        统一计算报告侧应使用的最终置信度。
+
+        规则与 DebateService 保持一致：
+        - 优先读取顶层 confidence
+        - 若 Judge 根因置信度更高且 final_judgment 已形成有效根因，则取更高值
+        - 无法解析时安全回退到 0.0
+        """
+        if not isinstance(debate_result, dict):
+            return 0.0
+
+        try:
+            top_level = float(debate_result.get("confidence") or 0.0)
+        except Exception:
+            top_level = 0.0
+
+        final_judgment = debate_result.get("final_judgment")
+        final_judgment = final_judgment if isinstance(final_judgment, dict) else {}
+        root_cause = final_judgment.get("root_cause")
+        root_cause = root_cause if isinstance(root_cause, dict) else {}
+        summary = str(root_cause.get("summary") or "").strip()
+        evidence_chain = final_judgment.get("evidence_chain")
+        evidence_chain = evidence_chain if isinstance(evidence_chain, list) else []
+        try:
+            root_cause_confidence = float(root_cause.get("confidence") or 0.0)
+        except Exception:
+            root_cause_confidence = 0.0
+
+        if summary and (root_cause_confidence >= 0.45 or bool(evidence_chain)):
+            return max(top_level, root_cause_confidence)
+        return top_level
     
     async def generate_report(
         self,
@@ -123,12 +162,12 @@ class ReportGenerationService:
         report_path = await self._save_report(report, incident.get("id"), format)
         
         return {
-            "report_id": f"rpt_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+            "report_id": f"rpt_{self._utc_now().strftime('%Y%m%d%H%M%S')}",
             "incident_id": incident.get("id"),
             "format": format,
             "content": report,
             "file_path": report_path,
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": self._utc_now().isoformat(),
         }
     
     async def _generate_report_with_ai(
@@ -254,7 +293,7 @@ class ReportGenerationService:
             "log_excerpt": str(incident.get("log_content") or "")[:420],
         }
         debate_summary = {
-            "confidence": debate_result.get("confidence"),
+            "confidence": self._effective_debate_confidence(debate_result),
             "root_cause": {
                 "summary": extract_readable_text(root_cause.get("summary"), fallback=str(root_cause.get("summary") or ""), max_len=220),
                 "category": root_cause.get("category"),
@@ -329,7 +368,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
         evidence_chain = final_judgment.get("evidence_chain")
         evidence_len = len(evidence_chain) if isinstance(evidence_chain, list) else 0
         try:
-            confidence = float(debate_result.get("confidence") or 0.0)
+            confidence = float(self._effective_debate_confidence(debate_result))
         except Exception:
             confidence = 0.0
         if summary == "需要进一步分析" and category in {"unknown", ""} and evidence_len == 0:
@@ -390,7 +429,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
                     "description": str(incident.get("description") or incident.get("title") or "")[:500],
                     "timeline": [
                         {
-                            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                            "time": self._utc_now().strftime("%Y-%m-%d %H:%M:%S UTC"),
                             "event": f"报告 LLM 超时降级: {error_text}",
                         }
                     ],
@@ -543,7 +582,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
         if not merged["appendix"].get("debate_summary"):
             merged["appendix"]["debate_summary"] = (
                 f"共执行 {debate_result.get('round_control', {}).get('executed_rounds', 0)} 轮辩论，"
-                f"置信度 {debate_result.get('confidence', 0) * 100:.1f}%"
+                f"置信度 {self._effective_debate_confidence(debate_result) * 100:.1f}%"
             )
         interface_mapping = assets.get("interface_mapping", {}) if isinstance(assets, dict) else {}
         merged["appendix"]["responsibility_mapping"] = {
@@ -636,7 +675,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
 
 **解决状态**: {exec_summary.get('resolution_status', '进行中')}
 
-**生成时间**: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
+**生成时间**: {self._utc_now().strftime('%Y-%m-%d %H:%M:%S')} UTC
 
 ---
 
@@ -712,7 +751,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
 {self._format_responsibility_mapping_markdown(responsibility, assets)}
 
 ### 6.4 置信度
-{debate_result.get('confidence', 0) * 100:.1f}%
+{self._effective_debate_confidence(debate_result) * 100:.1f}%
 
 ---
 
@@ -808,7 +847,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
                 </span>
             </p>
             <p><strong>根因摘要:</strong> {exec_summary.get('root_cause_summary', '待分析')}</p>
-            <p><strong>生成时间:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
+            <p><strong>生成时间:</strong> {self._utc_now().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
         </div>
         
         <div class="section">
@@ -823,7 +862,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
         
         <div class="section">
             <h2>置信度</h2>
-            <p>{debate_result.get('confidence', 0) * 100:.1f}%</p>
+            <p>{self._effective_debate_confidence(debate_result) * 100:.1f}%</p>
         </div>
         
         <div class="footer">
@@ -844,9 +883,9 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
         """格式化为 JSON"""
         report = {
             "report_metadata": {
-                "generated_at": datetime.utcnow().isoformat(),
+                "generated_at": self._utc_now().isoformat(),
                 "incident_id": incident.get("id"),
-                "confidence": debate_result.get("confidence", 0),
+                "confidence": self._effective_debate_confidence(debate_result),
                 "generator": "SRE Debate Platform"
             },
             "assets_summary": {
@@ -980,7 +1019,7 @@ executive_summary、incident_overview、root_cause_analysis、impact_assessment�
     ) -> str:
         """保存报告到文件"""
         ext = {"markdown": "md", "html": "html", "json": "json"}.get(format, "md")
-        filename = f"report_{incident_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.{ext}"
+        filename = f"report_{incident_id}_{self._utc_now().strftime('%Y%m%d%H%M%S')}.{ext}"
         filepath = os.path.join(self.reports_path, filename)
         
         with open(filepath, 'w', encoding='utf-8') as f:

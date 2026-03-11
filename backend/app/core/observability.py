@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Dict, List
 from zoneinfo import ZoneInfo
 
@@ -112,7 +112,7 @@ class MetricsStore:
         self._debate_latencies_ms: List[int] = []
 
         # 更新时间
-        self.updated_at = datetime.utcnow().isoformat()
+        self.updated_at = datetime.now(UTC).isoformat()
 
     def record(self, path: str, latency_ms: float, status_code: int):
         """
@@ -137,7 +137,7 @@ class MetricsStore:
         if status_code >= 500:
             self.error_total += 1
 
-        self.updated_at = datetime.utcnow().isoformat()
+        self.updated_at = datetime.now(UTC).isoformat()
 
     def snapshot(self):
         """

@@ -21,11 +21,11 @@
 Debate Models
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DebateStatus(str, Enum):
@@ -138,12 +138,11 @@ class DebateRound(BaseModel):
     latency_ms: Optional[int] = Field(None, description="响应延迟(ms)")
 
     # 时间戳
-    started_at: datetime = Field(default_factory=datetime.utcnow, description="开始时间")
+    started_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="开始时间")
     completed_at: Optional[datetime] = Field(None, description="完成时间")
 
-    class Config:
-        """提供模型配置项，统一对象序列化与字段行为。"""
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "round_number": 1,
                 "phase": "analysis",
@@ -152,9 +151,10 @@ class DebateRound(BaseModel):
                 "model": {"name": "glm-5"},
                 "input_message": "分析以下日志...",
                 "output_content": {"root_cause": "...", "evidence": [...]},
-                "confidence": 0.85
+                "confidence": 0.85,
             }
         }
+    )
 
 
 class DebateSession(BaseModel):
@@ -184,21 +184,21 @@ class DebateSession(BaseModel):
     llm_session_id: Optional[str] = Field(None, description="LLM 会话ID")
 
     # 时间戳
-    created_at: datetime = Field(default_factory=datetime.utcnow, description="创建时间")
-    updated_at: datetime = Field(default_factory=datetime.utcnow, description="更新时间")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="创建时间")
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="更新时间")
     completed_at: Optional[datetime] = Field(None, description="完成时间")
 
-    class Config:
-        """提供模型配置项，统一对象序列化与字段行为。"""
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "id": "deb_001",
                 "incident_id": "inc_001",
                 "status": "analyzing",
                 "current_phase": "analysis",
-                "current_round": 1
+                "current_round": 1,
             }
         }
+    )
 
 
 class EvidenceItem(BaseModel):
@@ -342,11 +342,10 @@ class DebateResult(BaseModel):
     debate_history: List[DebateRound] = Field(default_factory=list, description="辩论历史")
     
     # 时间戳
-    created_at: datetime = Field(default_factory=datetime.utcnow, description="创建时间")
-    
-    class Config:
-        """提供模型配置项，统一对象序列化与字段行为。"""
-        json_schema_extra = {
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="创建时间")
+
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "session_id": "deb_001",
                 "incident_id": "inc_001",
@@ -359,13 +358,14 @@ class DebateResult(BaseModel):
                         "description": "NullPointerException 在 OrderService.createOrder:156",
                         "source": "运行日志",
                         "location": "OrderService.java:156",
-                        "strength": "strong"
+                        "strength": "strong",
                     }
                 ],
                 "risk_assessment": {
                     "risk_level": "high",
                     "risk_factors": ["影响订单创建功能", "可能导致数据不一致"],
-                    "mitigation_suggestions": ["立即修复", "增加空值检查"]
-                }
+                    "mitigation_suggestions": ["立即修复", "增加空值检查"],
+                },
             }
         }
+    )

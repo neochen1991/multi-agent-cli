@@ -3,11 +3,11 @@
 Tri-State Asset Models
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AssetType(str, Enum):
@@ -63,14 +63,13 @@ class RuntimeAsset(BaseModel):
     trace_id: Optional[str] = Field(None, description="链路ID")
     
     # 时间信息
-    timestamp: datetime = Field(default_factory=datetime.utcnow, description="时间戳")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC), description="时间戳")
     
     # 元数据
     metadata: Dict[str, Any] = Field(default_factory=dict, description="元数据")
     
-    class Config:
-        """提供模型配置项，统一对象序列化与字段行为。"""
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "id": "rt_001",
                 "type": "log",
@@ -80,12 +79,13 @@ class RuntimeAsset(BaseModel):
                     "exception": "NullPointerException",
                     "class": "OrderService",
                     "method": "createOrder",
-                    "line": 156
+                    "line": 156,
                 },
                 "service_name": "order-service",
-                "timestamp": "2024-01-15T10:30:00Z"
+                "timestamp": "2024-01-15T10:30:00Z",
             }
         }
+    )
 
 
 class LogEntry(BaseModel):
@@ -109,7 +109,7 @@ class MetricData(BaseModel):
     value: float = Field(..., description="指标值")
     unit: Optional[str] = Field(None, description="单位")
     labels: Dict[str, str] = Field(default_factory=dict, description="标签")
-    timestamp: datetime = Field(default_factory=datetime.utcnow, description="时间戳")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC), description="时间戳")
 
 
 class TraceSpan(BaseModel):
@@ -151,9 +151,8 @@ class DevAsset(BaseModel):
     # 元数据
     metadata: Dict[str, Any] = Field(default_factory=dict, description="元数据")
     
-    class Config:
-        """提供模型配置项，统一对象序列化与字段行为。"""
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "id": "dev_001",
                 "type": "code",
@@ -161,9 +160,10 @@ class DevAsset(BaseModel):
                 "path": "src/main/java/com/example/OrderService.java",
                 "language": "java",
                 "repo_url": "https://github.com/example/order-service",
-                "branch": "main"
+                "branch": "main",
             }
         }
+    )
 
 
 class CodeClass(BaseModel):
@@ -226,9 +226,8 @@ class DesignAsset(BaseModel):
     # 元数据
     metadata: Dict[str, Any] = Field(default_factory=dict, description="元数据")
     
-    class Config:
-        """提供模型配置项，统一对象序列化与字段行为。"""
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "id": "des_001",
                 "type": "ddd_document",
@@ -238,10 +237,11 @@ class DesignAsset(BaseModel):
                 "parsed_data": {
                     "aggregate": "OrderAggregate",
                     "entities": ["Order", "OrderItem"],
-                    "value_objects": ["OrderId", "Money"]
-                }
+                    "value_objects": ["OrderId", "Money"],
+                },
             }
         }
+    )
 
 
 class DomainModel(BaseModel):
@@ -325,7 +325,7 @@ class CaseLibrary(BaseModel):
     related_code: List[str] = Field(default_factory=list, description="关联代码")
     
     # 元数据
-    created_at: datetime = Field(default_factory=datetime.utcnow, description="创建时间")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="创建时间")
     tags: List[str] = Field(default_factory=list, description="标签")
 
 
@@ -348,19 +348,18 @@ class TriStateAsset(BaseModel):
     relationships: Dict[str, List[str]] = Field(default_factory=dict, description="资产关联关系")
     
     # 时间戳
-    created_at: datetime = Field(default_factory=datetime.utcnow, description="创建时间")
-    updated_at: datetime = Field(default_factory=datetime.utcnow, description="更新时间")
-    
-    class Config:
-        """提供模型配置项，统一对象序列化与字段行为。"""
-        json_schema_extra = {
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="创建时间")
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="更新时间")
+
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "id": "tri_001",
                 "runtime_assets": [
                     {
                         "id": "rt_001",
                         "type": "log",
-                        "source": "application.log"
+                        "source": "application.log",
                     }
                 ],
                 "dev_assets": [
@@ -368,18 +367,19 @@ class TriStateAsset(BaseModel):
                         "id": "dev_001",
                         "type": "code",
                         "name": "OrderService.java",
-                        "path": "src/main/java/com/example/OrderService.java"
+                        "path": "src/main/java/com/example/OrderService.java",
                     }
                 ],
                 "design_assets": [
                     {
                         "id": "des_001",
                         "type": "ddd_document",
-                        "name": "订单域设计文档"
+                        "name": "订单域设计文档",
                     }
                 ],
                 "relationships": {
-                    "rt_001": ["dev_001", "des_001"]
-                }
+                    "rt_001": ["dev_001", "des_001"],
+                },
             }
         }
+    )
