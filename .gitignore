@@ -3,6 +3,7 @@
 
 # Runtime logs / temp
 .run/
+.worktrees/
 *.log
 *.pid
 *.out
