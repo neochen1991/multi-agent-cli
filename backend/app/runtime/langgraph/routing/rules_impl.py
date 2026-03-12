@@ -137,6 +137,25 @@ def _rules_out_database_as_primary(payload: Dict[str, Any]) -> bool:
     )
 
 
+def _flatten_followup_texts(value: Any) -> List[str]:
+    """把 Judge/Commander 输出里的补证动作压平成文本列表，便于推断下一位专家。"""
+    texts: List[str] = []
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            texts.append(text)
+        return texts
+    if isinstance(value, dict):
+        for item in value.values():
+            texts.extend(_flatten_followup_texts(item))
+        return texts
+    if isinstance(value, list):
+        for item in value:
+            texts.extend(_flatten_followup_texts(item))
+        return texts
+    return texts
+
+
 class ConsensusRule(RoutingRule):
     """Rule that stops execution when judge confidence reaches threshold."""
 
@@ -754,6 +773,74 @@ class NoCritiqueParallelSettleRule(RoutingRule):
         )
 
 
+class StandardSecondRoundTargetedRule(RoutingRule):
+    """standard 模式第二轮后，优先根据缺口摘要和 Judge 补证动作做定向补证。"""
+
+    def __init__(self, min_round: int = 2, priority: int = 58):
+        self._min_round = min_round
+        self._priority = priority
+
+    @property
+    def name(self) -> str:
+        return "standard_second_round_targeted"
+
+    @property
+    def priority(self) -> int:
+        return self._priority
+
+    def evaluate(self, ctx: RoutingContext) -> Optional[RoutingDecision]:
+        """第二轮后的 standard 模式不再默认整轮重跑，优先点名缺口归属专家。"""
+        if ctx.debate_enable_critique:
+            return None
+        if ctx.next_step not in ("analysis_parallel", "parallel_analysis"):
+            return None
+
+        mode = str(ctx.state.get("execution_mode") or "").strip().lower()
+        current_round = int(ctx.state.get("current_round") or 1)
+        if mode != "standard" or current_round < self._min_round:
+            return None
+
+        available_agents = [str(name or "").strip() for name in list(ctx.parallel_analysis_agents or []) if str(name or "").strip()]
+        if not available_agents:
+            return None
+
+        judge_output = ctx.state.get("agent_outputs", {}).get("JudgeAgent", {}) if isinstance(ctx.state.get("agent_outputs"), dict) else {}
+        followup_texts = [
+            *[str(item or "") for item in list(ctx.state.get("round_gap_summary") or [])],
+            *[str(item or "") for item in list(ctx.state.get("open_questions") or [])],
+            *_flatten_followup_texts(judge_output.get("next_checks") if isinstance(judge_output, dict) else None),
+            *_flatten_followup_texts(judge_output.get("action_items") if isinstance(judge_output, dict) else None),
+        ]
+        hinted_agents = infer_relevant_agents_from_texts(
+            followup_texts,
+            available_agents=available_agents,
+        )
+        for agent_name in hinted_agents:
+            if not _agent_has_effective_evidence(ctx.round_cards, ctx.state, agent_name):
+                return RoutingDecision(
+                    next_step=step_for_agent(agent_name),
+                    should_stop=False,
+                    reason=f"standard 模式第二轮后改为定向补证，优先追问 {agent_name}",
+                    metadata={
+                        "target_agent": agent_name,
+                        "current_round": current_round,
+                        "mode": mode,
+                    },
+                )
+
+        # 中文注释：如果 Judge 和 commander 都没能指出新的缺口归属，
+        # 再把整轮专家重跑一遍通常不会增加强证据，此时直接回 Judge 保守收口。
+        return RoutingDecision(
+            next_step=step_for_agent("JudgeAgent"),
+            should_stop=False,
+            reason="standard 模式第二轮后未识别出新的缺口归属，停止整轮重跑并切换 JudgeAgent",
+            metadata={
+                "current_round": current_round,
+                "mode": mode,
+            },
+        )
+
+
 class JudgeCoverageRule(RoutingRule):
     """Rule that ensures judge is called when all agents have participated."""
 
@@ -815,5 +902,6 @@ __all__ = [
     "NoCritiqueTargetedSettleRule",
     "NoCritiqueRouteMissSettleRule",
     "NoCritiqueParallelSettleRule",
+    "StandardSecondRoundTargetedRule",
     "JudgeCoverageRule",
 ]

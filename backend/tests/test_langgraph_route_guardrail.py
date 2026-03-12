@@ -534,6 +534,107 @@ def test_route_guardrail_shortcuts_to_judge_when_targeted_reask_hits_already_eff
     assert guarded["should_stop"] is False
 
 
+def test_route_guardrail_standard_second_round_targets_gap_owner_instead_of_parallel(monkeypatch):
+    """standard 第二轮后，若 Judge 已明确缺口归属，应优先定向补证而不是整轮重跑。"""
+
+    orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=2)
+    monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", False)
+    orchestrator._enable_critique = False
+    orchestrator.PARALLEL_ANALYSIS_AGENTS = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent")
+
+    state = {
+        "execution_mode": "standard",
+        "current_round": 2,
+        "discussion_step_count": 6,
+        "max_discussion_steps": 8,
+        "round_gap_summary": ["仍需确认 RiskService 的 P99 延迟和错误率，判断是否真的是上游服务端慢。"],
+        "agent_outputs": {
+            "ProblemAnalysisAgent": {"confidence": 0.58, "open_questions": []},
+            "JudgeAgent": {
+                "confidence": 0.52,
+                "next_checks": {
+                    "mandatory": [
+                        "MetricsAgent 需要补充 RiskService P99 延迟、504 错误率和 payment-service 线程池饱和度"
+                    ]
+                },
+            },
+            "LogAgent": {"confidence": 0.73, "conclusion": "日志显示 10s×3 重试耗尽预算", "evidence_chain": ["timeout log"]},
+            "DomainAgent": {"confidence": 0.71, "conclusion": "聚合根内嵌外部调用违反边界", "evidence_chain": ["domain boundary"]},
+            "CodeAgent": {"confidence": 0.69, "conclusion": "代码侧怀疑 timeout/retry 配置不当", "evidence_chain": ["code path"]},
+            "DatabaseAgent": {"confidence": 0.66, "conclusion": "数据库不是主因", "evidence_chain": ["db normal"]},
+        },
+    }
+    round_cards = [
+        _card("LogAgent", "analysis", 0.73, conclusion="日志显示 10s×3 重试耗尽预算", evidence_chain=["timeout log"]),
+        _card("DomainAgent", "analysis", 0.71, conclusion="聚合根内嵌外部调用违反边界", evidence_chain=["domain boundary"]),
+        _card("CodeAgent", "analysis", 0.69, conclusion="代码侧怀疑 timeout/retry 配置不当", evidence_chain=["code path"]),
+        _card("DatabaseAgent", "analysis", 0.66, conclusion="数据库不是主因", evidence_chain=["db normal"]),
+        _card("JudgeAgent", "judgment", 0.52, conclusion="仍需补 Metrics 侧证据"),
+    ]
+    route_decision = {
+        "next_step": "analysis_parallel",
+        "should_stop": False,
+        "stop_reason": "",
+        "reason": "主Agent想再做一轮并行分析",
+    }
+
+    guarded = orchestrator._route_guardrail(
+        state=state,
+        round_cards=round_cards,
+        route_decision=route_decision,
+    )
+
+    assert guarded["next_step"] == "speak:MetricsAgent"
+    assert guarded["should_stop"] is False
+
+
+def test_route_guardrail_standard_second_round_settles_when_no_new_gap_owner(monkeypatch):
+    """standard 第二轮后若没有新的缺口归属，不应继续整轮重跑。"""
+
+    orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=2)
+    monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", False)
+    orchestrator._enable_critique = False
+    orchestrator.PARALLEL_ANALYSIS_AGENTS = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent")
+
+    state = {
+        "execution_mode": "standard",
+        "current_round": 2,
+        "discussion_step_count": 7,
+        "max_discussion_steps": 8,
+        "round_gap_summary": ["当前证据基本收敛，可进入裁决或验证阶段。"],
+        "agent_outputs": {
+            "ProblemAnalysisAgent": {"confidence": 0.57, "open_questions": []},
+            "JudgeAgent": {"confidence": 0.54, "next_checks": {}},
+            "LogAgent": {"confidence": 0.73, "conclusion": "日志已确认预算耗尽", "evidence_chain": ["timeout log"]},
+            "DomainAgent": {"confidence": 0.71, "conclusion": "领域边界有问题", "evidence_chain": ["domain boundary"]},
+            "CodeAgent": {"confidence": 0.69, "conclusion": "代码存在同步重试", "evidence_chain": ["code path"]},
+            "DatabaseAgent": {"confidence": 0.66, "conclusion": "数据库不是主因", "evidence_chain": ["db normal"]},
+        },
+    }
+    round_cards = [
+        _card("LogAgent", "analysis", 0.73, conclusion="日志已确认预算耗尽", evidence_chain=["timeout log"]),
+        _card("DomainAgent", "analysis", 0.71, conclusion="领域边界有问题", evidence_chain=["domain boundary"]),
+        _card("CodeAgent", "analysis", 0.69, conclusion="代码存在同步重试", evidence_chain=["code path"]),
+        _card("DatabaseAgent", "analysis", 0.66, conclusion="数据库不是主因", evidence_chain=["db normal"]),
+        _card("JudgeAgent", "judgment", 0.54, conclusion="证据已接近收敛"),
+    ]
+    route_decision = {
+        "next_step": "analysis_parallel",
+        "should_stop": False,
+        "stop_reason": "",
+        "reason": "主Agent想再做一轮并行分析",
+    }
+
+    guarded = orchestrator._route_guardrail(
+        state=state,
+        round_cards=round_cards,
+        route_decision=route_decision,
+    )
+
+    assert guarded["next_step"] == "speak:JudgeAgent"
+    assert guarded["should_stop"] is False
+
+
 def test_route_guardrail_shortcuts_route_miss_case_to_judge_in_quick_mode(monkeypatch):
     """quick 模式的网关本地 404 场景，应在首轮专家完成后直接切 Judge。"""
 

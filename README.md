@@ -23,12 +23,18 @@
   - 专家集合
   - token / timeout 预算
   - 收口质量门槛
+- 执行策略与投递方式已拆分：
+  - `execution_mode` 只表示分析策略（`standard / quick`）
+  - `execution_delivery_mode` 只表示投递方式（`foreground / background`）
+  - `requested_execution_mode` 保留用户原始选择，历史页用它展示
+- `background` 不再是分析策略，后台执行只改变投递方式，不覆盖分析策略。
 - `LogAgent / CodeAgent / DatabaseAgent / MetricsAgent` 已接入多步调查子流程；`deep` 模式下会增加反证复核。
 - 无批判模式下已支持：
   - 重复并行分析拦截
   - 基于证据缺口的定向追问
   - 对已形成有效覆盖专家的直接收口
   - `quick` 模式下对 `gateway route not found` 这类本地 404 场景的快速收口
+- 标准模式第 2 轮以后会优先触发“定向补证”规则，避免重复全量并行分析。
 - 前端分析页拆分为三块：
   - `资产映射`
   - `辩论过程`

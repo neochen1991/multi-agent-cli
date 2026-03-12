@@ -218,7 +218,14 @@ API 入口位于：
 - 创建分析会话。
 - 保存初始上下文。
 - 写入会话级 `analysis_depth_mode / max_rounds` 配置。
+- 写入会话级执行与投递策略（用于后续展示与路由）：
+  - `execution_mode`：真正的“分析策略”，当前只区分 `standard / quick`。
+  - `requested_execution_mode`：用户原始选择，供历史页稳定展示，不应被后台投递覆盖。
+  - `execution_delivery_mode`：投递方式（`foreground / background`），只影响任务执行方式。
 - 触发同步或异步执行。
+
+注意：`background` 不再被视为分析策略，而是“投递方式”。  
+也就是说，后台执行只改变 `execution_delivery_mode`，不会覆盖 `execution_mode`。
 
 ### 6.3 资产映射先行
 
@@ -568,7 +575,8 @@ curl http://127.0.0.1:8000/api/v1/debates/output-refs/{ref_id}
 - 读取会话和 incident 信息。
 - 构建 runtime 输入上下文。
 - 执行资产映射。
-- 合并 `execution_mode / analysis_depth_mode / max_rounds`，形成稳定的会话辩论配置。
+- 合并 `execution_mode / requested_execution_mode / analysis_depth_mode / max_rounds`，形成稳定的会话辩论配置。
+- 同步 `execution_delivery_mode`，确保后台执行只影响投递方式，不覆盖分析策略。
 - 调用 LangGraph 运行时。
 - 处理执行异常和终态收敛。
 - 持久化过程结果和最终结果。
@@ -600,6 +608,25 @@ curl http://127.0.0.1:8000/api/v1/debates/output-refs/{ref_id}
 - `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/services/state_transition_service.py`
 - `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/routing/rule_engine.py`
 - `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/routing/rules_impl.py`
+
+核心文件职责速览（便于快速对齐代码入口）：
+- `langgraph_runtime.py`：运行时 orchestrator，负责组装与驱动执行。
+- `builder.py`：把节点、边、终态映射成 LangGraph 图。
+- `agent_runner.py`：统一专家 Agent 的执行壳与调用接口。
+- `runtime_policy.py`：解释执行模式与深度策略，输出运行时策略对象。
+- `budgeting.py`：统一 token / 超时 / 最大轮次等预算。
+- `state_views.py`：把结构化状态投影成不同视图（history/round/dialogue）。
+- `event_dispatcher.py`：事件流派发，保证前端/回放可用。
+- `execution.py`：执行链路的核心调度（阶段推进与节点执行）。
+- `state.py`：状态结构与镜像规则的权威定义。
+- `phase_executor.py`：每阶段执行器，统一入口和输出收敛。
+- `phase_manager.py`：管理阶段切换与阶段边界。
+- `checkpointer.py`：断点快照与恢复。
+- `doom_loop_guard.py`：循环检测，避免死循环。
+- `session_compaction.py`：上下文压缩与历史裁剪。
+- `services/state_transition_service.py`：阶段状态与快照回写聚合。
+- `routing/rule_engine.py`：路由规则调度器。
+- `routing/rules_impl.py`：具体路由规则实现集合。
 
 ### 9.1 Orchestrator
 
@@ -634,6 +661,25 @@ curl http://127.0.0.1:8000/api/v1/debates/output-refs/{ref_id}
 - token / timeout 预算
 - 多步调查子流程是否启用
 - 最终是否允许收口
+
+#### 9.1.1 执行策略与投递方式
+
+当前运行时把“分析策略”和“投递方式”严格拆开：
+- `execution_mode`：分析策略，只用于路由与预算（`standard / quick`）。
+- `execution_delivery_mode`：投递方式（`foreground / background`）。
+- `requested_execution_mode`：保留用户原始选择，用于历史页与审计展示。
+
+关键实现点：
+- `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/runtime_policy.py`
+  - 统一解释 `execution_mode` + `analysis_depth_mode`，生成运行时策略。
+- `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/budgeting.py`
+  - `quick` 会使用更低的 token 与超时预算，避免弱模型超时。
+- `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/strategy_center.py`
+  - 把执行策略映射成 `runtime_strategy`（balanced / low_cost）。
+- `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/deployment_center.py`
+  - 决定 `deployment_profile`，影响是否启用 Metrics/Skill 增强等能力。
+- `/Users/neochen/multi-agent-cli_v2/backend/app/api/debates.py`
+  - `execute-background` 只改 `execution_delivery_mode`，不覆盖 `execution_mode`。
 
 ### 9.2 GraphBuilder
 
@@ -702,6 +748,13 @@ curl http://127.0.0.1:8000/api/v1/debates/output-refs/{ref_id}
 - 无批判模式下的定向补证
 - 已形成有效覆盖时的直接收口
 - 重复并行分析拦截
+
+新增关键规则（标准模式）：
+- `StandardSecondRoundTargetedRule`：在第 2 轮以后避免重复全量并行分析，优先挑选“证据缺口”关联的专家做定向补证；如果没有明确缺口则直接进入 Judge。
+
+相关实现：
+- `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/routing/rules_impl.py`
+- `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/routing/rule_engine.py`
 
 相关实现：
 - `/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph/routing/rule_engine.py`
@@ -1052,6 +1105,17 @@ Connector 是对外部系统的适配层。
 
 定位：
 - 提供资产导入、资产查询和资产展示入口。
+
+### 18.4 History 页面
+
+关键文件：
+- `/Users/neochen/multi-agent-cli_v2/frontend/src/pages/History/index.tsx`
+- `/Users/neochen/multi-agent-cli_v2/frontend/src/v2/pages/HistoryV2.tsx`
+
+定位：
+- 展示历史分析任务列表、状态与摘要。
+- 展示每个任务的开始时间，优先使用会话真实启动时间（避免只看创建时间）。
+- 模式展示优先读 `requested_execution_mode`，保证后台执行不会把模式覆盖成 background。
 
 ## 19. 如何新增一个 Agent
 

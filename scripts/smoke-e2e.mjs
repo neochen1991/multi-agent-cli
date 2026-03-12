@@ -6,6 +6,7 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://127.0.0.1:5173';
 const BACKEND_URL = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
 const WS_TIMEOUT_MS = Number(process.env.WS_TIMEOUT_MS || 720000);
 const SMOKE_SCENARIO = String(process.env.SMOKE_SCENARIO || '').trim();
+const SMOKE_MODE = String(process.env.SMOKE_MODE || 'quick').trim().toLowerCase();
 const REQUIRE_FRONTEND_HTTP = String(process.env.REQUIRE_FRONTEND_HTTP || '').trim() === 'true';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -272,7 +273,9 @@ async function runScenario(scenario, token) {
   );
 
   const session = await jsonRequest(
-    `${BACKEND_URL}/api/v1/debates/?incident_id=${incident.id}&mode=quick`,
+    `${BACKEND_URL}/api/v1/debates/?incident_id=${incident.id}&mode=${encodeURIComponent(
+      SMOKE_MODE === 'standard' ? 'standard' : 'quick',
+    )}`,
     { method: 'POST' },
     token,
   );
@@ -313,6 +316,7 @@ async function runScenario(scenario, token) {
   }
   return {
     scenario: scenario.id,
+    mode: SMOKE_MODE === 'standard' ? 'standard' : 'quick',
     incident_id: incident.id,
     session_id: session.id,
     status: detail.status,

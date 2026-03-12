@@ -20,6 +20,7 @@ from app.runtime.langgraph.routing.rules_impl import (
     JudgeReadyRule,
     NoCritiqueRevisitRule,
     NoCritiqueRouteMissSettleRule,
+    StandardSecondRoundTargetedRule,
     PostRebuttalSettleRule,
     RepetitionRule,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "CommanderSettleRule",
     "NoCritiqueRevisitRule",
     "NoCritiqueRouteMissSettleRule",
+    "StandardSecondRoundTargetedRule",
     "JudgeCoverageRule",
     # Helper functions
     "_agent_output_from_state",
