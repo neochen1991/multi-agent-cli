@@ -60,6 +60,54 @@ const START_PATHS = [
   },
 ];
 
+const AGENT_OVERVIEW = [
+  {
+    name: 'ProblemAnalysisAgent',
+    role: '主 Agent',
+    desc: '汇总故障上下文，发出任务命令并收敛最终根因结论。',
+  },
+  {
+    name: 'LogAgent',
+    role: '日志专家',
+    desc: '对齐日志时间线、trace 线索与异常模式，产出首轮证据。',
+  },
+  {
+    name: 'CodeAgent',
+    role: '代码专家',
+    desc: '从入口到调用链闭包定位风险点，关联 SQL 与下游依赖。',
+  },
+  {
+    name: 'DomainAgent',
+    role: '领域专家',
+    desc: '定位责任田归属与领域约束，判断业务规则与边界偏差。',
+  },
+  {
+    name: 'DatabaseAgent',
+    role: '数据库专家',
+    desc: '分析连接池、锁等待、索引与热点 SQL，判断数据面根因。',
+  },
+  {
+    name: 'MetricsAgent',
+    role: '指标专家',
+    desc: '关联监控与 SLO 曲线，验证异常与业务影响范围。',
+  },
+  {
+    name: 'ChangeAgent',
+    role: '变更专家',
+    desc: '关联发布/配置/依赖变更，评估变更引入的回归风险。',
+  },
+  {
+    name: 'RunbookAgent',
+    role: '运维专家',
+    desc: '匹配应急手册与处置路径，补充应急动作建议。',
+  },
+  {
+    name: 'JudgeAgent',
+    role: '裁决 Agent',
+    desc: '核验证据链一致性，输出可信结论与复盘建议。',
+  },
+];
+
 type DashboardStats = {
   todayAnalyses: number;
   resolvedCount: number;
@@ -361,6 +409,24 @@ const HomePage: React.FC = () => {
           </Card>
         </Col>
       </Row>
+
+      <Card className="module-card" title="Agent 角色速览" style={{ marginTop: 16 }}>
+        <Row gutter={[12, 12]}>
+          {AGENT_OVERVIEW.map((agent) => (
+            <Col xs={24} md={12} lg={8} key={agent.name}>
+              <Card size="small" className="compact-card">
+                <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                  <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                    <Text strong>{agent.name}</Text>
+                    <Tag color={agent.role === '主 Agent' ? 'processing' : 'default'}>{agent.role}</Tag>
+                  </Space>
+                  <Text type="secondary">{agent.desc}</Text>
+                </Space>
+              </Card>
+            </Col>
+          ))}
+        </Row>
+      </Card>
 
       <Card className="module-card" title="新手上手路径" style={{ marginTop: 16 }}>
         <Row gutter={[12, 12]}>
