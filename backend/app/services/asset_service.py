@@ -615,6 +615,19 @@ class AssetService:
             symptom=symptom,
         )
 
+    async def locate_responsibility_assets(
+        self,
+        *,
+        log_content: str,
+        symptom: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """仅使用系统内维护的责任田资产进行匹配。"""
+        await self._ensure_sample_knowledge_loaded()
+        return await self._locate_from_responsibility_assets(
+            log_content=log_content,
+            symptom=symptom,
+        )
+
     # ============== 责任田资产（用户维护） ==============
 
     async def list_responsibility_assets(
@@ -833,6 +846,7 @@ class AssetService:
         return {
             "matched": True,
             "confidence": round(confidence, 3),
+            "source": "responsibility_assets",
             "reason": "已命中用户维护的责任田资产映射",
             "guidance": [],
             "interface_hints": hints[:10],
@@ -840,6 +854,7 @@ class AssetService:
             "aggregate": str(best_row.get("aggregate") or ""),
             "owner_team": str(best_row.get("owner_team") or ""),
             "owner": str(best_row.get("owner") or ""),
+            "responsibility_asset_id": str(best_row.get("asset_id") or ""),
             "matched_endpoint": best_endpoint,
             "code_artifacts": code_artifacts,
             "db_tables": db_tables,

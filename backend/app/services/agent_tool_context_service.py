@@ -1746,6 +1746,8 @@ class AgentToolContextService:
                 continue
             if file.suffix.lower() not in SOURCE_SUFFIXES:
                 continue
+            if file.name.lower().startswith("test"):
+                continue
             scanned_files += 1
             try:
                 content = file.read_text(encoding="utf-8", errors="replace")

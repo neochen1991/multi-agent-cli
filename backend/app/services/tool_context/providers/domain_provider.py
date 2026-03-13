@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 import structlog
 
 from app.models.tooling import AgentToolingConfig
+from app.services.asset_service import asset_service
 from app.services.tool_context.result import ToolContextResult
 
 logger = structlog.get_logger()
@@ -38,6 +39,58 @@ async def build_domain_context(
             },
         )
     ]
+
+    log_content = str(
+        (compact_context.get("log_content") or incident_context.get("log_content") or "")
+    ).strip()
+    symptom = str(
+        (incident_context.get("description") or incident_context.get("title") or "")
+    ).strip()
+    responsibility_hit = None
+    if log_content or symptom:
+        try:
+            responsibility_hit = await asset_service.locate_responsibility_assets(
+                log_content=log_content,
+                symptom=symptom,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("responsibility_asset_lookup_failed", error=str(exc))
+            audit_log.append(
+                service._audit(  # noqa: SLF001
+                    tool_name="domain_responsibility_assets",
+                    action="local_lookup",
+                    status="error",
+                    detail={"error": str(exc)},
+                )
+            )
+    if log_content or symptom:
+        audit_log.append(
+            service._audit(  # noqa: SLF001
+                tool_name="domain_responsibility_assets",
+                action="local_lookup",
+                status="ok" if responsibility_hit else "miss",
+                detail={
+                    "matched": bool(responsibility_hit and responsibility_hit.get("matched")),
+                    "asset_id": str((responsibility_hit or {}).get("responsibility_asset_id") or ""),
+                },
+            )
+        )
+    if responsibility_hit and responsibility_hit.get("matched"):
+        return ToolContextResult(
+            name="domain_responsibility_assets",
+            enabled=True,
+            used=True,
+            status="ok",
+            summary="已命中系统责任田资产，跳过 Excel 责任田查询。",
+            data={
+                "source": "responsibility_assets",
+                "matched": True,
+                "mapping": responsibility_hit,
+            },
+            command_gate=command_gate,
+            audit_log=audit_log,
+        )
+
     if not tool_cfg.enabled:
         return ToolContextResult(
             name="domain_excel_lookup",
