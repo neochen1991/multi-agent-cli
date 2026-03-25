@@ -171,6 +171,7 @@ class LangGraphRuntimeOrchestrator:
         "CodeAgent",
         "DatabaseAgent",
         "MetricsAgent",
+        "ImpactAnalysisAgent",
         "ChangeAgent",
         "RunbookAgent",
         "RuleSuggestionAgent",
@@ -183,6 +184,7 @@ class LangGraphRuntimeOrchestrator:
     )
     CORROBORATION_AGENTS = (
         "DomainAgent",
+        "ImpactAnalysisAgent",
         "ChangeAgent",
         "RunbookAgent",
         "RuleSuggestionAgent",
@@ -1293,6 +1295,10 @@ class LangGraphRuntimeOrchestrator:
             """把 skill hints 清洗成稳定的提示语列表。"""
             return _normalize_items(value, limit=8, width=80)
 
+        def _normalize_tool_hints(value: Any) -> List[str]:
+            """把 tool hints 清洗成稳定的工具提示列表。"""
+            return _normalize_items(value, limit=8, width=80)
+
         raw_commands = payload.get("commands")
         commands: Dict[str, Dict[str, Any]] = {}
         if isinstance(raw_commands, list):
@@ -1318,6 +1324,7 @@ class LangGraphRuntimeOrchestrator:
                     "trace_ids": _normalize_items(item.get("trace_ids"), limit=8, width=120),
                     "error_keywords": _normalize_items(item.get("error_keywords"), limit=12, width=120),
                     "skill_hints": _normalize_skill_hints(item.get("skill_hints")),
+                    "tool_hints": _normalize_tool_hints(item.get("tool_hints")),
                 }
 
         defaults = {
@@ -1326,6 +1333,7 @@ class LangGraphRuntimeOrchestrator:
             "CodeAgent": "定位可能代码瓶颈、连接池/线程池/慢SQL风险点",
             "DatabaseAgent": "读取数据库表结构/索引/慢SQL/TopSQL/session状态并给出瓶颈判断",
             "MetricsAgent": "提取 CPU/线程/连接池/错误率指标异常窗口，给出关键时间点与阈值",
+            "ImpactAnalysisAgent": "基于问题描述、日志、告警和责任田映射分析影响功能、接口和用户范围",
             "ChangeAgent": "分析故障时间窗前后的发布/提交变更，给出可疑变更候选",
             "RunbookAgent": "检索相似故障案例与SOP，给出可执行处置步骤和差异点",
             "CriticAgent": "质疑前述结论中的证据缺口和假设跳跃",
@@ -1353,6 +1361,7 @@ class LangGraphRuntimeOrchestrator:
                         "trace_ids": [],
                         "error_keywords": [],
                         "skill_hints": [],
+                        "tool_hints": [],
                     },
                 )
         elif targets_hint:
@@ -1374,6 +1383,7 @@ class LangGraphRuntimeOrchestrator:
                         "trace_ids": [],
                         "error_keywords": [],
                         "skill_hints": [],
+                        "tool_hints": [],
                     }
         return commands
 
@@ -1595,7 +1605,7 @@ class LangGraphRuntimeOrchestrator:
         commands: Dict[str, Dict[str, Any]],
         compact_context: Dict[str, Any],
     ) -> Dict[str, Dict[str, Any]]:
-        """把 skill 产生的提示语补到各 Agent 命令里。"""
+        """把 skill/tool 提示补到各 Agent 命令里。"""
         if not isinstance(commands, dict):
             return {}
 
@@ -1612,6 +1622,34 @@ class LangGraphRuntimeOrchestrator:
             for token in ("sql", "数据库", "连接池", "hikari", "lock", "slow", "deadlock", "session")
         )
         has_route_signal = any(token in incident_text for token in ("404", "route", "路由", "not found", "网关"))
+        has_timeout_cascade_signal = any(
+            token in incident_text
+            for token in (
+                "timeout",
+                "timed out",
+                "deadline exceeded",
+                "504",
+                "upstream",
+                "read timeout",
+                "网关超时",
+                "上游超时",
+                "级联",
+            )
+        )
+        has_release_signal = any(
+            token in incident_text
+            for token in (
+                "release",
+                "deploy",
+                "rollback",
+                "上线",
+                "发布",
+                "回滚",
+                "变更",
+                "commit",
+                "版本",
+            )
+        )
 
         default_skill_by_agent: Dict[str, List[str]] = {
             "ProblemAnalysisAgent": ["incident-commander"],
@@ -1620,6 +1658,7 @@ class LangGraphRuntimeOrchestrator:
             "CodeAgent": ["code-path-analysis"],
             "DatabaseAgent": ["db-bottleneck-diagnosis"] if has_db_signal else [],
             "MetricsAgent": ["metrics-anomaly-triage"],
+            "ImpactAnalysisAgent": ["domain-responsibility-mapping", "metrics-anomaly-triage"],
             "ChangeAgent": ["change-correlation-review"],
             "RunbookAgent": ["runbook-execution-planner"],
             "RuleSuggestionAgent": ["alert-rule-hardening"],
@@ -1637,6 +1676,26 @@ class LangGraphRuntimeOrchestrator:
             default_skill_by_agent.setdefault("CodeAgent", []).append("code-path-analysis")
             default_skill_by_agent.setdefault("CriticAgent", []).append("architectural-critique")
 
+        # 中文注释：以下是生产根因定位场景的扩展 Skill 注入策略。
+        if has_timeout_cascade_signal:
+            for target in ("LogAgent", "MetricsAgent", "DomainAgent", "JudgeAgent"):
+                default_skill_by_agent.setdefault(target, []).append("timeout-cascade-rca")
+        if has_db_signal:
+            for target in ("DatabaseAgent", "LogAgent", "DomainAgent", "JudgeAgent"):
+                default_skill_by_agent.setdefault(target, []).append("db-lock-contention-triage")
+        if has_release_signal:
+            for target in ("ChangeAgent", "CodeAgent", "DomainAgent", "JudgeAgent"):
+                default_skill_by_agent.setdefault(target, []).append("release-regression-correlation")
+        if has_timeout_cascade_signal or has_db_signal or has_route_signal:
+            default_skill_by_agent.setdefault("ImpactAnalysisAgent", []).append("domain-responsibility-mapping")
+
+        skill_to_tool_hint: Dict[str, str] = {
+            "timeout-cascade-rca": "upstream_timeout_chain",
+            "db-lock-contention-triage": "db_lock_hotspot",
+            "release-regression-correlation": "release_regression_guard",
+            "design-consistency-check": "design_spec_alignment",
+        }
+
         def _normalize_hints(value: Any) -> List[str]:
             """把候选提示语清洗成适合注入命令的数组。"""
             if not isinstance(value, list):
@@ -1649,16 +1708,42 @@ class LangGraphRuntimeOrchestrator:
                 picks.append(text[:80])
             return list(dict.fromkeys(picks))[:8]
 
+        is_fast_mode = self._is_fast_execution_mode() or str(self.analysis_depth_mode or "").strip().lower() == "quick"
+        max_skill_hints = 2 if is_fast_mode else 4
+        max_tool_hints = 1 if is_fast_mode else 3
+
+        def _derive_tool_hints(skills: List[str]) -> List[str]:
+            picks: List[str] = []
+            for skill in list(skills or []):
+                tool = skill_to_tool_hint.get(str(skill or "").strip())
+                if tool:
+                    picks.append(tool)
+            return list(dict.fromkeys(picks))[:max_tool_hints]
+
         for target, cmd in list(commands.items()):
             if not isinstance(cmd, dict):
                 continue
             existing = _normalize_hints(cmd.get("skill_hints"))
             if existing:
                 cmd["skill_hints"] = existing
+                # 中文注释：若 commander 已明确给出 skill_hints，优先尊重；只在 tool_hints 缺失时做轻量补全。
+                existing_tools = _normalize_hints(cmd.get("tool_hints"))
+                if existing_tools:
+                    cmd["tool_hints"] = existing_tools[:max_tool_hints]
+                else:
+                    cmd["tool_hints"] = _derive_tool_hints(existing)
                 commands[target] = cmd
                 continue
             fallback = list(default_skill_by_agent.get(target) or [])
-            cmd["skill_hints"] = list(dict.fromkeys([str(item).strip() for item in fallback if str(item).strip()]))[:8]
+            normalized_fallback = list(
+                dict.fromkeys([str(item).strip() for item in fallback if str(item).strip()])
+            )[:max_skill_hints]
+            cmd["skill_hints"] = normalized_fallback
+            existing_tools = _normalize_hints(cmd.get("tool_hints"))
+            if existing_tools:
+                cmd["tool_hints"] = existing_tools[:max_tool_hints]
+            else:
+                cmd["tool_hints"] = _derive_tool_hints(normalized_fallback)
             commands[target] = cmd
         return commands
 
@@ -2206,7 +2291,10 @@ class LangGraphRuntimeOrchestrator:
             normalize_judge_output(
                 {},
                 f"{spec.name} {friendly_reason}",
-                fallback_summary=self.JUDGE_FALLBACK_SUMMARY,
+                fallback_summary=self._judge_fallback_summary_for_error(
+                    error_text=error_text,
+                    friendly_reason=friendly_reason,
+                ),
             )
             if spec.name == "JudgeAgent"
             else normalize_normal_output(
@@ -2305,6 +2393,16 @@ class LangGraphRuntimeOrchestrator:
     def _friendly_degrade_reason(error_text: str) -> str:
         """把内部降级原因转换成前端可读的说明文案。"""
         normalized = str(error_text or "").strip().lower()
+        if (
+            "invalid_api_key" in normalized
+            or "invalid access token" in normalized
+            or "token expired" in normalized
+            or "unauthorized" in normalized
+            or "401" in normalized
+        ):
+            return "模型鉴权失败，已降级继续"
+        if "llm_api_key 未配置" in normalized or "llm api key 未配置" in normalized:
+            return "模型密钥未配置，已降级继续"
         if "timeout" in normalized:
             return "调用超时，已降级继续"
         if (
@@ -2315,6 +2413,22 @@ class LangGraphRuntimeOrchestrator:
         ):
             return "调用被限流，已降级继续"
         return "调用异常，已降级继续"
+
+    def _judge_fallback_summary_for_error(self, *, error_text: str, friendly_reason: str) -> str:
+        """为 Judge 的降级输出选择更可执行的兜底结论。"""
+        normalized_error = str(error_text or "").strip().lower()
+        normalized_reason = str(friendly_reason or "").strip()
+        if (
+            "模型鉴权失败" in normalized_reason
+            or "invalid_api_key" in normalized_error
+            or "invalid access token" in normalized_error
+            or "token expired" in normalized_error
+            or "401" in normalized_error
+        ):
+            return "LLM 鉴权失败（invalid_api_key），请更新模型访问凭证后重试自动分析。"
+        if "模型密钥未配置" in normalized_reason or "llm_api_key 未配置" in normalized_error:
+            return "LLM 密钥未配置，请在运行环境设置 LLM_API_KEY 后重试自动分析。"
+        return self.JUDGE_FALLBACK_SUMMARY
 
     def _history_cards_snapshot(self, limit: int = 8) -> List[AgentEvidence]:
         """抓取当前 state 的历史卡片快照，避免后续逻辑误读可变对象。"""
@@ -2345,7 +2459,14 @@ class LangGraphRuntimeOrchestrator:
         if evidence_status in {"degraded", "missing", "inferred_without_tool"}:
             return True
         conclusion = str(payload.get("conclusion") or "").strip().lower()
-        return "调用超时，已降级继续" in conclusion or "调用异常，已降级继续" in conclusion
+        degraded_tokens = (
+            "调用超时，已降级继续",
+            "调用异常，已降级继续",
+            "模型鉴权失败，已降级继续",
+            "模型密钥未配置，已降级继续",
+            "调用被限流，已降级继续",
+        )
+        return any(token in conclusion for token in degraded_tokens)
 
     @staticmethod
     def _tool_limited_status(
@@ -3975,6 +4096,7 @@ class LangGraphRuntimeOrchestrator:
                 "use_tool": payload.get("use_tool"),
                 "database_tables": self._compact_prompt_list(payload.get("database_tables"), limit=4, width=100),
                 "skill_hints": self._compact_prompt_list(payload.get("skill_hints"), limit=4, width=80),
+                "tool_hints": self._compact_prompt_list(payload.get("tool_hints"), limit=4, width=80),
                 "tool_requirement": payload.get("tool_requirement"),
             }
 

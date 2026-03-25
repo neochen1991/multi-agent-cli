@@ -1,0 +1,22 @@
+{
+  "tool_id": "release_regression_guard",
+  "name": "发布回归关联分析",
+  "description": "抽取版本发布时间线与故障时间线证据，评估故障是否与近期变更高相关",
+  "runtime": "python",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "allowed_agents": ["ChangeAgent", "DomainAgent", "CodeAgent", "JudgeAgent"],
+  "input_schema": {
+    "agent_name": "string",
+    "compact_context": "object",
+    "incident_context": "object",
+    "assigned_command": "object"
+  },
+  "output_schema": {
+    "summary": "string",
+    "suspected_release_refs": "string[]",
+    "temporal_evidence": "string[]",
+    "non_release_signals": "string[]",
+    "confidence": "number"
+  }
+}

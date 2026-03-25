@@ -97,6 +97,10 @@ class ImpactAnalysisResponse(BaseModel):
     affected_users: Optional[str]
     business_impact: Optional[str]
     estimated_recovery_time: Optional[str]
+    affected_functions: List[Dict[str, Any]] = Field(default_factory=list)
+    affected_interfaces: List[Dict[str, Any]] = Field(default_factory=list)
+    affected_user_scope: Dict[str, Any] = Field(default_factory=dict)
+    unknowns: List[str] = Field(default_factory=list)
 
 
 class RiskAssessmentResponse(BaseModel):
@@ -921,6 +925,10 @@ def _build_result_response(result: DebateResult) -> DebateResultResponse:
             affected_users=result.impact_analysis.affected_users,
             business_impact=result.impact_analysis.business_impact,
             estimated_recovery_time=result.impact_analysis.estimated_recovery_time,
+            affected_functions=result.impact_analysis.affected_functions,
+            affected_interfaces=result.impact_analysis.affected_interfaces,
+            affected_user_scope=result.impact_analysis.affected_user_scope,
+            unknowns=result.impact_analysis.unknowns,
         )
     
     risk = None

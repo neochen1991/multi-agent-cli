@@ -1,0 +1,24 @@
+{
+  "tool_id": "design_spec_alignment",
+  "name": "设计文档一致性比对",
+  "description": "从上下文中提取设计文档要点，并返回实现一致性检查骨架结果",
+  "runtime": "python",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "allowed_agents": ["CodeAgent", "DomainAgent", "LogAgent", "JudgeAgent"],
+  "input_schema": {
+    "agent_name": "string",
+    "compact_context": "object",
+    "incident_context": "object",
+    "assigned_command": "object",
+    "tool_context": "object"
+  },
+  "output_schema": {
+    "summary": "string",
+    "structured_design": "object",
+    "matched_implementation_points": "string[]",
+    "missing_implementation_points": "string[]",
+    "extra_implementation_points": "string[]",
+    "conflicting_implementation_points": "string[]"
+  }
+}

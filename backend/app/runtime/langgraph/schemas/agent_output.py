@@ -45,6 +45,17 @@ class ImpactAnalysisSchema(BaseModel):
     """封装ImpactAnalysisSchema相关数据结构或服务能力。"""
     affected_services: List[str] = Field(default_factory=list)
     business_impact: str = ""
+    affected_users: str = ""
+    affected_functions: List[Dict[str, Any]] = Field(default_factory=list)
+    affected_interfaces: List[Dict[str, Any]] = Field(default_factory=list)
+    affected_user_scope: Dict[str, Any] = Field(default_factory=dict)
+    unknowns: List[str] = Field(default_factory=list)
+
+
+class ImpactAnalysisAgentOutputSchema(AgentOutputSchema):
+    """ImpactAnalysisAgent 的结构化输出。"""
+    impact_summary: ImpactAnalysisSchema = Field(default_factory=ImpactAnalysisSchema)
+    follow_up_actions: List[str] = Field(default_factory=list)
 
 
 class RiskAssessmentSchema(BaseModel):
@@ -104,6 +115,8 @@ def get_schema_for_agent(agent_name: str) -> Type[BaseModel]:
         return JudgeOutputSchema
     if agent_name == "ProblemAnalysisAgent":
         return CommanderOutputSchema
+    if agent_name == "ImpactAnalysisAgent":
+        return ImpactAnalysisAgentOutputSchema
     return AgentOutputSchema
 
 
@@ -111,6 +124,7 @@ __all__ = [
     "AgentOutputSchema",
     "JudgeOutputSchema",
     "CommanderOutputSchema",
+    "ImpactAnalysisAgentOutputSchema",
     "RootCauseSchema",
     "EvidenceItemSchema",
     "FixRecommendationSchema",

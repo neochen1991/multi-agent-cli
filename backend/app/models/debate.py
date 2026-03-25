@@ -251,6 +251,10 @@ class ImpactAnalysis(BaseModel):
     affected_users: Optional[str] = Field(None, description="受影响用户")
     business_impact: Optional[str] = Field(None, description="业务影响")
     estimated_recovery_time: Optional[str] = Field(None, description="预计恢复时间")
+    affected_functions: List[Dict[str, Any]] = Field(default_factory=list, description="受影响功能")
+    affected_interfaces: List[Dict[str, Any]] = Field(default_factory=list, description="受影响接口")
+    affected_user_scope: Dict[str, Any] = Field(default_factory=dict, description="用户影响量化与估算")
+    unknowns: List[str] = Field(default_factory=list, description="尚未确认的影响项")
 
 
 class RiskAssessment(BaseModel):

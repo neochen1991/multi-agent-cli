@@ -20,6 +20,8 @@
 - `DatabaseAgent`: 基于 `database_tables / api_endpoints / error_keywords` 读取表 Meta、索引、慢 SQL、Top SQL 和会话状态。
   - 深度重点：锁等待图、执行计划、SQL 模式聚类、热点表与连接池关联分析。
 - `MetricsAgent`: 基于 `monitor_items / service_names / api_endpoints` 提取 CPU、线程、连接池、5xx 和异常窗口。
+- `ImpactAnalysisAgent`: 基于 `api_endpoints / service_names / dependency_services / error_keywords / responsibility_mapping` 输出影响功能、影响接口和用户影响量化/估算。
+  - 深度重点：功能级与接口级两层影响面、实测与估算口径区分、责任田与业务 blast radius 对齐。
 - `ChangeAgent`: 基于 `service_names / code_artifacts / api_endpoints` 关联故障窗口前后的发布、提交和配置变化。
 - `RunbookAgent`: 基于 `domain / aggregate / api_endpoints / error_keywords` 匹配相似案例和 SOP 处置建议。
 - `RuleSuggestionAgent`: 告警规则与阈值优化建议。

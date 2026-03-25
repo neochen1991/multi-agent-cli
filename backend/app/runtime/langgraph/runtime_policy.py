@@ -32,14 +32,17 @@ def resolve_runtime_policy(context: Dict[str, Any], *, debate_enable_critique: b
     if isinstance(runtime_strategy, dict):
         phase_mode = str(runtime_strategy.get("phase_mode") or "").strip().lower()
 
-    core_agents = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent")
-    balanced_agents = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent")
+    # 中文注释：quick 模式也需要保留影响面专家，
+    # 否则系统只能给根因而无法稳定输出功能/接口/用户影响范围。
+    core_agents = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent", "ImpactAnalysisAgent")
+    balanced_agents = ("LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent", "ImpactAnalysisAgent")
     deep_agents = (
         "LogAgent",
         "DomainAgent",
         "CodeAgent",
         "DatabaseAgent",
         "MetricsAgent",
+        "ImpactAnalysisAgent",
         "ChangeAgent",
         "RunbookAgent",
         "RuleSuggestionAgent",

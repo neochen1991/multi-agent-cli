@@ -130,6 +130,16 @@ Constraints:
   - `mailbox_context`
   - `work_log_context`
 - expert prompts should render the envelope sections instead of dumping raw incident payloads
+- `ImpactAnalysisAgent` 的结构化输出应优先包含：
+  - `impact_summary.affected_functions`
+  - `impact_summary.affected_interfaces`
+  - `impact_summary.affected_user_scope`
+  - `impact_summary.unknowns`
+- `affected_user_scope` 需要区分：
+  - `measured_users`: 已有明确证据支撑的量化值
+  - `estimated_users`: 基于流量/失败率/时间窗/责任田范围的估算值
+  - `estimation_basis`: 估算依据
+  - `confidence`: 影响量化置信度
 
 ## 7. Tool Audit Protocol
 

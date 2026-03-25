@@ -1,0 +1,22 @@
+{
+  "tool_id": "db_lock_hotspot",
+  "name": "数据库锁热点分析",
+  "description": "从日志与上下文提取锁等待/死锁证据，定位高风险表与阻塞会话线索",
+  "runtime": "python",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "allowed_agents": ["DatabaseAgent", "LogAgent", "DomainAgent", "JudgeAgent"],
+  "input_schema": {
+    "agent_name": "string",
+    "compact_context": "object",
+    "incident_context": "object",
+    "assigned_command": "object"
+  },
+  "output_schema": {
+    "summary": "string",
+    "suspected_hot_tables": "string[]",
+    "lock_signals": "string[]",
+    "potential_blockers": "string[]",
+    "confidence": "number"
+  }
+}

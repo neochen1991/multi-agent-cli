@@ -32,6 +32,7 @@ class TestGraphBuilder:
 
         assert builder._agent_to_node_name("LogAgent") == "log_agent_node"
         assert builder._agent_to_node_name("CodeAgent") == "code_agent_node"
+        assert builder._agent_to_node_name("ImpactAnalysisAgent") == "impact_analysis_agent_node"
         assert builder._agent_to_node_name("JudgeAgent") == "judge_agent_node"
 
     def test_get_route_table(self):

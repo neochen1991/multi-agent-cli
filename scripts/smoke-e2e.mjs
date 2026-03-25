@@ -18,6 +18,7 @@ function loadIncidentFixture(filename) {
 }
 
 const paymentTimeoutFixture = loadIncidentFixture('inc_22.json');
+const impactScopeFixture = loadIncidentFixture('inc_23.json');
 
 const scenarios = [
   {
@@ -50,6 +51,21 @@ const scenarios = [
       expected_root_cause: paymentTimeoutFixture.expected_root_cause,
       must_include: paymentTimeoutFixture.must_include,
       must_exclude: paymentTimeoutFixture.must_exclude,
+    },
+  },
+  {
+    id: 'impact-scope-order-create',
+    title: impactScopeFixture.title,
+    description: impactScopeFixture.symptom,
+    service_name: 'order-service',
+    log_content: impactScopeFixture.log_excerpt,
+    exception_stack: impactScopeFixture.stacktrace,
+    metadata: {
+      scenario: impactScopeFixture.scenario,
+      expected_root_cause: impactScopeFixture.expected_root_cause,
+      must_include: impactScopeFixture.must_include,
+      must_exclude: impactScopeFixture.must_exclude,
+      expected_impact: impactScopeFixture.expected_impact,
     },
   },
   {
@@ -252,6 +268,58 @@ function isEffectiveRootCause(rootCause) {
   return !blocked.some((token) => text.includes(token));
 }
 
+function validateExpectedImpact(debateResult, scenario) {
+  const expected = scenario?.metadata?.expected_impact;
+  if (!expected || typeof expected !== 'object') return { ok: true, reason: '' };
+
+  const impact = debateResult?.impact_analysis || {};
+  const affectedFunctions = Array.isArray(impact?.affected_functions) ? impact.affected_functions : [];
+  const affectedInterfaces = Array.isArray(impact?.affected_interfaces) ? impact.affected_interfaces : [];
+  const affectedServices = Array.isArray(impact?.affected_services) ? impact.affected_services : [];
+  const userScope = impact?.affected_user_scope && typeof impact.affected_user_scope === 'object'
+    ? impact.affected_user_scope
+    : {};
+  const affectedUsers = String(impact?.affected_users || '').trim();
+
+  const hasExpectedFunction = Array.isArray(expected.affected_functions) && expected.affected_functions.length > 0
+    ? expected.affected_functions.some((name) =>
+        affectedFunctions.some((item) => String(item?.name || '').includes(String(name))),
+      )
+    : true;
+  const hasExpectedInterface = Array.isArray(expected.affected_interfaces) && expected.affected_interfaces.length > 0
+    ? expected.affected_interfaces.some((path) =>
+        affectedInterfaces.some((item) => String(item?.endpoint || '').includes(String(path))),
+      )
+    : true;
+  const hasExpectedService = Array.isArray(expected.affected_services) && expected.affected_services.length > 0
+    ? expected.affected_services.some((name) =>
+        affectedServices.some((item) => String(item || '').includes(String(name))),
+      )
+    : true;
+  const hasUserScope = Boolean(
+    affectedUsers ||
+      userScope?.measured_users != null ||
+      userScope?.estimated_users != null ||
+      String(userScope?.estimation_basis || '').trim(),
+  );
+
+  const ok = hasExpectedFunction && hasExpectedInterface && hasExpectedService && (!expected.require_user_scope || hasUserScope);
+  if (ok) return { ok: true, reason: '' };
+  return {
+    ok: false,
+    reason: JSON.stringify({
+      expected,
+      actual: {
+        affected_functions: affectedFunctions,
+        affected_interfaces: affectedInterfaces,
+        affected_services: affectedServices,
+        affected_user_scope: userScope,
+        affected_users: affectedUsers,
+      },
+    }),
+  };
+}
+
 async function runScenario(scenario, token) {
   const incident = await jsonRequest(
     `${BACKEND_URL}/api/v1/incidents/`,
@@ -304,6 +372,7 @@ async function runScenario(scenario, token) {
 
   const effective = isEffectiveRootCause(debateResult?.root_cause);
   const reportGenerated = Boolean(report?.report_id);
+  const impactCheck = validateExpectedImpact(debateResult, scenario);
   if (detail.status === 'completed' && !effective) {
     throw new Error(
       `completed_without_effective_root_cause: session=${session.id} result=${JSON.stringify(debateResult)}`,
@@ -313,6 +382,9 @@ async function runScenario(scenario, token) {
     throw new Error(
       `completed_without_report: session=${session.id} detail=${JSON.stringify(detail)}`,
     );
+  }
+  if (detail.status === 'completed' && !impactCheck.ok) {
+    throw new Error(`completed_without_expected_impact: session=${session.id} ${impactCheck.reason}`);
   }
   return {
     scenario: scenario.id,
@@ -325,6 +397,7 @@ async function runScenario(scenario, token) {
     report_id: report.report_id || '',
     effective_root_cause: effective,
     report_generated: reportGenerated,
+    impact_check_passed: impactCheck.ok,
     ws_events: realtime.events,
     ws_fallback: Boolean(realtime.fallback),
     ws_error: realtime.ws_error || '',

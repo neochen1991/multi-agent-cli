@@ -121,3 +121,14 @@ def test_load_fixtures_reads_richer_claim_graph_scoring_fields():
     assert any("数据库热点锁竞争" in item for item in target.must_exclude)
     assert len(target.must_include) >= 2
     assert len(target.expected_causal_chain) >= 2
+
+
+def test_load_fixtures_reads_expected_impact_fields():
+    """fixture loader 应读取 impact-analysis richer 期望字段。"""
+
+    fixtures = load_fixtures(limit=40)
+    target = next(item for item in fixtures if item.fixture_id == "fixture_inc_23")
+
+    assert target.expected_impact["affected_functions"] == ["订单创建"]
+    assert "/api/v1/orders" in target.expected_impact["affected_interfaces"]
+    assert target.expected_impact["require_user_scope"] is True

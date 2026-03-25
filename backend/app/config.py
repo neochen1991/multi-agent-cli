@@ -17,10 +17,74 @@ Application configuration module
 """
 
 from functools import lru_cache
-from typing import Dict, List, Optional
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+ROOT_CONFIG_FILE = Path(__file__).resolve().parents[2] / "config.json"
+
+
+def _load_root_llm_overrides(config_file: Optional[Path] = None) -> Dict[str, Any]:
+    """从仓库根目录 config.json 读取 LLM 配置覆盖项。"""
+    target = Path(config_file) if config_file is not None else ROOT_CONFIG_FILE
+    if not target.exists() or not target.is_file():
+        return {}
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    llm = payload.get("llm")
+    if not isinstance(llm, dict):
+        return {}
+
+    timeouts = llm.get("timeouts") if isinstance(llm.get("timeouts"), dict) else {}
+    queue_timeouts = llm.get("queue_timeouts") if isinstance(llm.get("queue_timeouts"), dict) else {}
+    debug = llm.get("debug") if isinstance(llm.get("debug"), dict) else {}
+
+    # 中文注释：保持键名与 Settings 字段一致，后续直接作为默认值覆盖。
+    mapping: Dict[str, Any] = {
+        "LLM_PROVIDER_ID": llm.get("provider_id"),
+        "LLM_MODEL": llm.get("model"),
+        "LLM_BASE_URL": llm.get("base_url"),
+        "LLM_API_KEY": llm.get("api_key"),
+        "LLM_MAX_TURNS": llm.get("max_turns"),
+        "LLM_MAX_RETRIES": llm.get("max_retries"),
+        "LLM_MAX_CONCURRENCY": llm.get("max_concurrency"),
+        "LLM_FAILFAST_ON_RATE_LIMIT": llm.get("failfast_on_rate_limit"),
+        "LLM_TIMEOUT": timeouts.get("timeout"),
+        "LLM_CONNECT_TIMEOUT": timeouts.get("connect"),
+        "LLM_REQUEST_TIMEOUT": timeouts.get("request"),
+        "LLM_TOTAL_TIMEOUT": timeouts.get("total"),
+        "LLM_ASSET_TIMEOUT": timeouts.get("asset"),
+        "LLM_ANALYSIS_TIMEOUT": timeouts.get("analysis"),
+        "LLM_REVIEW_TIMEOUT": timeouts.get("review"),
+        "LLM_JUDGE_TIMEOUT": timeouts.get("judge"),
+        "LLM_JUDGE_RETRY_TIMEOUT": timeouts.get("judge_retry"),
+        "LLM_REPORT_TIMEOUT_FIRST": timeouts.get("report_first"),
+        "LLM_REPORT_TIMEOUT_RETRY": timeouts.get("report_retry"),
+        "LLM_QUEUE_TIMEOUT": queue_timeouts.get("default"),
+        "LLM_ANALYSIS_QUEUE_TIMEOUT": queue_timeouts.get("analysis"),
+        "LLM_METRICS_QUEUE_TIMEOUT": queue_timeouts.get("metrics"),
+        "LLM_JUDGE_QUEUE_TIMEOUT": queue_timeouts.get("judge"),
+        "LLM_REPORT_QUEUE_TIMEOUT": queue_timeouts.get("report"),
+        "LLM_LOG_FULL_PROMPT": debug.get("log_full_prompt"),
+        "LLM_LOG_FULL_RESPONSE": debug.get("log_full_response"),
+    }
+    return {key: value for key, value in mapping.items() if value is not None}
+
+
+ROOT_LLM_OVERRIDES = _load_root_llm_overrides()
+
+
+def _llm_default(name: str, fallback: Any) -> Any:
+    """读取 config.json 的同名 LLM 配置，缺失时回退到内置默认值。"""
+    return ROOT_LLM_OVERRIDES.get(name, fallback)
 
 
 class Settings(BaseSettings):
@@ -90,45 +154,45 @@ class Settings(BaseSettings):
 
     # LLM / LangGraph 配置
     # 模型名称，默认使用 kimi-k2.5
-    LLM_MODEL: str = Field(default="kimi-k2.5")
+    LLM_MODEL: str = Field(default=_llm_default("LLM_MODEL", "kimi-k2.5"))
     # LLM 最大对话轮次（None 表示不限制）
-    LLM_MAX_TURNS: Optional[int] = None
+    LLM_MAX_TURNS: Optional[int] = _llm_default("LLM_MAX_TURNS", None)
     # 各类超时配置（秒），用于控制 LLM API 调用的超时行为
-    LLM_TIMEOUT: Optional[int] = None  # 通用超时
-    LLM_CONNECT_TIMEOUT: Optional[int] = None  # 连接超时
-    LLM_REQUEST_TIMEOUT: Optional[int] = None  # 请求超时
-    LLM_TOTAL_TIMEOUT: Optional[int] = None  # 总超时
-    LLM_QUEUE_TIMEOUT: Optional[int] = None  # 队列等待超时
-    LLM_ANALYSIS_QUEUE_TIMEOUT: Optional[int] = None  # 分析阶段队列等待超时
-    LLM_METRICS_QUEUE_TIMEOUT: Optional[int] = None  # MetricsAgent 队列等待超时
-    LLM_JUDGE_QUEUE_TIMEOUT: Optional[int] = None  # 裁决阶段队列等待超时
-    LLM_REPORT_QUEUE_TIMEOUT: Optional[int] = None  # 报告阶段队列等待超时
-    LLM_ASSET_TIMEOUT: Optional[int] = None  # 资产处理超时
-    LLM_ANALYSIS_TIMEOUT: Optional[int] = None  # 分析阶段超时
-    LLM_REVIEW_TIMEOUT: Optional[int] = None  # 审查阶段超时
-    LLM_JUDGE_TIMEOUT: Optional[int] = None  # 裁决阶段超时
-    LLM_JUDGE_RETRY_TIMEOUT: Optional[int] = None  # 裁决重试超时
-    LLM_REPORT_TIMEOUT_FIRST: Optional[int] = None  # 报告首次生成超时
-    LLM_REPORT_TIMEOUT_RETRY: Optional[int] = None  # 报告重试生成超时
+    LLM_TIMEOUT: Optional[int] = _llm_default("LLM_TIMEOUT", None)  # 通用超时
+    LLM_CONNECT_TIMEOUT: Optional[int] = _llm_default("LLM_CONNECT_TIMEOUT", None)  # 连接超时
+    LLM_REQUEST_TIMEOUT: Optional[int] = _llm_default("LLM_REQUEST_TIMEOUT", None)  # 请求超时
+    LLM_TOTAL_TIMEOUT: Optional[int] = _llm_default("LLM_TOTAL_TIMEOUT", None)  # 总超时
+    LLM_QUEUE_TIMEOUT: Optional[int] = _llm_default("LLM_QUEUE_TIMEOUT", None)  # 队列等待超时
+    LLM_ANALYSIS_QUEUE_TIMEOUT: Optional[int] = _llm_default("LLM_ANALYSIS_QUEUE_TIMEOUT", None)  # 分析阶段队列等待超时
+    LLM_METRICS_QUEUE_TIMEOUT: Optional[int] = _llm_default("LLM_METRICS_QUEUE_TIMEOUT", None)  # MetricsAgent 队列等待超时
+    LLM_JUDGE_QUEUE_TIMEOUT: Optional[int] = _llm_default("LLM_JUDGE_QUEUE_TIMEOUT", None)  # 裁决阶段队列等待超时
+    LLM_REPORT_QUEUE_TIMEOUT: Optional[int] = _llm_default("LLM_REPORT_QUEUE_TIMEOUT", None)  # 报告阶段队列等待超时
+    LLM_ASSET_TIMEOUT: Optional[int] = _llm_default("LLM_ASSET_TIMEOUT", None)  # 资产处理超时
+    LLM_ANALYSIS_TIMEOUT: Optional[int] = _llm_default("LLM_ANALYSIS_TIMEOUT", None)  # 分析阶段超时
+    LLM_REVIEW_TIMEOUT: Optional[int] = _llm_default("LLM_REVIEW_TIMEOUT", None)  # 审查阶段超时
+    LLM_JUDGE_TIMEOUT: Optional[int] = _llm_default("LLM_JUDGE_TIMEOUT", None)  # 裁决阶段超时
+    LLM_JUDGE_RETRY_TIMEOUT: Optional[int] = _llm_default("LLM_JUDGE_RETRY_TIMEOUT", None)  # 裁决重试超时
+    LLM_REPORT_TIMEOUT_FIRST: Optional[int] = _llm_default("LLM_REPORT_TIMEOUT_FIRST", None)  # 报告首次生成超时
+    LLM_REPORT_TIMEOUT_RETRY: Optional[int] = _llm_default("LLM_REPORT_TIMEOUT_RETRY", None)  # 报告重试生成超时
     # 最大重试次数，0 表示不重试
-    LLM_MAX_RETRIES: int = 0
+    LLM_MAX_RETRIES: int = Field(default=_llm_default("LLM_MAX_RETRIES", 0))
     # 最大并发 LLM 调用数，用于控制 API 调用频率
-    LLM_MAX_CONCURRENCY: int = 3
+    LLM_MAX_CONCURRENCY: int = Field(default=_llm_default("LLM_MAX_CONCURRENCY", 3))
     # 遇到限流错误时是否快速失败
-    LLM_FAILFAST_ON_RATE_LIMIT: bool = True
+    LLM_FAILFAST_ON_RATE_LIMIT: bool = Field(default=_llm_default("LLM_FAILFAST_ON_RATE_LIMIT", True))
     # 是否使用 Agent 工厂模式创建 Agent
     AGENT_USE_FACTORY: bool = False
     # LLM 提供商标识
-    LLM_PROVIDER_ID: Optional[str] = None
+    LLM_PROVIDER_ID: Optional[str] = _llm_default("LLM_PROVIDER_ID", None)
     # OpenAI-compatible endpoint (LangGraph config_list)
     # LLM API 基础 URL，默认使用 DashScope Coding OpenAI 兼容接口
-    LLM_BASE_URL: str = Field(default="https://coding.dashscope.aliyuncs.com/v1")
+    LLM_BASE_URL: str = Field(default=_llm_default("LLM_BASE_URL", "https://coding.dashscope.aliyuncs.com/v1"))
     # LLM API 密钥
-    LLM_API_KEY: str = Field(default="sk-sp-5abc4c1d85414988979e90771e112f2f")
+    LLM_API_KEY: str = Field(default=_llm_default("LLM_API_KEY", ""))
     # 调试开关：是否记录完整 prompt 到 output_refs，并在事件中保留 ref
-    LLM_LOG_FULL_PROMPT: bool = False
+    LLM_LOG_FULL_PROMPT: bool = Field(default=_llm_default("LLM_LOG_FULL_PROMPT", False))
     # 调试开关：是否记录完整 response 到 output_refs，并在事件中保留 ref
-    LLM_LOG_FULL_RESPONSE: bool = False
+    LLM_LOG_FULL_RESPONSE: bool = Field(default=_llm_default("LLM_LOG_FULL_RESPONSE", False))
 
     # 辩论配置
     # 分析深度模式：quick | standard | deep

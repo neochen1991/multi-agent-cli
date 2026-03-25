@@ -1,0 +1,17 @@
+{
+  "skill_id": "design-consistency-check",
+  "name": "设计一致性检查",
+  "description": "在专家分析中补充设计文档一致性校验视角",
+  "bound_experts": ["CodeAgent", "DomainAgent", "JudgeAgent"],
+  "applicable_experts": ["CodeAgent", "DomainAgent", "LogAgent", "JudgeAgent"],
+  "required_tools": ["design_spec_alignment"],
+  "activation_hints": ["design", "spec", "api", "contract", "workflow"],
+  "required_context": ["incident_context", "tool_context"],
+  "allowed_modes": ["standard", "deep"],
+  "output_contract": {
+    "design_alignment_status": "aligned|partially_aligned|misaligned|insufficient_context",
+    "matched_design_points": "string[]",
+    "missing_design_points": "string[]",
+    "conflicts": "string[]"
+  }
+}

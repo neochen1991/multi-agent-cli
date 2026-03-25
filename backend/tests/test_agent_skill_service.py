@@ -43,7 +43,12 @@ def test_select_skills_match_by_command(tmp_path):
     service = AgentSkillService()
     payload = service.select_skills(
         agent_name="LogAgent",
-        cfg=AgentSkillConfig(enabled=True, skills_dir=str(tmp_path / "skills"), max_skills=2),
+        cfg=AgentSkillConfig(
+            enabled=True,
+            skills_dir=str(tmp_path / "skills"),
+            extensions_enabled=False,
+            max_skills=2,
+        ),
         assigned_command={"task": "请读取日志并分析 timeout 错误"},
         compact_context={},
         incident_context={},
@@ -67,7 +72,12 @@ def test_select_skills_respects_allowed_agents(tmp_path):
     service = AgentSkillService()
     payload = service.select_skills(
         agent_name="LogAgent",
-        cfg=AgentSkillConfig(enabled=True, skills_dir=str(tmp_path / "skills"), allowed_agents=["DatabaseAgent"]),
+        cfg=AgentSkillConfig(
+            enabled=True,
+            skills_dir=str(tmp_path / "skills"),
+            extensions_enabled=False,
+            allowed_agents=["DatabaseAgent"],
+        ),
         assigned_command={"task": "分析 sql timeout"},
         compact_context={},
         incident_context={},
@@ -88,7 +98,7 @@ def test_select_skills_no_command_no_use(tmp_path):
     service = AgentSkillService()
     payload = service.select_skills(
         agent_name="LogAgent",
-        cfg=AgentSkillConfig(enabled=True, skills_dir=str(tmp_path / "skills")),
+        cfg=AgentSkillConfig(enabled=True, skills_dir=str(tmp_path / "skills"), extensions_enabled=False),
         assigned_command={},
         compact_context={},
         incident_context={},
@@ -117,7 +127,12 @@ def test_select_skills_explicit_hints(tmp_path):
     service = AgentSkillService()
     payload = service.select_skills(
         agent_name="LogAgent",
-        cfg=AgentSkillConfig(enabled=True, skills_dir=str(tmp_path / "skills"), max_skills=3),
+        cfg=AgentSkillConfig(
+            enabled=True,
+            skills_dir=str(tmp_path / "skills"),
+            extensions_enabled=False,
+            max_skills=3,
+        ),
         assigned_command={"skill_hints": ["log-forensics"], "use_tool": True},
         compact_context={},
         incident_context={},
@@ -125,3 +140,87 @@ def test_select_skills_explicit_hints(tmp_path):
     assert payload["used"] is True
     assert payload["status"] == "ok"
     assert payload["skills"][0]["name"] == "log-forensics"
+
+
+def test_select_skills_reads_metadata_required_tools(tmp_path):
+    """验证 Skill metadata.json 的 required_tools 会被带入结果。"""
+
+    skill_dir = tmp_path / "skills" / "design-consistency-check"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        (
+            "---\n"
+            "name: design-consistency-check\n"
+            "description: 设计一致性检查\n"
+            "triggers: design,api\n"
+            "agents: LogAgent\n"
+            "---\n"
+            "body"
+        ),
+        encoding="utf-8",
+    )
+    (skill_dir / "metadata.json").write_text(
+        (
+            "{\n"
+            "  \"skill_id\": \"design-consistency-check\",\n"
+            "  \"name\": \"设计一致性检查\",\n"
+            "  \"applicable_experts\": [\"LogAgent\"],\n"
+            "  \"required_tools\": [\"design_spec_alignment\"]\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    service = AgentSkillService()
+    payload = service.select_skills(
+        agent_name="LogAgent",
+        cfg=AgentSkillConfig(
+            enabled=True,
+            skills_dir=str(tmp_path / "skills"),
+            extensions_enabled=False,
+            max_skills=2,
+        ),
+        assigned_command={"skill_hints": ["design-consistency-check"], "use_tool": True},
+        compact_context={},
+        incident_context={},
+    )
+    assert payload["enabled"] is True
+    assert payload["used"] is True
+    assert payload["status"] == "ok"
+    assert payload["skills"][0]["name"] == "design-consistency-check"
+    assert payload["skills"][0]["required_tools"] == ["design_spec_alignment"]
+
+
+def test_select_skills_reads_extensions_dir(tmp_path):
+    """验证 extensions_dir 开启后会加载扩展 Skill。"""
+
+    ext_skill_dir = tmp_path / "extensions" / "skills" / "db-extension"
+    ext_skill_dir.mkdir(parents=True, exist_ok=True)
+    (ext_skill_dir / "SKILL.md").write_text(
+        (
+            "---\n"
+            "name: db-extension\n"
+            "description: 数据库扩展技能\n"
+            "triggers: lock,slow sql\n"
+            "agents: DatabaseAgent\n"
+            "---\n"
+            "body"
+        ),
+        encoding="utf-8",
+    )
+
+    service = AgentSkillService()
+    payload = service.select_skills(
+        agent_name="DatabaseAgent",
+        cfg=AgentSkillConfig(
+            enabled=True,
+            skills_dir=str(tmp_path / "skills"),
+            extensions_enabled=True,
+            extensions_dir=str(tmp_path / "extensions" / "skills"),
+        ),
+        assigned_command={"task": "分析 lock 与 slow sql", "use_tool": True},
+        compact_context={},
+        incident_context={},
+    )
+    assert payload["enabled"] is True
+    assert payload["used"] is True
+    assert payload["skills"][0]["name"] == "db-extension"

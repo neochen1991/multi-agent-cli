@@ -1,0 +1,17 @@
+{
+  "skill_id": "release-regression-correlation",
+  "name": "发布回归时序关联分析",
+  "description": "在发布与故障高度接近时，抽取时序证据并输出发布相关置信度",
+  "bound_experts": ["ChangeAgent", "JudgeAgent"],
+  "applicable_experts": ["ChangeAgent", "CodeAgent", "DomainAgent", "JudgeAgent"],
+  "required_tools": ["release_regression_guard"],
+  "activation_hints": ["release", "deploy", "rollback", "commit", "version", "上线", "回滚", "发布"],
+  "required_context": ["incident_context", "tool_context"],
+  "allowed_modes": ["quick", "standard", "deep"],
+  "output_contract": {
+    "release_correlation": "high|medium|low",
+    "release_evidence": "string[]",
+    "counter_evidence": "string[]",
+    "verification_actions": "string[]"
+  }
+}

@@ -322,7 +322,17 @@ const DebateResultPanel: React.FC<Props> = ({
             .join(', ')
         : '',
       postmortem_impact_text: Array.isArray(debateResult?.impact_analysis?.affected_services)
-        ? (debateResult?.impact_analysis?.affected_services || []).join(', ')
+        ? [
+            (debateResult?.impact_analysis?.affected_services || []).join(', '),
+            ...(Array.isArray(debateResult?.impact_analysis?.affected_functions)
+              ? (debateResult?.impact_analysis?.affected_functions || [])
+                  .slice(0, 4)
+                  .map((item: Record<string, unknown>) => String(item.name || '').trim())
+                  .filter(Boolean)
+              : []),
+          ]
+            .filter(Boolean)
+            .join(', ')
         : '',
       postmortem_timeline_text: `发现时间：${mainAgentConclusion?.timeText || '-'}`,
       postmortem_whys_text: rootCause,

@@ -445,6 +445,18 @@ def normalize_commander_output(parsed: Dict[str, Any], raw_content: str) -> Dict
             picks.append(text[:80])
         return list(dict.fromkeys(picks))[:8]
 
+    def _normalize_tool_hints(value: Any) -> List[str]:
+        """对输入执行归一化Toolhints，将原始数据整理为稳定的内部结构。"""
+        if not isinstance(value, list):
+            return []
+        picks: List[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            picks.append(text[:80])
+        return list(dict.fromkeys(picks))[:8]
+
     commands_raw = parsed.get("commands")
     commands: List[Dict[str, Any]] = []
     if isinstance(commands_raw, list):
@@ -463,6 +475,7 @@ def normalize_commander_output(parsed: Dict[str, Any], raw_content: str) -> Dict
                     "use_tool": item.get("use_tool"),
                     "database_tables": _normalize_tables(item.get("database_tables")),
                     "skill_hints": _normalize_skill_hints(item.get("skill_hints")),
+                    "tool_hints": _normalize_tool_hints(item.get("tool_hints")),
                 }
             )
     if not commands:
@@ -517,6 +530,7 @@ def _extract_commander_commands_from_markdown(raw_content: str) -> List[Dict[str
         "use_tool": "use_tool",
         "database_tables": "database_tables",
         "skill_hints": "skill_hints",
+        "tool_hints": "tool_hints",
     }
 
     for raw_line in text.splitlines():
@@ -542,6 +556,7 @@ def _extract_commander_commands_from_markdown(raw_content: str) -> List[Dict[str
                 "use_tool": None,
                 "database_tables": [],
                 "skill_hints": [],
+                "tool_hints": [],
             }
             continue
         if not current:
@@ -555,6 +570,9 @@ def _extract_commander_commands_from_markdown(raw_content: str) -> List[Dict[str
             continue
         if mapped == "skill_hints":
             current["skill_hints"] = _normalize_commander_skill_hints(_split_markdown_list(value))
+            continue
+        if mapped == "tool_hints":
+            current["tool_hints"] = _normalize_commander_tool_hints(_split_markdown_list(value))
             continue
         current[mapped] = value
 
@@ -584,6 +602,7 @@ def _extract_commander_commands_from_markdown_rows(text: str) -> List[Dict[str, 
         "use_tool": "use_tool",
         "database_tables": "database_tables",
         "skill_hints": "skill_hints",
+        "tool_hints": "tool_hints",
     }
 
     for raw_line in lines[2:]:
@@ -606,6 +625,7 @@ def _extract_commander_commands_from_markdown_rows(text: str) -> List[Dict[str, 
                 "use_tool": use_tool_text in {"true", "1", "yes", "y", "是"} if use_tool_text else None,
                 "database_tables": _normalize_commander_tables(_split_markdown_list(row.get("database_tables") or "")),
                 "skill_hints": _normalize_commander_skill_hints(_split_markdown_list(row.get("skill_hints") or "")),
+                "tool_hints": _normalize_commander_tool_hints(_split_markdown_list(row.get("tool_hints") or "")),
             }
         )
 
@@ -641,6 +661,19 @@ def _normalize_commander_tables(value: Any) -> List[str]:
 
 def _normalize_commander_skill_hints(value: Any) -> List[str]:
     """归一化 commander 命令里的 skill hints 数组。"""
+    if not isinstance(value, list):
+        return []
+    picks: List[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        picks.append(text[:80])
+    return list(dict.fromkeys(picks))[:8]
+
+
+def _normalize_commander_tool_hints(value: Any) -> List[str]:
+    """归一化 commander 命令里的 tool hints 数组。"""
     if not isinstance(value, list):
         return []
     picks: List[str] = []
@@ -767,6 +800,10 @@ def normalize_judge_output(
             "affected_services": [],
             "business_impact": "待评估",
             "affected_users": "待评估",
+            "affected_functions": [],
+            "affected_interfaces": [],
+            "affected_user_scope": {},
+            "unknowns": [],
         }
 
     risk_assessment = final_judgment.get("risk_assessment")

@@ -189,11 +189,11 @@ def agent_queue_timeout(
         if deployment_profile_name in {"investigation_full", "production_governed"}:
             return float(max(metrics_timeout, 90.0))
         return float(max(metrics_timeout, 75.0))
-    if depth_mode == "deep" and agent_name in {"LogAgent", "CodeAgent", "DatabaseAgent", "ChangeAgent", "DomainAgent", "RunbookAgent", "RuleSuggestionAgent"}:
+    if depth_mode == "deep" and agent_name in {"LogAgent", "CodeAgent", "DatabaseAgent", "ChangeAgent", "DomainAgent", "ImpactAnalysisAgent", "RunbookAgent", "RuleSuggestionAgent"}:
         return float(max(analysis_timeout, 75.0))
-    if is_fast_execution_mode(execution_mode_name) and agent_name in {"LogAgent", "CodeAgent", "DatabaseAgent", "ChangeAgent", "DomainAgent"}:
+    if is_fast_execution_mode(execution_mode_name) and agent_name in {"LogAgent", "CodeAgent", "DatabaseAgent", "ChangeAgent", "DomainAgent", "ImpactAnalysisAgent"}:
         return float(max(analysis_timeout, 60.0))
-    if deployment_profile_name in {"investigation_full", "production_governed"} and agent_name in {"LogAgent", "CodeAgent", "DatabaseAgent", "ChangeAgent", "DomainAgent"}:
+    if deployment_profile_name in {"investigation_full", "production_governed"} and agent_name in {"LogAgent", "CodeAgent", "DatabaseAgent", "ChangeAgent", "DomainAgent", "ImpactAnalysisAgent"}:
         return float(max(analysis_timeout, 60.0))
     if agent_name in {"CriticAgent", "RebuttalAgent", "VerificationAgent"}:
         return float(max(base_timeout + 10.0, 50.0))

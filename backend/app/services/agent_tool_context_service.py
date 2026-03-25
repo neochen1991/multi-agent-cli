@@ -64,6 +64,7 @@ from app.services.code_analysis.symbol_resolver import (
 )
 from app.services.tooling_service import tooling_service
 from app.services.agent_skill_service import agent_skill_service
+from app.services.tool_plugin_gateway import ToolPluginGateway
 from app.services.knowledge_service import knowledge_service
 from app.services.tool_context.audit import ToolAuditBuilder
 from app.services.tool_context.assemblers.change_focused import build_change_focused_context
@@ -82,6 +83,7 @@ from app.services.tool_context.assemblers.domain_focused import build_domain_foc
 from app.services.tool_context.focused_context import resolve_focused_context_builder_name
 from app.services.tool_context.assemblers.log_focused import build_log_focused_context
 from app.services.tool_context.assemblers.metrics_focused import build_metrics_focused_context
+from app.services.tool_context.assemblers.impact_focused import build_impact_focused_context
 from app.services.tool_context.providers.change_provider import build_change_context as build_change_context_provider
 from app.services.tool_context.providers.code_provider import build_code_context as build_code_context_provider
 from app.services.tool_context.providers.database_provider import build_database_context as build_database_context_provider
@@ -136,6 +138,8 @@ class AgentToolContextService:
         self._apm_connector = APMConnector()
         self._logcloud_connector = LogCloudConnector()
         self._alert_platform_connector = AlertPlatformConnector()
+        # 中文注释：插件网关负责执行 extensions/tools 下的可扩展工具，不替代内置 provider。
+        self._tool_plugin_gateway = ToolPluginGateway()
         self._audit_builder = ToolAuditBuilder()
 
     async def build_context(
@@ -182,6 +186,14 @@ class AgentToolContextService:
                 ],
             )
         result = self._merge_skill_context(
+            result=result,
+            cfg=cfg,
+            agent_name=agent_name,
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
+        )
+        result = self._merge_plugin_tool_context(
             result=result,
             cfg=cfg,
             agent_name=agent_name,
@@ -330,6 +342,145 @@ class AgentToolContextService:
         if not result.execution_path:
             result.execution_path = "local"
         return result
+
+    def _merge_plugin_tool_context(
+        self,
+        *,
+        result: ToolContextResult,
+        cfg: AgentToolingConfig,
+        agent_name: str,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> ToolContextResult:
+        """把插件 Tool 执行结果并入当前工具上下文。"""
+        plugin_cfg = getattr(cfg, "tool_plugins", None)
+        if not plugin_cfg or not bool(getattr(plugin_cfg, "enabled", False)):
+            return result
+        gate = dict(result.command_gate or {})
+        if not bool(gate.get("has_command")) or not bool(gate.get("allow_tool")):
+            return result
+
+        requested_tools = self._collect_plugin_tool_requests(result=result, assigned_command=assigned_command)
+        if not requested_tools:
+            return result
+
+        payload = {
+            "agent_name": agent_name,
+            "compact_context": compact_context,
+            "incident_context": incident_context,
+            "assigned_command": dict(assigned_command or {}),
+            "tool_context": {
+                "name": str(result.name or ""),
+                "status": str(result.status or ""),
+                "summary": str(result.summary or ""),
+                "data": dict(result.data or {}),
+            },
+        }
+        outputs = self._tool_plugin_gateway.invoke_for_agent(
+            agent_name=agent_name,
+            requested_tools=requested_tools,
+            payload=payload,
+            plugins_dir=str(getattr(plugin_cfg, "plugins_dir", "") or ""),
+            timeout_seconds=int(getattr(plugin_cfg, "default_timeout_seconds", 60) or 60),
+            allowlist=list(getattr(plugin_cfg, "allowed_tools", []) or []),
+            max_calls=int(getattr(plugin_cfg, "max_calls", 3) or 3),
+        )
+        if not outputs:
+            return result
+
+        combined_data = dict(result.data or {})
+        combined_data["plugin_tool_outputs"] = outputs
+        plugin_audit: List[Dict[str, Any]] = []
+        for item in outputs:
+            success = bool(item.get("success"))
+            status = "ok" if success else ("timeout" if bool(item.get("timed_out")) else "failed")
+            plugin_audit.append(
+                self._audit(
+                    tool_name="agent_tool_plugin_router",
+                    action="plugin_tool_call",
+                    status=status,
+                    detail={
+                        "tool_name": str(item.get("tool_name") or ""),
+                        "summary": str(item.get("summary") or "")[:220],
+                        "requested_tools": requested_tools,
+                    },
+                )
+            )
+
+        plugin_summary = f"扩展工具命中 {len(outputs)} 个：{', '.join(str(item.get('tool_name') or '') for item in outputs)}"
+        if result.name in {"none", ""}:
+            return ToolContextResult(
+                name="agent_tool_plugin_router",
+                enabled=True,
+                used=True,
+                status="ok",
+                summary=plugin_summary,
+                data=combined_data,
+                command_gate=dict(result.command_gate or {}),
+                audit_log=[*list(result.audit_log or []), *plugin_audit],
+                execution_path="local",
+                permission_decision=dict(result.permission_decision or {}),
+            )
+
+        if not bool(result.used):
+            base_snapshot = {
+                "name": result.name,
+                "enabled": bool(result.enabled),
+                "used": bool(result.used),
+                "status": str(result.status or ""),
+                "summary": str(result.summary or ""),
+            }
+            combined_data["base_tool_context"] = base_snapshot
+            return ToolContextResult(
+                name="agent_tool_plugin_router",
+                enabled=True,
+                used=True,
+                status="ok",
+                summary=f"{plugin_summary}；原工具状态={base_snapshot['status'] or 'unknown'}",
+                data=combined_data,
+                command_gate=dict(result.command_gate or {}),
+                audit_log=[*list(result.audit_log or []), *plugin_audit],
+                execution_path="local",
+                permission_decision=dict(result.permission_decision or {}),
+            )
+
+        result.data = combined_data
+        result.summary = f"{str(result.summary or '').strip()}；{plugin_summary}".strip("；")
+        result.audit_log = [*list(result.audit_log or []), *plugin_audit]
+        if not result.execution_path:
+            result.execution_path = "local"
+        return result
+
+    @staticmethod
+    def _collect_plugin_tool_requests(
+        *,
+        result: ToolContextResult,
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> List[str]:
+        """收集本轮需要调用的插件 Tool 列表。"""
+        command = dict(assigned_command or {})
+        picks: List[str] = []
+        raw_tool_hints = command.get("tool_hints")
+        if isinstance(raw_tool_hints, list):
+            for item in raw_tool_hints:
+                name = str(item or "").strip()
+                if name:
+                    picks.append(name)
+
+        skill_items = list((((result.data or {}).get("skill_context") or {}).get("items") or []))
+        for skill in skill_items:
+            if not isinstance(skill, dict):
+                continue
+            required_tools = skill.get("required_tools")
+            if not isinstance(required_tools, list):
+                continue
+            for tool_name in required_tools:
+                name = str(tool_name or "").strip()
+                if name:
+                    picks.append(name)
+
+        return list(dict.fromkeys(picks))
 
     def _build_cross_agent_focused_context(
         self,
@@ -492,6 +643,23 @@ class AgentToolContextService:
         assigned_command: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         return build_metrics_focused_context(
+            self,
+            compact_context,
+            incident_context,
+            tool_context,
+            assigned_command,
+        )
+
+    def _build_impact_focused_context(
+        self,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        tool_context: Optional[Dict[str, Any]],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        # 中文注释：影响面专家需要同时看到“功能层”和“接口层”的线索，
+        # 因此这里把 incident、责任田映射、已有调查线索统一压缩成同一份 focused context。
+        return build_impact_focused_context(
             self,
             compact_context,
             incident_context,

@@ -8,7 +8,12 @@ import subprocess
 import pytest
 
 from app.models.knowledge import KnowledgeEntry, KnowledgeEntryType, RunbookFields
-from app.models.tooling import AgentToolingConfig, DatabaseToolConfig
+from app.models.tooling import (
+    AgentSkillConfig,
+    AgentToolPluginConfig,
+    AgentToolingConfig,
+    DatabaseToolConfig,
+)
 from app.services.agent_tool_context_service import AgentToolContextService
 
 
@@ -839,6 +844,57 @@ def test_build_metrics_focused_context_includes_causal_metric_chain():
     assert chain[-1]["stage"] == "user_visible_failure"
 
 
+def test_build_impact_focused_context_includes_function_interface_and_user_scope():
+    """验证 ImpactAnalysisAgent focused context 会输出功能、接口和用户影响估算摘要。"""
+
+    service = AgentToolContextService()
+    focused = service.build_focused_context(
+        agent_name="ImpactAnalysisAgent",
+        compact_context={
+            "incident_summary": {
+                "title": "/api/v1/orders 下单接口 502",
+                "description": "订单创建接口持续 502，影响下单流程",
+                "severity": "high",
+            },
+            "interface_mapping": {
+                "feature": "订单创建",
+                "domain": "交易域",
+                "aggregate": "订单聚合",
+                "owner_team": "order-domain-team",
+                "owner": "alice",
+                "endpoint": {
+                    "method": "POST",
+                    "path": "/api/v1/orders",
+                    "service": "order-service",
+                },
+            },
+            "investigation_leads": {
+                "api_endpoints": ["POST /api/v1/orders"],
+                "dependency_services": ["gateway-service"],
+                "error_keywords": ["502", "timeout"],
+                "monitor_items": ["gateway.orders.5xx"],
+            },
+        },
+        incident_context={"description": "下单接口 502，用户创建订单失败"},
+        tool_context={
+            "data": {
+                "estimated_users": 1200,
+                "affected_ratio": "约 18%",
+                "estimation_basis": "根据故障窗口内下单入口失败率和接口流量估算",
+                "confidence": 0.64,
+            }
+        },
+        assigned_command={"task": "分析问题影响范围", "focus": "功能、接口和用户影响"},
+    )
+
+    assert focused["impact_problem_frame"]["service"] == "order-service"
+    assert focused["affected_functions"]
+    assert focused["affected_functions"][0]["name"] == "订单创建"
+    assert focused["affected_interfaces"][0]["endpoint"] == "/api/v1/orders"
+    assert focused["affected_user_scope"]["estimated_users"] == 1200
+    assert focused["affected_user_scope"]["confidence"] >= 0.6
+
+
 def test_build_change_focused_context_includes_causal_summary():
     """验证 ChangeAgent focused context 会输出变更因果摘要。"""
 
@@ -1195,5 +1251,86 @@ async def test_runbook_agent_context_falls_back_to_legacy_case_library(monkeypat
     assert payload["data"]["source"] == "legacy_case_library"
     assert any(
         str(item.get("action") or "") == "knowledge_search" and str(item.get("status") or "") == "unavailable"
+        for item in list(payload.get("audit_log") or [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_context_runs_plugin_tool_from_skill_metadata(tmp_path, monkeypatch):
+    """验证 skill metadata.required_tools 可触发插件 tool 执行并回填上下文。"""
+
+    skill_dir = tmp_path / "skills" / "design-consistency-check"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        (
+            "---\n"
+            "name: design-consistency-check\n"
+            "description: 设计一致性检查\n"
+            "triggers: design,api\n"
+            "agents: LogAgent\n"
+            "---\n"
+            "body"
+        ),
+        encoding="utf-8",
+    )
+    (skill_dir / "metadata.json").write_text(
+        (
+            "{\n"
+            "  \"skill_id\": \"design-consistency-check\",\n"
+            "  \"name\": \"设计一致性检查\",\n"
+            "  \"applicable_experts\": [\"LogAgent\"],\n"
+            "  \"required_tools\": [\"design_spec_alignment\"]\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    plugin_dir = tmp_path / "tools" / "design_spec_alignment"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "tool.json").write_text(
+        (
+            "{\n"
+            "  \"tool_id\": \"design_spec_alignment\",\n"
+            "  \"name\": \"设计一致性插件\",\n"
+            "  \"runtime\": \"python\",\n"
+            "  \"entry\": \"run.py\",\n"
+            "  \"timeout_seconds\": 5,\n"
+            "  \"allowed_agents\": [\"LogAgent\"]\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    (plugin_dir / "run.py").write_text(
+        (
+            "import json, sys\n"
+            "payload = json.loads(sys.stdin.read() or '{}')\n"
+            "print(json.dumps({'success': True, 'summary': 'plugin ok', 'seen_agent': payload.get('agent_name')}, ensure_ascii=False))\n"
+        ),
+        encoding="utf-8",
+    )
+
+    async def _fake_get_config():
+        return AgentToolingConfig(
+            skills=AgentSkillConfig(enabled=True, skills_dir=str(tmp_path / "skills"), max_skills=2),
+            tool_plugins=AgentToolPluginConfig(enabled=True, plugins_dir=str(tmp_path / "tools"), max_calls=2),
+        )
+
+    monkeypatch.setattr("app.services.agent_tool_context_service.tooling_service.get_config", _fake_get_config)
+
+    service = AgentToolContextService()
+    payload = await service.build_context(
+        agent_name="LogAgent",
+        compact_context={"incident_title": "orders 502"},
+        incident_context={"description": "gateway 502"},
+        assigned_command={"task": "请按设计一致性检查", "skill_hints": ["design-consistency-check"], "use_tool": True},
+    )
+
+    plugin_outputs = list((payload.get("data") or {}).get("plugin_tool_outputs") or [])
+    assert plugin_outputs
+    assert plugin_outputs[0]["tool_name"] == "design_spec_alignment"
+    assert plugin_outputs[0]["success"] is True
+    assert plugin_outputs[0]["seen_agent"] == "LogAgent"
+    assert any(
+        str(item.get("action") or "") == "plugin_tool_call" and str(item.get("status") or "") == "ok"
         for item in list(payload.get("audit_log") or [])
     )

@@ -140,6 +140,25 @@ _DEFAULT_SPECS: Dict[str, _SpecConfig] = {
         max_tokens=360,
         timeout=35,
     ),
+    "ImpactAnalysisAgent": _SpecConfig(
+        name="ImpactAnalysisAgent",
+        role="影响面分析专家",
+        phase="analysis",
+        system_prompt=_compose_prompt(
+            "你的职责：\n"
+            "- 基于问题描述、日志、告警、责任田映射与同伴证据，判断故障的影响范围。\n"
+            "- 同时输出功能级影响与接口级影响，说明受影响服务、业务动作和用户范围。\n"
+            "- 对用户影响优先给实测值，缺少实测时给估算值，并明确估算依据与置信度。\n"
+            "你的分析标准：\n"
+            "- 必须区分“已量化(measured)”与“估算(estimated)”。\n"
+            "- 必须写出影响面与责任田/接口/错误信号之间的对应关系。\n"
+            "- 若证据不足，输出未知项和最小补证建议，不能伪造用户量化结果。\n"
+            "禁止：只有泛化业务影响描述，不给功能、接口和用户影响分层结果。"
+        ),
+        tools=(),
+        max_tokens=420,
+        timeout=35,
+    ),
     "ChangeAgent": _SpecConfig(
         name="ChangeAgent",
         role="变更关联专家",
@@ -385,6 +404,7 @@ def agent_sequence(*, enable_critique: bool) -> List[AgentSpec]:
         "CodeAgent",
         "DatabaseAgent",
         "MetricsAgent",
+        "ImpactAnalysisAgent",
         "ChangeAgent",
         "RunbookAgent",
         "RuleSuggestionAgent",

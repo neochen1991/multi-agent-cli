@@ -1,0 +1,36 @@
+{
+  "llm": {
+    "provider_id": "langgraph",
+    "model": "kimi-k2.5",
+    "base_url": "https://coding.dashscope.aliyuncs.com/v1",
+    "api_key": "sk-sp-18ef22cce0a24275a54eb6d97574c366",
+    "max_turns": 1,
+    "max_retries": 0,
+    "max_concurrency": 3,
+    "failfast_on_rate_limit": true,
+    "timeouts": {
+      "timeout": 180,
+      "connect": 10,
+      "request": 120,
+      "total": 90,
+      "asset": 90,
+      "analysis": 55,
+      "review": 60,
+      "judge": 75,
+      "judge_retry": 75,
+      "report_first": 50,
+      "report_retry": 75
+    },
+    "queue_timeouts": {
+      "default": 45,
+      "analysis": 60,
+      "metrics": 90,
+      "judge": 90,
+      "report": 60
+    },
+    "debug": {
+      "log_full_prompt": false,
+      "log_full_response": false
+    }
+  }
+}

@@ -6,6 +6,28 @@ import { formatBeijingDateTime } from '@/utils/dateTime';
 
 const cloneTooling = (value: AgentToolingConfig): AgentToolingConfig => JSON.parse(JSON.stringify(value)) as AgentToolingConfig;
 
+const normalizeTooling = (value: AgentToolingConfig): AgentToolingConfig => ({
+  ...value,
+  skills: {
+    enabled: true,
+    skills_dir: 'backend/skills',
+    extensions_enabled: true,
+    extensions_dir: 'backend/extensions/skills',
+    max_skills: 3,
+    max_skill_chars: 1600,
+    allowed_agents: [],
+    ...(value.skills || {}),
+  },
+  tool_plugins: {
+    enabled: true,
+    plugins_dir: 'backend/extensions/tools',
+    max_calls: 3,
+    default_timeout_seconds: 60,
+    allowed_tools: [],
+    ...(value.tool_plugins || {}),
+  },
+});
+
 const SettingsV2: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -20,8 +42,9 @@ const SettingsV2: React.FC = () => {
         settingsApi.getTooling(),
         settingsApi.getToolConnectors().catch(() => []),
       ]);
-      setTooling(toolingRes);
-      setDraft(cloneTooling(toolingRes));
+      const normalized = normalizeTooling(toolingRes);
+      setTooling(normalized);
+      setDraft(cloneTooling(normalized));
       setConnectors(connectorsRes || []);
     } catch (error: any) {
       message.error(error?.response?.data?.detail || error?.message || '加载设置失败');
@@ -92,6 +115,7 @@ const SettingsV2: React.FC = () => {
         ].filter(Boolean).length}</strong><p>已启用本地工具</p></div>
         <div className="metric-card"><span className="eyebrow">Connectors</span><strong>{connectorSummary.connected}/{connectorSummary.total}</strong><p>连接器可用数</p></div>
         <div className="metric-card"><span className="eyebrow">Skills</span><strong>{draft?.skills?.enabled ? 'ON' : 'OFF'}</strong><p>本地 Skill 注入</p></div>
+        <div className="metric-card"><span className="eyebrow">Tool Plugins</span><strong>{draft?.tool_plugins?.enabled ? 'ON' : 'OFF'}</strong><p>扩展工具插件</p></div>
         <div className="metric-card"><span className="eyebrow">Updated</span><strong>{tooling?.updated_at ? 'SYNC' : '--'}</strong><p>{formatBeijingDateTime(tooling?.updated_at || '')}</p></div>
       </section>
 
@@ -114,6 +138,8 @@ const SettingsV2: React.FC = () => {
                 <div className="settings-row"><label className="toggle-line"><input type="checkbox" checked={draft.domain_excel.enabled} onChange={(e) => updateNested(['domain_excel', 'enabled'], e.target.checked)} /> 启用责任田文件</label><input className="v2-input" value={draft.domain_excel.excel_path || ''} onChange={(e) => updateNested(['domain_excel', 'excel_path'], e.target.value)} placeholder="责任田 Excel 路径" /></div>
                 <div className="settings-row"><label className="toggle-line"><input type="checkbox" checked={Boolean(draft.database?.enabled)} onChange={(e) => updateNested(['database', 'enabled'], e.target.checked)} /> 启用数据库工具</label><input className="v2-input" value={draft.database?.postgres_dsn || draft.database?.db_path || ''} onChange={(e) => updateNested(['database', draft.database?.engine === 'postgresql' ? 'postgres_dsn' : 'db_path'], e.target.value)} placeholder="PostgreSQL DSN / DB 路径" /></div>
                 <div className="settings-row"><label className="toggle-line"><input type="checkbox" checked={Boolean(draft.skills?.enabled)} onChange={(e) => updateNested(['skills', 'enabled'], e.target.checked)} /> 启用 Skill</label><input className="v2-input" value={draft.skills?.skills_dir || ''} onChange={(e) => updateNested(['skills', 'skills_dir'], e.target.value)} placeholder="skills 目录" /></div>
+                <div className="settings-row"><label className="toggle-line"><input type="checkbox" checked={Boolean(draft.skills?.extensions_enabled)} onChange={(e) => updateNested(['skills', 'extensions_enabled'], e.target.checked)} /> 启用扩展 Skill</label><input className="v2-input" value={draft.skills?.extensions_dir || ''} onChange={(e) => updateNested(['skills', 'extensions_dir'], e.target.value)} placeholder="extensions/skills 目录" /></div>
+                <div className="settings-row"><label className="toggle-line"><input type="checkbox" checked={Boolean(draft.tool_plugins?.enabled)} onChange={(e) => updateNested(['tool_plugins', 'enabled'], e.target.checked)} /> 启用 Tool 插件</label><input className="v2-input" value={draft.tool_plugins?.plugins_dir || ''} onChange={(e) => updateNested(['tool_plugins', 'plugins_dir'], e.target.value)} placeholder="extensions/tools 目录" /></div>
               </div>
             </div>
           ) : <div className="empty-note">暂无设置数据</div>}

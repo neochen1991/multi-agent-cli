@@ -1,0 +1,17 @@
+{
+  "skill_id": "timeout-cascade-rca",
+  "name": "上游超时级联根因定位",
+  "description": "在跨服务超时场景下抽取首发上游与级联放大链路",
+  "bound_experts": ["LogAgent", "MetricsAgent", "JudgeAgent"],
+  "applicable_experts": ["LogAgent", "MetricsAgent", "DomainAgent", "JudgeAgent"],
+  "required_tools": ["upstream_timeout_chain"],
+  "activation_hints": ["timeout", "deadline exceeded", "504", "upstream", "级联", "超时"],
+  "required_context": ["incident_context", "tool_context"],
+  "allowed_modes": ["quick", "standard", "deep"],
+  "output_contract": {
+    "timeout_root_candidate": "string",
+    "cascade_path": "string[]",
+    "evidence_strength": "strong|medium|weak",
+    "next_verification": "string[]"
+  }
+}

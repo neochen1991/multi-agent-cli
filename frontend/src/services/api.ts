@@ -124,6 +124,40 @@ export interface DebateResult {
   impact_analysis?: {
     affected_services: string[];
     business_impact?: string;
+    affected_users?: string;
+    affected_functions?: Array<{
+      name?: string;
+      severity?: string;
+      affected_interfaces?: string[];
+      evidence_basis?: string[];
+      user_impact?: {
+        measured_users?: number | null;
+        estimated_users?: number | null;
+        affected_ratio?: string;
+        estimation_basis?: string;
+        confidence?: number;
+      };
+    }>;
+    affected_interfaces?: Array<{
+      endpoint?: string;
+      method?: string;
+      service?: string;
+      error_signal?: string;
+      related_function?: string;
+      user_impact?: {
+        measured_users?: number | null;
+        estimated_users?: number | null;
+        confidence?: number;
+      };
+    }>;
+    affected_user_scope?: {
+      measured_users?: number | null;
+      estimated_users?: number | null;
+      affected_ratio?: string;
+      estimation_basis?: string;
+      confidence?: number;
+    };
+    unknowns?: string[];
   };
   risk_assessment?: {
     risk_level: string;
@@ -417,9 +451,19 @@ export interface AlertPlatformSourceConfig {
 export interface AgentSkillConfig {
   enabled: boolean;
   skills_dir: string;
+  extensions_enabled: boolean;
+  extensions_dir: string;
   max_skills: number;
   max_skill_chars: number;
   allowed_agents: string[];
+}
+
+export interface AgentToolPluginConfig {
+  enabled: boolean;
+  plugins_dir: string;
+  max_calls: number;
+  default_timeout_seconds: number;
+  allowed_tools: string[];
 }
 
 export interface AgentToolingConfig {
@@ -436,6 +480,7 @@ export interface AgentToolingConfig {
   logcloud_source?: LogCloudSourceConfig;
   alert_platform_source?: AlertPlatformSourceConfig;
   skills?: AgentSkillConfig;
+  tool_plugins?: AgentToolPluginConfig;
   updated_at: string;
 }
 

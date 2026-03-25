@@ -39,7 +39,11 @@ def decide_tool_invocation(*, agent_name: str, assigned_command: Optional[Dict[s
     has_skill_hints = isinstance(skill_hints, list) and bool(
         [str(item or "").strip() for item in skill_hints if str(item or "").strip()]
     )
-    has_command = bool(any(text_fields)) or ("use_tool" in command) or has_skill_hints
+    tool_hints = command.get("tool_hints")
+    has_tool_hints = isinstance(tool_hints, list) and bool(
+        [str(item or "").strip() for item in tool_hints if str(item or "").strip()]
+    )
+    has_command = bool(any(text_fields)) or ("use_tool" in command) or has_skill_hints or has_tool_hints
     if not has_command:
         return {
             "agent_name": agent_name,

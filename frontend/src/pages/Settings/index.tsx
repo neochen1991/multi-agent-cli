@@ -135,12 +135,23 @@ const SettingsPage: React.FC = () => {
             timeout_seconds: 8,
             verify_ssl: true,
           },
-          skills: res.skills || {
+          skills: {
             enabled: true,
             skills_dir: 'backend/skills',
+            extensions_enabled: true,
+            extensions_dir: 'backend/extensions/skills',
             max_skills: 3,
             max_skill_chars: 1600,
             allowed_agents: [],
+            ...(res.skills || {}),
+          },
+          tool_plugins: {
+            enabled: true,
+            plugins_dir: 'backend/extensions/tools',
+            max_calls: 3,
+            default_timeout_seconds: 60,
+            allowed_tools: [],
+            ...(res.tool_plugins || {}),
           },
         };
         setTooling(normalized);
@@ -483,6 +494,12 @@ const SettingsPage: React.FC = () => {
                 <Form.Item name={['skills', 'skills_dir']} label="Skill 目录">
                   <Input placeholder="backend/skills" />
                 </Form.Item>
+                <Form.Item name={['skills', 'extensions_enabled']} label="启用扩展 Skill 目录" valuePropName="checked">
+                  <Switch />
+                </Form.Item>
+                <Form.Item name={['skills', 'extensions_dir']} label="扩展 Skill 目录">
+                  <Input placeholder="backend/extensions/skills" />
+                </Form.Item>
                 <Form.Item name={['skills', 'max_skills']} label="单次最大 Skill 数">
                   <InputNumber min={1} max={10} style={{ width: 180 }} />
                 </Form.Item>
@@ -491,6 +508,27 @@ const SettingsPage: React.FC = () => {
                 </Form.Item>
                 <Form.Item name={['skills', 'allowed_agents']} label="允许调用 Skill 的 Agent（为空表示全部）">
                   <Select mode="multiple" allowClear placeholder="全部 Agent 可用" options={AGENT_OPTIONS} />
+                </Form.Item>
+              </Panel>
+
+              <Panel
+                key="tool-plugins"
+                header={renderPanelHeader('Agent Tool Plugins', toolingView.tool_plugins?.enabled ? '已启用' : '已关闭')}
+              >
+                <Form.Item name={['tool_plugins', 'enabled']} label="启用扩展 Tool 插件" valuePropName="checked">
+                  <Switch />
+                </Form.Item>
+                <Form.Item name={['tool_plugins', 'plugins_dir']} label="插件目录">
+                  <Input placeholder="backend/extensions/tools" />
+                </Form.Item>
+                <Form.Item name={['tool_plugins', 'max_calls']} label="单轮最大插件调用次数">
+                  <InputNumber min={1} max={20} style={{ width: 180 }} />
+                </Form.Item>
+                <Form.Item name={['tool_plugins', 'default_timeout_seconds']} label="插件默认超时（秒）">
+                  <InputNumber min={5} max={600} style={{ width: 220 }} />
+                </Form.Item>
+                <Form.Item name={['tool_plugins', 'allowed_tools']} label="允许调用的插件工具（为空表示全部）">
+                  <Select mode="tags" allowClear placeholder="例如 design_spec_alignment" />
                 </Form.Item>
               </Panel>
 

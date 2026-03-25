@@ -23,12 +23,19 @@ class ToolAuditBuilder:
             if isinstance(skill_hints_raw, list)
             else []
         )
+        tool_hints_raw = command.get("tool_hints")
+        tool_hints = (
+            [str(item or "").strip()[:80] for item in tool_hints_raw if str(item or "").strip()]
+            if isinstance(tool_hints_raw, list)
+            else []
+        )
         return {
             "task": str(command.get("task") or "")[:240],
             "focus": str(command.get("focus") or "")[:240],
             "expected_output": str(command.get("expected_output") or "")[:240],
             "use_tool": command.get("use_tool"),
             "skill_hints": skill_hints[:8],
+            "tool_hints": tool_hints[:8],
         }
 
     def build_entry(

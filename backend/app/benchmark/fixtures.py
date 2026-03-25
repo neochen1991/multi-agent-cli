@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,7 @@ class IncidentFixture:
     expected_causal_chain: List[str]
     must_include: List[str]
     must_exclude: List[str]
+    expected_impact: Dict[str, Any]
 
 
 def _fixtures_dir() -> Path:
@@ -80,6 +81,7 @@ def load_fixtures(limit: int = 0) -> List[IncidentFixture]:
                     for item in list(payload.get("must_exclude") or [])
                     if str(item).strip()
                 ],
+                expected_impact=dict(payload.get("expected_impact") or {}),
             )
         )
     return fixtures

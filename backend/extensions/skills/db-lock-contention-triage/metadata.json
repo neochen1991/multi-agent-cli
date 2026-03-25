@@ -1,0 +1,17 @@
+{
+  "skill_id": "db-lock-contention-triage",
+  "name": "数据库锁争用快速分诊",
+  "description": "在死锁和锁等待场景中定位热点表、阻塞链路与处置优先级",
+  "bound_experts": ["DatabaseAgent", "JudgeAgent"],
+  "applicable_experts": ["DatabaseAgent", "LogAgent", "DomainAgent", "JudgeAgent"],
+  "required_tools": ["db_lock_hotspot"],
+  "activation_hints": ["deadlock", "lock wait timeout", "for update", "database lock", "死锁", "锁等待"],
+  "required_context": ["incident_context", "tool_context"],
+  "allowed_modes": ["quick", "standard", "deep"],
+  "output_contract": {
+    "lock_root_hypothesis": "string",
+    "hot_tables": "string[]",
+    "blocker_candidates": "string[]",
+    "mitigation_steps": "string[]"
+  }
+}

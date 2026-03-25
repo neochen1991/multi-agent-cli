@@ -21,12 +21,18 @@
 - `must_include`
 - `must_exclude`
 - `distractor_root_causes`
+- `expected_impact`
+  - `affected_functions`
+  - `affected_interfaces`
+  - `affected_services`
+  - `require_user_scope`
 
 说明：
 - benchmark loader 现在也会消费：
   - `expected_causal_chain`
   - `must_include`
   - `must_exclude`
+  - `expected_impact`
 - 这些字段当前用于 `claim_graph` richer scoring：
   - `must_include` 对应 `supports`
   - `must_exclude` 对应 `eliminated_alternatives`

@@ -128,9 +128,21 @@ class AgentSkillConfig(BaseModel):
     """本地 Skill 路由配置。"""
     enabled: bool = Field(default=True, description="是否启用 Agent Skill 路由")
     skills_dir: str = Field(default="backend/skills", description="Skill 文档目录（本地）")
+    extensions_enabled: bool = Field(default=True, description="是否启用扩展 Skill 目录")
+    extensions_dir: str = Field(default="backend/extensions/skills", description="扩展 Skill 文档目录")
     max_skills: int = Field(default=3, ge=1, le=10, description="单次最多注入 Skill 数量")
     max_skill_chars: int = Field(default=1600, ge=200, le=8000, description="单个 Skill 最大注入字符数")
     allowed_agents: List[str] = Field(default_factory=list, description="允许调用 Skill 的 Agent 列表；为空表示全部")
+
+
+class AgentToolPluginConfig(BaseModel):
+    """可扩展 Tool 插件配置。"""
+
+    enabled: bool = Field(default=True, description="是否启用专家 Agent 的扩展 Tool 插件能力")
+    plugins_dir: str = Field(default="backend/extensions/tools", description="Tool 插件目录")
+    max_calls: int = Field(default=3, ge=1, le=20, description="单轮最多调用插件工具次数")
+    default_timeout_seconds: int = Field(default=60, ge=5, le=600, description="插件默认超时时间")
+    allowed_tools: List[str] = Field(default_factory=list, description="允许调用的插件工具名单；为空表示全部")
 
 
 class AgentToolingConfig(BaseModel):
@@ -148,4 +160,5 @@ class AgentToolingConfig(BaseModel):
     logcloud_source: LogCloudSourceConfig = Field(default_factory=LogCloudSourceConfig)
     alert_platform_source: AlertPlatformSourceConfig = Field(default_factory=AlertPlatformSourceConfig)
     skills: AgentSkillConfig = Field(default_factory=AgentSkillConfig)
+    tool_plugins: AgentToolPluginConfig = Field(default_factory=AgentToolPluginConfig)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

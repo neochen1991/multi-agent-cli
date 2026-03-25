@@ -20,6 +20,7 @@ _AGENT_KEYWORD_MAP = {
     "CodeAgent": ("代码", "controller", "service", "dao", "事务", "调用链", "连接释放", "线程池", "method", "class"),
     "DatabaseAgent": ("数据库", "db", "sql", "锁", "deadlock", "session", "top sql", "连接池", "hikari"),
     "MetricsAgent": ("指标", "cpu", "内存", "latency", "rt", "p99", "监控", "qps"),
+    "ImpactAnalysisAgent": ("影响", "blast radius", "功能", "接口", "用户", "范围", "受影响"),
     "DomainAgent": ("领域", "聚合", "责任田", "owner", "归属"),
     "ChangeAgent": ("发布", "变更", "配置", "deploy", "release", "commit"),
     "RunbookAgent": ("runbook", "sop", "案例", "止血", "回滚"),
@@ -138,7 +139,14 @@ def _payload_is_degraded(payload: Dict[str, Any]) -> bool:
     if evidence_status in {"degraded", "missing", "inferred_without_tool"}:
         return True
     conclusion = str(payload.get("conclusion") or "").strip().lower()
-    return "调用超时，已降级继续" in conclusion or "调用异常，已降级继续" in conclusion
+    degraded_tokens = (
+        "调用超时，已降级继续",
+        "调用异常，已降级继续",
+        "模型鉴权失败，已降级继续",
+        "模型密钥未配置，已降级继续",
+        "调用被限流，已降级继续",
+    )
+    return any(token in conclusion for token in degraded_tokens)
 
 
 def _agent_has_effective_evidence(round_cards: List[AgentEvidence], state: Dict[str, Any], agent_name: str) -> bool:
@@ -247,6 +255,7 @@ def supervisor_step_to_node(next_step: str) -> str:
             "CodeAgent": "code_agent_node",
             "DatabaseAgent": "database_agent_node",
             "MetricsAgent": "metrics_agent_node",
+            "ImpactAnalysisAgent": "impact_analysis_agent_node",
             "ChangeAgent": "change_agent_node",
             "RunbookAgent": "runbook_agent_node",
             "RuleSuggestionAgent": "rule_suggestion_agent_node",
@@ -550,6 +559,7 @@ def route_from_commander_output(
             "codeagent": "CodeAgent",
             "databaseagent": "DatabaseAgent",
             "metricsagent": "MetricsAgent",
+            "impactanalysisagent": "ImpactAnalysisAgent",
             "changeagent": "ChangeAgent",
             "runbookagent": "RunbookAgent",
             "rulesuggestionagent": "RuleSuggestionAgent",

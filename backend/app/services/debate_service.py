@@ -2370,7 +2370,19 @@ class DebateService:
                 ],
                 affected_users=impact.get("affected_users"),
                 business_impact=impact.get("business_impact"),
-                estimated_recovery_time=impact.get("estimated_recovery_time")
+                estimated_recovery_time=impact.get("estimated_recovery_time"),
+                # 中文注释：影响面分析专家新增的 richer impact 字段在这里按“增量兼容”落模，
+                # 保留旧字段，同时把功能、接口、用户量化依据一并透传给 API/前端。
+                affected_functions=[
+                    dict(item) for item in (impact.get("affected_functions") or []) if isinstance(item, dict)
+                ],
+                affected_interfaces=[
+                    dict(item) for item in (impact.get("affected_interfaces") or []) if isinstance(item, dict)
+                ],
+                affected_user_scope=dict(impact.get("affected_user_scope") or {}),
+                unknowns=[
+                    str(x) for x in (impact.get("unknowns") or []) if str(x).strip()
+                ],
             )
 
         # 构建风险评估

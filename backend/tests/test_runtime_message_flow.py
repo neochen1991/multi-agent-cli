@@ -971,6 +971,7 @@ def test_extract_agent_commands_preserves_skill_hints_and_tables():
                 "use_tool": True,
                 "database_tables": ["public.t_order", "public.t_order_item"],
                 "skill_hints": ["db-bottleneck-diagnosis"],
+                "tool_hints": ["design_spec_alignment"],
             }
         ]
     }
@@ -978,6 +979,17 @@ def test_extract_agent_commands_preserves_skill_hints_and_tables():
     db_cmd = commands["DatabaseAgent"]
     assert db_cmd["database_tables"] == ["public.t_order", "public.t_order_item"]
     assert db_cmd["skill_hints"] == ["db-bottleneck-diagnosis"]
+    assert db_cmd["tool_hints"] == ["design_spec_alignment"]
+
+
+def test_extract_agent_commands_fill_defaults_includes_impact_analysis_agent():
+    """验证 fill_defaults 会补出 ImpactAnalysisAgent 默认命令。"""
+
+    orchestrator = _orchestrator()
+    commands = orchestrator._extract_agent_commands_from_payload({}, fill_defaults=True)
+
+    assert "ImpactAnalysisAgent" in commands
+    assert "影响功能" in commands["ImpactAnalysisAgent"]["task"]
 
 
 def test_enrich_agent_commands_adds_default_skill_hints():
@@ -1030,10 +1042,16 @@ def test_enrich_agent_commands_adds_default_skill_hints():
         "log_excerpt": "lock wait timeout exceeded",
     }
     enriched = orchestrator._enrich_agent_commands_with_skill_hints(commands, compact_context)
-    assert enriched["LogAgent"]["skill_hints"] == ["log-forensics"]
-    assert enriched["DatabaseAgent"]["skill_hints"] == ["db-bottleneck-diagnosis"]
-    assert enriched["MetricsAgent"]["skill_hints"] == ["metrics-anomaly-triage"]
+    assert "log-forensics" in enriched["LogAgent"]["skill_hints"]
+    assert "db-lock-contention-triage" in enriched["LogAgent"]["skill_hints"]
+    assert "db-bottleneck-diagnosis" in enriched["DatabaseAgent"]["skill_hints"]
+    assert "db-lock-contention-triage" in enriched["DatabaseAgent"]["skill_hints"]
+    assert "metrics-anomaly-triage" in enriched["MetricsAgent"]["skill_hints"]
+    assert "timeout-cascade-rca" in enriched["MetricsAgent"]["skill_hints"]
     assert enriched["RuleSuggestionAgent"]["skill_hints"] == ["alert-rule-hardening"]
+    assert "db_lock_hotspot" in enriched["LogAgent"]["tool_hints"]
+    assert "db_lock_hotspot" in enriched["DatabaseAgent"]["tool_hints"]
+    assert "upstream_timeout_chain" in enriched["MetricsAgent"]["tool_hints"]
 
 
 def test_enrich_agent_commands_does_not_override_existing_skill_hints():
@@ -1053,6 +1071,58 @@ def test_enrich_agent_commands_does_not_override_existing_skill_hints():
     }
     enriched = orchestrator._enrich_agent_commands_with_skill_hints(commands, {"incident": {"title": "404"}})
     assert enriched["CodeAgent"]["skill_hints"] == ["custom-skill"]
+    assert enriched["CodeAgent"]["tool_hints"] == []
+
+
+def test_enrich_agent_commands_limits_hints_in_quick_mode():
+    """验证 quick 模式下会压缩 hints 数量，避免命令提示过长。"""
+
+    orchestrator = _orchestrator()
+    orchestrator._execution_mode_name = "quick"
+    commands = {
+        "DomainAgent": {
+            "target_agent": "DomainAgent",
+            "task": "分析责任田",
+            "focus": "",
+            "expected_output": "",
+            "use_tool": True,
+            "database_tables": [],
+            "skill_hints": [],
+            "tool_hints": [],
+        }
+    }
+    compact_context = {
+        "incident": {
+            "title": "发布后 upstream timeout 与 deadlock 同时上升",
+            "description": "deploy 之后出现 504 timeout, lock wait timeout, rollback 后部分恢复",
+        },
+        "log_excerpt": "deadline exceeded on upstream call and deadlock detected",
+    }
+    enriched = orchestrator._enrich_agent_commands_with_skill_hints(commands, compact_context)
+    assert len(enriched["DomainAgent"]["skill_hints"]) <= 2
+    assert len(enriched["DomainAgent"]["tool_hints"]) <= 1
+
+
+def test_friendly_degrade_reason_marks_invalid_api_key() -> None:
+    """验证 invalid_api_key 会被映射为模型鉴权失败提示。"""
+
+    orchestrator = _orchestrator()
+    reason = orchestrator._friendly_degrade_reason(
+        "Error code: 401 - {'error': {'code': 'invalid_api_key', 'message': 'invalid access token'}}"
+    )
+    assert reason == "模型鉴权失败，已降级继续"
+
+
+def test_judge_fallback_summary_for_auth_error_is_actionable() -> None:
+    """验证 Judge 在鉴权失败时会返回可执行的兜底结论，而不是占位词。"""
+
+    orchestrator = _orchestrator()
+    summary = orchestrator._judge_fallback_summary_for_error(
+        error_text="invalid_api_key",
+        friendly_reason="模型鉴权失败，已降级继续",
+    )
+    assert "LLM 鉴权失败" in summary
+    assert "需要进一步分析" not in summary
 
 
 def test_enrich_agent_commands_with_investigation_leads():

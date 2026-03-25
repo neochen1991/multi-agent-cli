@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,7 @@ class SkillDoc:
     path: str
     triggers: List[str]
     allowed_agents: List[str]
+    required_tools: List[str]
     content: str
 
 
@@ -65,18 +67,27 @@ class AgentSkillService:
                 "audit_log": [],
             }
 
-        skills_dir = self._resolve_skills_dir(str(cfg.skills_dir or "").strip())
-        if not skills_dir.exists() or not skills_dir.is_dir():
+        primary_dir = self._resolve_skills_dir(str(cfg.skills_dir or "").strip())
+        extension_dir = self._resolve_skills_dir(str(cfg.extensions_dir or "").strip())
+        scanned_dirs: List[Path] = []
+        if primary_dir.exists() and primary_dir.is_dir():
+            scanned_dirs.append(primary_dir)
+        if bool(getattr(cfg, "extensions_enabled", False)) and extension_dir.exists() and extension_dir.is_dir():
+            if extension_dir.resolve() != primary_dir.resolve():
+                scanned_dirs.append(extension_dir)
+        if not scanned_dirs:
             return {
                 "enabled": True,
                 "used": False,
                 "status": "unavailable",
-                "summary": f"Skill 目录不可用: {skills_dir}",
+                "summary": f"Skill 目录不可用: {primary_dir}",
                 "skills": [],
                 "audit_log": [],
             }
 
-        docs = self._load_skill_docs(skills_dir=skills_dir, max_chars=int(cfg.max_skill_chars))
+        docs: List[SkillDoc] = []
+        for scan_dir in scanned_dirs:
+            docs.extend(self._load_skill_docs(skills_dir=scan_dir, max_chars=int(cfg.max_skill_chars)))
         if not docs:
             return {
                 "enabled": True,
@@ -101,6 +112,7 @@ class AgentSkillService:
                         "description": doc.description,
                         "path": doc.path,
                         "triggers": doc.triggers[:10],
+                        "required_tools": doc.required_tools[:8],
                         "content": doc.content,
                         "score": 9.999,
                     }
@@ -118,7 +130,7 @@ class AgentSkillService:
                             "status": "ok",
                             "detail": {
                                 "agent_name": agent_name,
-                                "skills_dir": str(skills_dir),
+                                "skills_dir": [str(item) for item in scanned_dirs],
                                 "mode": "explicit_hints",
                                 "hints": explicit_hints,
                                 "selected": [item["name"] for item in skills],
@@ -151,6 +163,7 @@ class AgentSkillService:
                 "description": doc.description,
                 "path": doc.path,
                 "triggers": doc.triggers[:10],
+                "required_tools": doc.required_tools[:8],
                 "content": doc.content,
                 "score": round(score, 4),
             }
@@ -168,7 +181,7 @@ class AgentSkillService:
                     "status": "ok",
                     "detail": {
                         "agent_name": agent_name,
-                        "skills_dir": str(skills_dir),
+                        "skills_dir": [str(item) for item in scanned_dirs],
                         "selected": [item["name"] for item in skills],
                     },
                 }
@@ -224,12 +237,24 @@ class AgentSkillService:
             except Exception:
                 continue
             meta, content = self._parse_skill(raw)
+            metadata = self._load_metadata(file.parent)
             name = str(meta.get("name") or file.parent.name or file.stem).strip()
-            description = str(meta.get("description") or "").strip()
+            description = str(meta.get("description") or metadata.get("description") or "").strip()
             trigger_text = str(meta.get("triggers") or "").strip()
-            triggers = [item.strip().lower() for item in re.split(r"[,\n|]+", trigger_text) if item.strip()]
+            activation_hint_text = self._csv_join(metadata.get("activation_hints"))
+            triggers = [
+                item.strip().lower()
+                for item in re.split(r"[,\n|]+", f"{trigger_text}\n{activation_hint_text}")
+                if item.strip()
+            ]
             allowed_text = str(meta.get("agents") or "").strip()
-            allowed_agents = [item.strip() for item in re.split(r"[,\n|]+", allowed_text) if item.strip()]
+            metadata_agents = self._csv_join(metadata.get("applicable_experts"), metadata.get("bound_experts"))
+            allowed_agents = [
+                item.strip()
+                for item in re.split(r"[,\n|]+", f"{allowed_text}\n{metadata_agents}")
+                if item.strip()
+            ]
+            required_tools = self._normalize_list(metadata.get("required_tools"))
             docs.append(
                 SkillDoc(
                     name=name,
@@ -237,10 +262,42 @@ class AgentSkillService:
                     path=str(file),
                     triggers=triggers,
                     allowed_agents=allowed_agents,
+                    required_tools=required_tools,
                     content=content[: max(200, int(max_chars))].strip(),
                 )
             )
         return docs
+
+    @staticmethod
+    def _load_metadata(skill_dir: Path) -> Dict[str, Any]:
+        """读取可选 metadata.json；缺失或异常时回退空对象。"""
+        metadata_file = skill_dir / "metadata.json"
+        if not metadata_file.exists():
+            return {}
+        try:
+            payload = json.loads(metadata_file.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _normalize_list(value: Any) -> List[str]:
+        items = value if isinstance(value, list) else []
+        picks: List[str] = []
+        for item in items:
+            text = str(item or "").strip()
+            if text:
+                picks.append(text)
+        return list(dict.fromkeys(picks))
+
+    def _csv_join(self, *values: Any) -> str:
+        picks: List[str] = []
+        for value in values:
+            if isinstance(value, list):
+                picks.extend([str(item or "").strip() for item in value if str(item or "").strip()])
+            elif isinstance(value, str) and value.strip():
+                picks.append(value.strip())
+        return ",".join(picks)
 
     def _parse_skill(self, text: str) -> Tuple[Dict[str, str], str]:
         """解析 Skill 文档 front matter 和正文。"""

@@ -225,10 +225,10 @@ def test_normalize_commander_output_recovers_commands_from_markdown_table() -> N
     raw_content = """
 我的判断是：先并行排查数据库与日志。
 
-| **target_agent** | **task** | **focus** | **expected_output** | **use_tool** | **database_tables** | **skill_hints** |
-|:---|:---|:---|:---|:---|:---|:---|
-| DatabaseAgent | 检查锁等待和慢 SQL | t_order / t_inventory | 输出锁等待链路 | true | public.t_order, public.t_inventory | postgres-lock-check |
-| LogAgent | 重建错误时间线 | POST /api/v1/orders | 输出 500 时间窗与 trace | true |  | log-timeline |
+| **target_agent** | **task** | **focus** | **expected_output** | **use_tool** | **database_tables** | **skill_hints** | **tool_hints** |
+|:---|:---|:---|:---|:---|:---|:---|:---|
+| DatabaseAgent | 检查锁等待和慢 SQL | t_order / t_inventory | 输出锁等待链路 | true | public.t_order, public.t_inventory | postgres-lock-check | design_spec_alignment |
+| LogAgent | 重建错误时间线 | POST /api/v1/orders | 输出 500 时间窗与 trace | true |  | log-timeline |  |
 """
 
     normalized = normalize_commander_output({}, raw_content)
@@ -238,4 +238,5 @@ def test_normalize_commander_output_recovers_commands_from_markdown_table() -> N
     assert normalized["commands"][0]["use_tool"] is True
     assert normalized["commands"][0]["database_tables"] == ["public.t_order", "public.t_inventory"]
     assert normalized["commands"][0]["skill_hints"] == ["postgres-lock-check"]
+    assert normalized["commands"][0]["tool_hints"] == ["design_spec_alignment"]
     assert normalized["commands"][1]["target_agent"] == "LogAgent"

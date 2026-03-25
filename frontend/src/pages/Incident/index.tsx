@@ -3390,11 +3390,49 @@ const IncidentPage: React.FC = () => {
     }
     const impact = asRecord(debateResult.impact_analysis || {});
     if (Object.keys(impact).length > 0) {
+      const affectedFunctions = Array.isArray(impact.affected_functions) ? impact.affected_functions : [];
+      const affectedInterfaces = Array.isArray(impact.affected_interfaces) ? impact.affected_interfaces : [];
+      const userScope = asRecord(impact.affected_user_scope || {});
+      const unknowns = Array.isArray(impact.unknowns) ? impact.unknowns : [];
+      const functionLines = affectedFunctions
+        .slice(0, 4)
+        .map((item) => {
+          const row = asRecord(item);
+          const name = firstTextValue(row, ['name']) || '-';
+          const severity = firstTextValue(row, ['severity']) || '-';
+          const interfaces = Array.isArray(row.affected_interfaces) ? row.affected_interfaces.slice(0, 3).join('、') : '';
+          return `${name}（严重度：${severity}${interfaces ? `；接口：${interfaces}` : ''}）`;
+        })
+        .filter(Boolean);
+      const interfaceLines = affectedInterfaces
+        .slice(0, 5)
+        .map((item) => {
+          const row = asRecord(item);
+          const endpoint = firstTextValue(row, ['endpoint']) || '-';
+          const method = firstTextValue(row, ['method']) || '';
+          const relatedFunction = firstTextValue(row, ['related_function']) || '';
+          return `${method ? `${method} ` : ''}${endpoint}${relatedFunction ? `（功能：${relatedFunction}）` : ''}`;
+        })
+        .filter(Boolean);
+      const measuredUsers = Number(userScope.measured_users ?? NaN);
+      const estimatedUsers = Number(userScope.estimated_users ?? NaN);
       cards.push({
         title: '影响评估',
         body: [
           `受影响服务：${Array.isArray(impact.affected_services) ? impact.affected_services.join('、') || '-' : '-'}`,
           `业务影响：${firstTextValue(impact, ['business_impact']) || '-'}`,
+          `受影响功能：${functionLines.length ? functionLines.join('；') : '-'}`,
+          `受影响接口：${interfaceLines.length ? interfaceLines.join('；') : '-'}`,
+          `用户影响：${
+            Number.isFinite(measuredUsers)
+              ? `实测 ${measuredUsers} 用户`
+              : Number.isFinite(estimatedUsers)
+                ? `估算 ${estimatedUsers} 用户`
+                : firstTextValue(impact, ['affected_users']) || '-'
+          }`,
+          `影响比例：${firstTextValue(userScope, ['affected_ratio']) || '-'}`,
+          `估算依据：${firstTextValue(userScope, ['estimation_basis']) || '-'}`,
+          `未确认项：${unknowns.length ? unknowns.join('；') : '-'}`,
         ].join('\n'),
       });
     }

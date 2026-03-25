@@ -56,6 +56,9 @@
   - 开关控制
   - 命令驱动（由主 Agent 指令决定是否调用）
   - 审计日志（文件读取/Git 操作/参数摘要）
+- 专家 Agent 已支持可扩展 `skill/tool` 能力：
+  - `skill` 支持读取 `metadata.json`（可声明 `required_tools`）
+  - `tool` 支持从 `backend/extensions/tools/*/tool.json` 动态加载并执行插件入口
 
 ## Code Wiki
 
@@ -261,13 +264,22 @@ npm run stop:all:force
 
 主要配置位于：
 
+- `config.json`（仓库根目录，LLM 主配置入口）
 - `backend/app/config.py`
 
-核心 LLM 配置（当前默认）：
+核心 LLM 配置（推荐在 `config.json` 的 `llm` 节点维护）：
 
-- `LLM_BASE_URL=https://coding.dashscope.aliyuncs.com/v1`
-- `LLM_MODEL=kimi-k2.5`
-- `LLM_API_KEY=<your_api_key>`
+- `llm.base_url`
+- `llm.model`
+- `llm.api_key`
+- `llm.max_retries` / `llm.max_concurrency`
+- `llm.timeouts.*` / `llm.queue_timeouts.*`
+- `llm.debug.log_full_prompt` / `llm.debug.log_full_response`
+
+说明：
+
+- 后端启动时会自动读取根目录 `config.json` 的 LLM 配置作为默认值。
+- 环境变量（含 `.env`）仍可覆盖同名 `LLM_*` 字段，用于部署环境动态注入。
 
 其他常用：
 

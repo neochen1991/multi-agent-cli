@@ -320,6 +320,7 @@ class GraphBuilder:
             "CodeAgent": "code_agent_node",
             "DatabaseAgent": "database_agent_node",
             "MetricsAgent": "metrics_agent_node",
+            "ImpactAnalysisAgent": "impact_analysis_agent_node",
             "ChangeAgent": "change_agent_node",
             "RunbookAgent": "runbook_agent_node",
             "RuleSuggestionAgent": "rule_suggestion_agent_node",

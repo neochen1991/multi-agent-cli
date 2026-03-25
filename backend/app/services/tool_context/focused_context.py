@@ -11,6 +11,7 @@ FOCUSED_CONTEXT_BUILDERS = {
     "DomainAgent": "_build_domain_focused_context",
     "DatabaseAgent": "_build_database_focused_context",
     "MetricsAgent": "_build_metrics_focused_context",
+    "ImpactAnalysisAgent": "_build_impact_focused_context",
     "ChangeAgent": "_build_change_focused_context",
     "RunbookAgent": "_build_runbook_focused_context",
     "ProblemAnalysisAgent": "_build_cross_agent_focused_context",

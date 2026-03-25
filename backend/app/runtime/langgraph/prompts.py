@@ -132,7 +132,7 @@ def coordinator_command_schema() -> Dict[str, Any]:
         "conclusion": "",
         "next_mode": "parallel_analysis|single|judge|stop",
         "next_agent": (
-            "LogAgent|DomainAgent|CodeAgent|DatabaseAgent|MetricsAgent|ChangeAgent|RunbookAgent|RuleSuggestionAgent|"
+            "LogAgent|DomainAgent|CodeAgent|DatabaseAgent|MetricsAgent|ImpactAnalysisAgent|ChangeAgent|RunbookAgent|RuleSuggestionAgent|"
             "CriticAgent|RebuttalAgent|JudgeAgent|VerificationAgent"
         ),
         "should_stop": False,
@@ -143,7 +143,7 @@ def coordinator_command_schema() -> Dict[str, Any]:
         "commands": [
             {
                 "target_agent": (
-                    "LogAgent|DomainAgent|CodeAgent|DatabaseAgent|MetricsAgent|ChangeAgent|RunbookAgent|RuleSuggestionAgent|"
+                    "LogAgent|DomainAgent|CodeAgent|DatabaseAgent|MetricsAgent|ImpactAnalysisAgent|ChangeAgent|RunbookAgent|RuleSuggestionAgent|"
                     "CriticAgent|RebuttalAgent|JudgeAgent|VerificationAgent"
                 ),
                 "task": "",
@@ -152,6 +152,7 @@ def coordinator_command_schema() -> Dict[str, Any]:
                 "use_tool": True,
                 "database_tables": [],
                 "skill_hints": [],
+                "tool_hints": [],
             }
         ],
         "evidence_chain": [""],
@@ -183,7 +184,45 @@ def judge_output_schema() -> Dict[str, Any]:
             },
             "impact_analysis": {
                 "affected_services": [],
+                "affected_functions": [
+                    {
+                        "name": "",
+                        "severity": "critical|high|medium|low",
+                        "affected_interfaces": [],
+                        "evidence_basis": [],
+                        "user_impact": {
+                            "measured_users": None,
+                            "estimated_users": None,
+                            "affected_ratio": "",
+                            "estimation_basis": "",
+                            "confidence": 0.0,
+                        },
+                    }
+                ],
+                "affected_interfaces": [
+                    {
+                        "endpoint": "",
+                        "method": "",
+                        "service": "",
+                        "error_signal": "",
+                        "related_function": "",
+                        "user_impact": {
+                            "measured_users": None,
+                            "estimated_users": None,
+                            "confidence": 0.0,
+                        },
+                    }
+                ],
+                "affected_user_scope": {
+                    "measured_users": None,
+                    "estimated_users": None,
+                    "affected_ratio": "",
+                    "estimation_basis": "",
+                    "confidence": 0.0,
+                },
                 "business_impact": "",
+                "affected_users": "",
+                "unknowns": [],
             },
             "risk_assessment": {
                 "risk_level": "critical|high|medium|low",
@@ -280,6 +319,7 @@ def build_problem_analysis_commander_prompt(
         "若已存在历史结论，可补充 CriticAgent/RebuttalAgent/JudgeAgent/VerificationAgent 命令。\n"
         "若 context.interface_mapping.database_tables 非空，必须把这些表名填入 DatabaseAgent 命令的 database_tables 字段。\n"
         "必要时可在命令中提供 skill_hints（技能名数组），指导专家Agent优先使用指定技能模板。\n"
+        "若需要调用扩展插件工具，可同时提供 tool_hints（工具ID数组，例如 ['design_spec_alignment']）。\n"
         "命令要具体到分析重点，不要泛泛而谈。\n"
         "禁止输出 Markdown 表格、章节标题、解释性散文或代码块包裹的伪 JSON；只允许输出一个 JSON 对象。\n"
         "若你无法完全确定全部字段，也必须先输出最小可执行 commands，而不是输出说明文档。\n\n"
@@ -357,7 +397,8 @@ def build_problem_analysis_supervisor_prompt(
         "4) commands 只需给本步计划执行的Agent（1-3个）下命令。\n\n"
         "5) 若 context.interface_mapping.database_tables 非空，DatabaseAgent 命令必须带 database_tables。\n\n"
         "6) 如需强制某专家按特定技能模板分析，可填写 skill_hints（例如 ['log-forensics']）。\n\n"
-        "7) 若 context.deployment_profile.name=production_governed 且你认为结论可用但仍需人工确认，可设置 should_pause_for_review=true，并填写 review_reason 与 review_payload；此时不要设置 should_stop=true。\n\n"
+        "7) 如需调用扩展插件工具，可填写 tool_hints（例如 ['design_spec_alignment']）。\n\n"
+        "8) 若 context.deployment_profile.name=production_governed 且你认为结论可用但仍需人工确认，可设置 should_pause_for_review=true，并填写 review_reason 与 review_payload；此时不要设置 should_stop=true。\n\n"
         f"讨论步数预算: {discussion_step_count}/{max_discussion_steps}\n"
         f"故障上下文:\n```json\n{to_json(context)}\n```\n\n"
         f"{dialogue_block}"

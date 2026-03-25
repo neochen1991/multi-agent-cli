@@ -1,0 +1,40 @@
+{
+  "id": "fixture_inc_23",
+  "title": "order create timeout with explicit blast radius expectation",
+  "scenario": "impact-scope-order-create-timeout",
+  "symptom": "2026-03-18 20:05 起 POST /api/v1/orders 大量 502，用户无法提交订单；购物车结算页点击“提交订单”后持续报错。告警显示 order-service 5xx 激增，责任田映射命中订单创建功能，当前需要系统明确输出影响功能、影响接口和用户影响估算。",
+  "log_excerpt": "2026-03-18T20:05:11.002+08:00 INFO  [gateway] request path=/api/v1/orders method=POST traceId=ord_771\n2026-03-18T20:05:41.114+08:00 ERROR [order-service] createOrder timeout after 30000ms traceId=ord_771\n2026-03-18T20:05:41.220+08:00 ERROR [gateway] upstream timeout service=order-service path=/api/v1/orders status=502 traceId=ord_771\nalert summary: gateway.orders.5xx >= 32%, checkout submit fail count high, estimated affected users around 1800 in 10m window",
+  "stacktrace": "java.net.SocketTimeoutException: Read timed out\n\tat com.acme.order.application.OrderAppService.createOrder(OrderAppService.java:201)\n\tat com.acme.order.api.OrderController.create(OrderController.java:88)",
+  "expected_root_cause": "订单创建主链路超时导致 gateway 返回 502，当前样例主要用于验证系统是否能输出清晰的影响面，而不是验证复杂根因分歧。",
+  "expected_domain": "订单",
+  "expected_aggregate": "Order",
+  "owner": "sre-benchmark",
+  "tags": [
+    "golden",
+    "impact-analysis",
+    "blast-radius",
+    "order-create"
+  ],
+  "golden": true,
+  "expected_causal_chain": [
+    "POST /api/v1/orders 入口超时",
+    "gateway 返回 502",
+    "订单创建功能受影响",
+    "用户提交订单失败"
+  ],
+  "must_include": [
+    "订单创建功能受影响",
+    "/api/v1/orders 接口受影响",
+    "用户影响需要给出实测或估算口径"
+  ],
+  "must_exclude": [
+    "只输出受影响服务，不说明功能和接口",
+    "完全忽略用户影响范围"
+  ],
+  "expected_impact": {
+    "affected_functions": ["订单创建"],
+    "affected_interfaces": ["/api/v1/orders"],
+    "affected_services": ["order-service"],
+    "require_user_scope": true
+  }
+}

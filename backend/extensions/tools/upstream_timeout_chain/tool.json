@@ -1,0 +1,22 @@
+{
+  "tool_id": "upstream_timeout_chain",
+  "name": "上游超时级联分析",
+  "description": "从日志与故障描述中提取超时级联链路，辅助判定首发上游与放大路径",
+  "runtime": "python",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "allowed_agents": ["LogAgent", "MetricsAgent", "DomainAgent", "JudgeAgent"],
+  "input_schema": {
+    "agent_name": "string",
+    "compact_context": "object",
+    "incident_context": "object",
+    "assigned_command": "object"
+  },
+  "output_schema": {
+    "summary": "string",
+    "suspected_upstream_services": "string[]",
+    "cascade_chain": "string[]",
+    "timeout_signals": "string[]",
+    "confidence": "number"
+  }
+}

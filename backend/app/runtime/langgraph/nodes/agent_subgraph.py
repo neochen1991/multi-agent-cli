@@ -120,6 +120,8 @@ def _agent_to_node_name(agent_name: str) -> str:
         node_name = "database_agent_node"
     elif agent_name == "MetricsAgent":
         node_name = "metrics_agent_node"
+    elif agent_name == "ImpactAnalysisAgent":
+        node_name = "impact_analysis_agent_node"
     elif agent_name == "ChangeAgent":
         node_name = "change_agent_node"
     elif agent_name == "RunbookAgent":

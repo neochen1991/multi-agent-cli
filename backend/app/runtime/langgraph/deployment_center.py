@@ -41,8 +41,10 @@ class DeploymentCenter:
     """封装DeploymentCenter相关数据结构或服务能力。"""
     def __init__(self) -> None:
         """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
-        core_agents = ["LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent"]
-        balanced_agents = core_agents + ["MetricsAgent"]
+        # 中文注释：baseline/quick 拓扑同样纳入 ImpactAnalysisAgent，
+        # 保证轻量模式下也能输出最基本的 blast radius 结果。
+        core_agents = ["LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent", "ImpactAnalysisAgent"]
+        balanced_agents = core_agents + ["MetricsAgent", "ImpactAnalysisAgent"]
         full_agents = balanced_agents + ["ChangeAgent", "RunbookAgent", "RuleSuggestionAgent"]
         self._profiles: Dict[str, DeploymentProfile] = {
             "baseline": DeploymentProfile(
