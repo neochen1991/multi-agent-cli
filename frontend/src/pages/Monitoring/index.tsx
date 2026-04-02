@@ -59,6 +59,7 @@ const MonitoringPage: React.FC = () => {
   const [status, setStatus] = useState<MonitorStatusResponse | null>(null);
   const [targets, setTargets] = useState<MonitorTarget[]>([]);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -67,9 +68,19 @@ const MonitoringPage: React.FC = () => {
   const [eventsTarget, setEventsTarget] = useState<MonitorTarget | null>(null);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [events, setEvents] = useState<Array<Record<string, unknown>>>([]);
+  const [createTrace, setCreateTrace] = useState<{
+    status: 'idle' | 'running' | 'success' | 'error';
+    startedAt?: number;
+    endedAt?: number;
+    httpStatus?: number;
+    message?: string;
+  }>({ status: 'idle' });
 
-  const loadAll = async () => {
-    setLoading(true);
+  const loadAll = async (options?: { silent?: boolean }) => {
+    const silent = Boolean(options?.silent);
+    if (!silent) {
+      setLoading(true);
+    }
     try {
       const [statusData, targetData] = await Promise.all([
         monitoringApi.getStatus(),
@@ -78,9 +89,13 @@ const MonitoringPage: React.FC = () => {
       setStatus(statusData);
       setTargets(targetData || []);
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || error?.message || '加载监控配置失败');
+      if (!silent) {
+        message.error(error?.response?.data?.detail || error?.message || '加载监控配置失败');
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   };
 
@@ -90,10 +105,20 @@ const MonitoringPage: React.FC = () => {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      void loadAll();
+      // 中文注释：后台轮询使用静默刷新，避免“刷新按钮/表格一直 loading”的观感问题。
+      void loadAll({ silent: true });
     }, 10000);
     return () => window.clearInterval(timer);
   }, []);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await loadAll();
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const handleStart = async () => {
     setStarting(true);
@@ -122,7 +147,23 @@ const MonitoringPage: React.FC = () => {
   };
 
   const handleCreate = async (values: TargetFormValues) => {
+    if (creating) {
+      return;
+    }
     setCreating(true);
+    const startedAt = Date.now();
+    setCreateTrace({ status: 'running', startedAt, message: '正在提交创建请求...' });
+    // 中文注释：兜底定时器，防止极端情况下 Promise 状态异常导致按钮一直转圈。
+    const creatingWatchdog = window.setTimeout(() => {
+      setCreating(false);
+      setCreateTrace({
+        status: 'error',
+        startedAt,
+        endedAt: Date.now(),
+        message: '创建请求超时（12s），请检查后端/API 代理后重试',
+      });
+      message.warning('创建请求超时，请检查后端可用性后重试');
+    }, 12000);
     const payload: MonitorTargetCreatePayload = {
       name: values.name.trim(),
       url: values.url.trim(),
@@ -138,8 +179,22 @@ const MonitoringPage: React.FC = () => {
       metadata: {},
     };
     try {
-      await monitoringApi.createTarget(payload);
+      const created = await Promise.race([
+        monitoringApi.createTarget(payload),
+        new Promise<never>((_, reject) => {
+          window.setTimeout(() => reject(new Error('创建请求超时（8s）')), 8000);
+        }),
+      ]);
       message.success('巡检目标创建成功');
+      setCreateTrace({
+        status: 'success',
+        startedAt,
+        endedAt: Date.now(),
+        httpStatus: 201,
+        message: `创建成功：${created.id}`,
+      });
+      // 中文注释：先本地回填新目标，确保用户立刻看到新增结果，不依赖下一次轮询刷新。
+      setTargets((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
       form.resetFields();
       form.setFieldsValue({
         enabled: true,
@@ -150,11 +205,20 @@ const MonitoringPage: React.FC = () => {
         cooldown_sec: 300,
         cookie_header: '',
       });
-      // 中文注释：列表刷新放到后台执行，避免刷新链路异常时让“添加目标”按钮一直 loading。
-      void loadAll();
+      void loadAll({ silent: true });
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || error?.message || '创建失败');
+      const detail = error?.response?.data?.detail || error?.message || '创建失败';
+      const httpStatus = Number(error?.response?.status || 0) || undefined;
+      setCreateTrace({
+        status: 'error',
+        startedAt,
+        endedAt: Date.now(),
+        httpStatus,
+        message: String(detail),
+      });
+      message.error(detail);
     } finally {
+      window.clearTimeout(creatingWatchdog);
       setCreating(false);
     }
   };
@@ -164,7 +228,7 @@ const MonitoringPage: React.FC = () => {
     try {
       await monitoringApi.updateTarget(row.id, { enabled: checked });
       message.success(`已${checked ? '启用' : '停用'}目标`);
-      await loadAll();
+      await loadAll({ silent: true });
     } catch (error: any) {
       message.error(error?.response?.data?.detail || error?.message || '更新失败');
     } finally {
@@ -177,7 +241,7 @@ const MonitoringPage: React.FC = () => {
     try {
       await monitoringApi.deleteTarget(row.id);
       message.success('巡检目标已删除');
-      await loadAll();
+      await loadAll({ silent: true });
     } catch (error: any) {
       message.error(error?.response?.data?.detail || error?.message || '删除失败');
     } finally {
@@ -195,7 +259,7 @@ const MonitoringPage: React.FC = () => {
       } else {
         message.success('巡检完成，未发现异常');
       }
-      await Promise.all([loadAll(), openEvents(row)]);
+      await Promise.all([loadAll({ silent: true }), openEvents(row)]);
     } catch (error: any) {
       message.error(error?.response?.data?.detail || error?.message || '巡检失败');
     } finally {
@@ -368,7 +432,7 @@ const MonitoringPage: React.FC = () => {
             <Button loading={stopping} onClick={() => void handleStop()}>
               停止巡检
             </Button>
-            <Button loading={loading} onClick={() => void loadAll()}>
+            <Button loading={refreshing} onClick={() => void handleRefresh()}>
               刷新
             </Button>
           </Space>
@@ -446,6 +510,19 @@ const MonitoringPage: React.FC = () => {
               <Button type="primary" htmlType="submit" loading={creating}>
                 添加目标
               </Button>
+            </Form.Item>
+            <Form.Item label=" " colon={false}>
+              <Text type={createTrace.status === 'error' ? 'danger' : 'secondary'}>
+                最近提交：
+                {createTrace.status === 'idle' ? '尚未提交' : ''}
+                {createTrace.status === 'running' ? '提交中...' : ''}
+                {createTrace.status === 'success' ? `成功（${createTrace.httpStatus || 201}）` : ''}
+                {createTrace.status === 'error' ? `失败（${createTrace.httpStatus || '-'}）` : ''}
+                {createTrace.message ? ` · ${createTrace.message}` : ''}
+                {createTrace.startedAt && createTrace.endedAt
+                  ? ` · ${createTrace.endedAt - createTrace.startedAt}ms`
+                  : ''}
+              </Text>
             </Form.Item>
           </Space>
         </Form>
