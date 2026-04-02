@@ -130,6 +130,10 @@ def coordinator_command_schema() -> Dict[str, Any]:
         "chat_message": "",
         "analysis": "",
         "conclusion": "",
+        "selected_agents": [
+            "LogAgent|DomainAgent|CodeAgent|DatabaseAgent|MetricsAgent|ImpactAnalysisAgent|ChangeAgent|RunbookAgent|RuleSuggestionAgent|"
+            "CriticAgent|RebuttalAgent|JudgeAgent|VerificationAgent"
+        ],
         "next_mode": "parallel_analysis|single|judge|stop",
         "next_agent": (
             "LogAgent|DomainAgent|CodeAgent|DatabaseAgent|MetricsAgent|ImpactAnalysisAgent|ChangeAgent|RunbookAgent|RuleSuggestionAgent|"
@@ -314,13 +318,13 @@ def build_problem_analysis_commander_prompt(
     return (
         f"你是问题分析主Agent。当前第 {loop_round}/{max_rounds} 轮。\n"
         "请先给出一段简短会议发言(chat_message)，然后给出对各专家Agent的命令清单(commands)。\n"
-        "同时你需要决定下一步调度：next_mode/next_agent；如果你判断证据充分可以停止，设置 should_stop=true 并给出 stop_reason。\n"
-        "请优先覆盖故障上下文中的 available_analysis_agents；"
+        "同时你需要决定下一步调度：selected_agents/next_mode/next_agent；如果你判断证据充分可以停止，设置 should_stop=true 并给出 stop_reason。\n"
+        "selected_agents 必须填写本轮真正需要执行的专家集合，且应优先从故障上下文中的 available_analysis_agents 里选择；"
         "若已存在历史结论，可补充 CriticAgent/RebuttalAgent/JudgeAgent/VerificationAgent 命令。\n"
         "若 context.interface_mapping.database_tables 非空，必须把这些表名填入 DatabaseAgent 命令的 database_tables 字段。\n"
         "必要时可在命令中提供 skill_hints（技能名数组），指导专家Agent优先使用指定技能模板。\n"
         "若需要调用扩展插件工具，可同时提供 tool_hints（工具ID数组，例如 ['design_spec_alignment']）。\n"
-        "命令要具体到分析重点，不要泛泛而谈。\n"
+        "命令要具体到分析重点，不要泛泛而谈；selected_agents 必须与 commands 对齐，不要点名未下发命令的专家。\n"
         "禁止输出 Markdown 表格、章节标题、解释性散文或代码块包裹的伪 JSON；只允许输出一个 JSON 对象。\n"
         "若你无法完全确定全部字段，也必须先输出最小可执行 commands，而不是输出说明文档。\n\n"
         f"故障上下文:\n```json\n{to_json(context)}\n```\n\n"
@@ -394,7 +398,7 @@ def build_problem_analysis_supervisor_prompt(
         "1) 优先让Agent回应他人观点而不是重复自己的完整分析；\n"
         "2) 若证据不足，继续调度某个专家发言并下达具体命令；\n"
         "3) 若你判断结论已充分，设置 should_stop=true；但若尚未形成裁决，next_agent 应为 JudgeAgent。\n"
-        "4) commands 只需给本步计划执行的Agent（1-3个）下命令。\n\n"
+        "4) selected_agents 必须列出本步计划执行的Agent（1-3个），commands 也只给这些Agent下命令。\n\n"
         "5) 若 context.interface_mapping.database_tables 非空，DatabaseAgent 命令必须带 database_tables。\n\n"
         "6) 如需强制某专家按特定技能模板分析，可填写 skill_hints（例如 ['log-forensics']）。\n\n"
         "7) 如需调用扩展插件工具，可填写 tool_hints（例如 ['design_spec_alignment']）。\n\n"

@@ -16,7 +16,8 @@ class DeploymentProfile:
     """封装DeploymentProfile相关数据结构或服务能力。"""
     name: str
     description: str
-    analysis_agents: List[str]
+    allowed_agents: List[str]
+    max_parallel_agents: int
     collaboration_enabled: bool
     critique_enabled: bool
     require_verification_plan: bool
@@ -28,7 +29,10 @@ class DeploymentProfile:
         return {
             "name": self.name,
             "description": self.description,
-            "analysis_agents": list(self.analysis_agents),
+            # 中文注释：保留 analysis_agents 兼容旧调用方，但新语义应使用 allowed_agents。
+            "allowed_agents": list(self.allowed_agents),
+            "analysis_agents": list(self.allowed_agents),
+            "max_parallel_agents": int(self.max_parallel_agents),
             "collaboration_enabled": self.collaboration_enabled,
             "critique_enabled": self.critique_enabled,
             "require_verification_plan": self.require_verification_plan,
@@ -41,16 +45,23 @@ class DeploymentCenter:
     """封装DeploymentCenter相关数据结构或服务能力。"""
     def __init__(self) -> None:
         """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
-        # 中文注释：baseline/quick 拓扑同样纳入 ImpactAnalysisAgent，
-        # 保证轻量模式下也能输出最基本的 blast radius 结果。
-        core_agents = ["LogAgent", "DomainAgent", "CodeAgent", "DatabaseAgent", "ImpactAnalysisAgent"]
-        balanced_agents = core_agents + ["MetricsAgent", "ImpactAnalysisAgent"]
-        full_agents = balanced_agents + ["ChangeAgent", "RunbookAgent", "RuleSuggestionAgent"]
+        all_allowed_agents = [
+            "LogAgent",
+            "DomainAgent",
+            "CodeAgent",
+            "DatabaseAgent",
+            "MetricsAgent",
+            "ImpactAnalysisAgent",
+            "ChangeAgent",
+            "RunbookAgent",
+            "RuleSuggestionAgent",
+        ]
         self._profiles: Dict[str, DeploymentProfile] = {
             "baseline": DeploymentProfile(
                 name="baseline",
-                description="基础图拓扑，仅保留核心分析链路",
-                analysis_agents=core_agents,
+                description="弱模型保护预算档，限制并发和验证开销，不再预设固定专家池",
+                allowed_agents=all_allowed_agents,
+                max_parallel_agents=3,
                 collaboration_enabled=False,
                 critique_enabled=False,
                 require_verification_plan=False,
@@ -59,8 +70,9 @@ class DeploymentCenter:
             ),
             "skill_enabled": DeploymentProfile(
                 name="skill_enabled",
-                description="启用技能增强的常规分析拓扑",
-                analysis_agents=balanced_agents,
+                description="常规预算档，允许更完整的专家选择空间",
+                allowed_agents=all_allowed_agents,
+                max_parallel_agents=5,
                 collaboration_enabled=False,
                 critique_enabled=False,
                 require_verification_plan=True,
@@ -69,8 +81,9 @@ class DeploymentCenter:
             ),
             "investigation_full": DeploymentProfile(
                 name="investigation_full",
-                description="完整调查拓扑，启用协作与批判环节",
-                analysis_agents=full_agents,
+                description="深度调查预算档，允许更大并发与更长讨论",
+                allowed_agents=all_allowed_agents,
+                max_parallel_agents=6,
                 collaboration_enabled=True,
                 critique_enabled=True,
                 require_verification_plan=True,
@@ -79,8 +92,9 @@ class DeploymentCenter:
             ),
             "production_governed": DeploymentProfile(
                 name="production_governed",
-                description="生产治理拓扑，为审批与门禁场景预留扩展",
-                analysis_agents=full_agents,
+                description="生产治理预算档，保留审批和验证门禁",
+                allowed_agents=all_allowed_agents,
+                max_parallel_agents=6,
                 collaboration_enabled=True,
                 critique_enabled=True,
                 require_verification_plan=True,

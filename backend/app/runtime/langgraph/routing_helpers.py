@@ -15,38 +15,14 @@ from app.runtime.messages import AgentEvidence
 
 KEY_EVIDENCE_AGENTS = ("LogAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent")
 
-_AGENT_KEYWORD_MAP = {
-    "LogAgent": ("日志", "log", "trace", "exception", "error", "首错", "超时", "502", "500"),
-    "CodeAgent": ("代码", "controller", "service", "dao", "事务", "调用链", "连接释放", "线程池", "method", "class"),
-    "DatabaseAgent": ("数据库", "db", "sql", "锁", "deadlock", "session", "top sql", "连接池", "hikari"),
-    "MetricsAgent": ("指标", "cpu", "内存", "latency", "rt", "p99", "监控", "qps"),
-    "ImpactAnalysisAgent": ("影响", "blast radius", "功能", "接口", "用户", "范围", "受影响"),
-    "DomainAgent": ("领域", "聚合", "责任田", "owner", "归属"),
-    "ChangeAgent": ("发布", "变更", "配置", "deploy", "release", "commit"),
-    "RunbookAgent": ("runbook", "sop", "案例", "止血", "回滚"),
-}
-
-
 def infer_relevant_agents_from_texts(
     texts: Sequence[str],
     *,
     available_agents: Sequence[str],
 ) -> List[str]:
-    """根据缺口描述和证据文本推断最相关的专家。"""
-    normalized_agents = [str(name or "").strip() for name in available_agents if str(name or "").strip()]
-    if not normalized_agents:
-        return []
-
-    merged_text = " ".join(str(item or "").strip().lower() for item in list(texts or []) if str(item or "").strip())
-    if not merged_text:
-        return []
-
-    matches: List[str] = []
-    for agent_name in normalized_agents:
-        keywords = _AGENT_KEYWORD_MAP.get(agent_name, ())
-        if any(keyword in merged_text for keyword in keywords):
-            matches.append(agent_name)
-    return list(dict.fromkeys(matches))
+    """兼容保留：历史规则可能调用该函数，但默认不再基于关键词做业务分发。"""
+    _ = texts, available_agents
+    return []
 
 
 def _gap_target_agent(
@@ -70,26 +46,13 @@ def _gap_target_agent(
         for name in KEY_EVIDENCE_AGENTS
         if name in set(available_agents) and _payload_is_degraded(_agent_output_from_state(state, name))
     ]
-    open_questions = [str(item or "") for item in list(state.get("open_questions") or [])]
-    round_gap_summary = [str(item or "") for item in list(state.get("round_gap_summary") or [])]
-    top_k_hypotheses = [
-        str(item.get("conclusion") or "")
-        for item in list(state.get("top_k_hypotheses") or [])
-        if isinstance(item, dict)
-    ]
-    hinted_agents = infer_relevant_agents_from_texts(
-        [*open_questions, *round_gap_summary, *top_k_hypotheses],
-        available_agents=available_agents,
-    )
-
-    for agent_name in hinted_agents:
-        if agent_name in missing_key_agents or agent_name in degraded_agents:
-            return agent_name
     if len(missing_key_agents) == 1:
         return missing_key_agents[0]
     if len(degraded_agents) == 1:
         return degraded_agents[0]
-    return hinted_agents[0] if len(hinted_agents) == 1 else ""
+    # 中文注释：阶段 3 之后，guardrail 不再根据 open_questions/文本关键词替主 Agent 推断业务归属；
+    # 这里只保留最弱的“单个关键证据专家缺失/降级”兜底，避免规则继续主导分发语义。
+    return ""
 
 
 def _agent_output_from_state(state: Dict[str, Any], agent_name: str) -> Dict[str, Any]:

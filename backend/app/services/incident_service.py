@@ -32,6 +32,7 @@ from app.repositories.incident_repository import (
     IncidentRepository,
     InMemoryIncidentRepository,
     FileIncidentRepository,
+    SqliteIncidentRepository,
 )
 from app.config import settings
 
@@ -64,9 +65,9 @@ class IncidentService:
             repository: 故障存储库，未提供则根据配置选择文件或内存存储
         """
         self._repository = repository or (
-            FileIncidentRepository()
-            if settings.LOCAL_STORE_BACKEND == "file"
-            else InMemoryIncidentRepository()
+            InMemoryIncidentRepository()
+            if settings.LOCAL_STORE_BACKEND == "memory"
+            else SqliteIncidentRepository()
         )
         self._log_parser = LogParserTool()
 

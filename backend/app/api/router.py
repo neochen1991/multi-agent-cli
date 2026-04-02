@@ -5,7 +5,7 @@
 
 from fastapi import APIRouter
 
-from app.api import incidents, assets, debates, reports, auth, settings as settings_api, benchmark, governance, knowledge
+from app.api import incidents, assets, debates, reports, auth, settings as settings_api, benchmark, governance, knowledge, monitoring
 
 api_router = APIRouter()
 
@@ -62,4 +62,10 @@ api_router.include_router(
     governance.router,
     prefix="/governance",
     tags=["Governance"],
+)
+
+api_router.include_router(
+    monitoring.router,
+    prefix="/monitoring",
+    tags=["Monitoring"],
 )

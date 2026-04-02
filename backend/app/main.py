@@ -26,6 +26,7 @@ from app.api.ws_debates import router as ws_router
 from app.core.observability import MetricsMiddleware, beijing_timestamp_processor, metrics_store
 from app.core.rate_limit import RateLimitMiddleware
 from app.core.security import AuthRBACMiddleware
+from app.services.page_monitoring_service import page_monitoring_service
 
 # 配置结构化日志
 structlog.configure(
@@ -73,10 +74,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         version=settings.APP_VERSION,
         environment=settings.ENVIRONMENT,
     )
+    if settings.PAGE_MONITOR_ENABLED:
+        # 中文注释：服务启动后自动拉起页面巡检循环，实现“监控发现问题 -> 自动触发分析”闭环。
+        await page_monitoring_service.start()
     
     yield
     
     # 关闭时
+    await page_monitoring_service.stop()
     logger.info("application_shutting_down")
 
 

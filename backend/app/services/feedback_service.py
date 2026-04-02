@@ -16,7 +16,7 @@
 }
 
 存储路径：
-- {LOCAL_STORE_DIR}/feedback.json
+- SQLite.feedback_items
 
 使用场景：
 - 记录用户对分析结果的满意度
@@ -28,13 +28,10 @@ Feedback Service
 
 from __future__ import annotations
 
-import asyncio
-import json
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List
 
-from app.config import settings
+from app.storage import sqlite_store
 
 
 class FeedbackService:
@@ -44,8 +41,7 @@ class FeedbackService:
     提供反馈记录的持久化和查询功能。
 
     属性：
-    - _file: 反馈数据文件路径
-    - _lock: 异步锁，保证并发安全
+    - _store: SQLite 存储
 
     工作流程：
     1. 用户提交反馈
@@ -58,12 +54,9 @@ class FeedbackService:
         """
         初始化反馈服务
 
-        创建本地反馈文件和并发写锁。
+        初始化 SQLite 反馈存储。
         """
-        root = Path(settings.LOCAL_STORE_DIR)
-        root.mkdir(parents=True, exist_ok=True)
-        self._file = root / "feedback.json"
-        self._lock = asyncio.Lock()
+        self._store = sqlite_store
 
     async def append(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -82,10 +75,14 @@ class FeedbackService:
             "created_at": datetime.utcnow().isoformat(),
             **dict(payload or {}),
         }
-        async with self._lock:
-            items = self._load()
-            items.append(record)
-            self._save(items)
+        # 中文注释：反馈属于结构化记录，直接落 feedback_items 表，不再写 feedback.json。
+        await self._store.execute(
+            """
+            INSERT OR REPLACE INTO feedback_items (id, created_at, payload_json)
+            VALUES (?, ?, ?)
+            """,
+            (record["id"], record["created_at"], self._store.dumps_json(record)),
+        )
         return record
 
     async def list(self, limit: int = 100) -> List[Dict[str, Any]]:
@@ -100,39 +97,15 @@ class FeedbackService:
         Returns:
             List[Dict[str, Any]]: 反馈记录列表
         """
-        async with self._lock:
-            items = self._load()
-        return list(reversed(items))[: max(1, int(limit or 100))]
-
-    def _load(self) -> List[Dict[str, Any]]:
-        """
-        从文件加载反馈列表
-
-        文件不存在或损坏时返回空列表。
-
-        Returns:
-            List[Dict[str, Any]]: 反馈列表
-        """
-        if not self._file.exists():
-            return []
-        try:
-            payload = json.loads(self._file.read_text(encoding="utf-8"))
-            return payload if isinstance(payload, list) else []
-        except Exception:
-            return []
-
-    def _save(self, items: List[Dict[str, Any]]) -> None:
-        """
-        保存反馈列表到文件
-
-        使用临时文件原子写入。
-
-        Args:
-            items: 反馈列表
-        """
-        tmp = self._file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self._file)
+        rows = await self._store.fetchall(
+            """
+            SELECT payload_json FROM feedback_items
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit or 100)),),
+        )
+        return [self._store.loads_json(row["payload_json"], {}) for row in rows]
 
 
 # 全局实例

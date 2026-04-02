@@ -1,17 +1,16 @@
-"""
-Runtime task registry with local file persistence.
-"""
+"""Runtime task registry with SQLite persistence."""
 
 from __future__ import annotations
 
 import asyncio
-import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from app.config import settings
+from app.storage import SqliteStore, sqlite_store
 
 
 @dataclass
@@ -74,12 +73,12 @@ class RuntimeTaskRegistry:
 
     def __init__(self, base_dir: Optional[str] = None):
         """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
-        root = Path(base_dir or settings.LOCAL_STORE_DIR) / "runtime"
-        root.mkdir(parents=True, exist_ok=True)
-        self._file = root / "tasks.json"
+        raw_path = Path(str(base_dir or getattr(settings, "LOCAL_STORE_SQLITE_PATH", "") or ""))
+        store_path = str(raw_path / "app.db") if raw_path and raw_path.suffix == "" else str(raw_path)
+        self._store: SqliteStore = sqlite_store if not store_path else SqliteStore(store_path)
         self._lock = asyncio.Lock()
         self._tasks: Dict[str, TaskRecord] = {}
-        self._load_from_disk()
+        self._load_from_sqlite()
 
     async def mark_started(
         self,
@@ -102,7 +101,7 @@ class RuntimeTaskRegistry:
                 last_round=0,
             )
             self._tasks[session_id] = record
-            self._persist_locked()
+            await self._persist_locked()
             return record
 
     async def mark_heartbeat(
@@ -128,7 +127,7 @@ class RuntimeTaskRegistry:
                     record.last_round = max(0, int(round_number))
                 except (TypeError, ValueError):
                     pass
-            self._persist_locked()
+            await self._persist_locked()
             return record
 
     async def mark_done(self, session_id: str, status: str, error: str = "") -> Optional[TaskRecord]:
@@ -140,7 +139,7 @@ class RuntimeTaskRegistry:
             record.status = status
             record.error = error
             record.updated_at = datetime.utcnow().isoformat()
-            self._persist_locked()
+            await self._persist_locked()
             return record
 
     async def mark_waiting_review(
@@ -172,7 +171,7 @@ class RuntimeTaskRegistry:
                     record.last_round = max(0, int(round_number))
                 except (TypeError, ValueError):
                     pass
-            self._persist_locked()
+            await self._persist_locked()
             return record
 
     async def mark_review_decision(
@@ -194,20 +193,24 @@ class RuntimeTaskRegistry:
             if error:
                 record.error = str(error)
             record.updated_at = datetime.utcnow().isoformat()
-            self._persist_locked()
+            await self._persist_locked()
             return record
 
     async def get(self, session_id: str) -> Optional[TaskRecord]:
         """负责获取，并返回后续流程可直接消费的数据结果。"""
         async with self._lock:
-            self._sweep_stale_running_locked()
+            updated = self._sweep_stale_running_locked()
+            if updated > 0:
+                await self._persist_locked()
             record = self._tasks.get(session_id)
             return TaskRecord.from_dict(record.to_dict()) if record else None
 
     async def list_running(self) -> Dict[str, Dict[str, Any]]:
         """负责列出running，并返回后续流程可直接消费的数据结果。"""
         async with self._lock:
-            self._sweep_stale_running_locked()
+            updated = self._sweep_stale_running_locked()
+            if updated > 0:
+                await self._persist_locked()
             return {
                 key: value.to_dict()
                 for key, value in self._tasks.items()
@@ -217,7 +220,10 @@ class RuntimeTaskRegistry:
     async def sweep_stale_running(self, max_idle_seconds: int | None = None) -> int:
         """执行sweepstalerunning相关逻辑，并为当前模块提供可复用的处理能力。"""
         async with self._lock:
-            return self._sweep_stale_running_locked(max_idle_seconds=max_idle_seconds)
+            updated = self._sweep_stale_running_locked(max_idle_seconds=max_idle_seconds)
+            if updated > 0:
+                await self._persist_locked()
+            return updated
 
     def _sweep_stale_running_locked(self, max_idle_seconds: int | None = None) -> int:
         """执行sweepstalerunninglocked相关逻辑，并为当前模块提供可复用的处理能力。"""
@@ -240,20 +246,22 @@ class RuntimeTaskRegistry:
             item.error = "runtime_task_watchdog_timeout"
             item.updated_at = datetime.utcnow().isoformat()
             updated += 1
-        if updated > 0:
-            self._persist_locked()
         return updated
 
-    def _load_from_disk(self) -> None:
-        """负责加载fromdisk，并返回后续流程可直接消费的数据结果。"""
-        if not self._file.exists():
-            return
+    def _load_from_sqlite(self) -> None:
+        """从 SQLite 预加载任务记录。"""
         try:
-            payload = json.loads(self._file.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                return
+            conn = sqlite3.connect(str(self._store.db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT payload_json FROM runtime_tasks ORDER BY updated_at DESC"
+                ).fetchall()
+            finally:
+                conn.close()
             loaded: Dict[str, TaskRecord] = {}
-            for key, value in payload.items():
+            for row in rows:
+                value = self._store.loads_json(row["payload_json"], {})
                 if not isinstance(value, dict):
                     continue
                 item = TaskRecord.from_dict(value)
@@ -263,12 +271,25 @@ class RuntimeTaskRegistry:
         except Exception:
             self._tasks = {}
 
-    def _persist_locked(self) -> None:
-        """执行persistlocked相关逻辑，并为当前模块提供可复用的处理能力。"""
-        payload = {key: value.to_dict() for key, value in self._tasks.items()}
-        tmp = self._file.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self._file)
+    async def _persist_locked(self) -> None:
+        """把任务快照写入 runtime_tasks 表。"""
+        await self._store.execute("DELETE FROM runtime_tasks")
+        rows = [
+            (
+                key,
+                value.updated_at,
+                self._store.dumps_json(value.to_dict()),
+            )
+            for key, value in self._tasks.items()
+        ]
+        if rows:
+            await self._store.executemany(
+                """
+                INSERT INTO runtime_tasks (session_id, updated_at, payload_json)
+                VALUES (?, ?, ?)
+                """,
+                rows,
+            )
 
 
 runtime_task_registry = RuntimeTaskRegistry()

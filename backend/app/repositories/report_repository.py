@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.config import settings
+from app.storage import SqliteStore, sqlite_store
 
 class ReportRepository(ABC):
     """报告仓储接口"""
@@ -176,3 +177,95 @@ class FileReportRepository(ReportRepository):
             encoding="utf-8",
         )
         tmp.replace(self._file)
+
+
+class SqliteReportRepository(ReportRepository):
+    """基于 SQLite 的报告仓储。"""
+
+    def __init__(self, store: Optional[SqliteStore] = None):
+        # 中文注释：报告历史保存在 reports 表，分享链接映射保存在 share_tokens 表。
+        self._store = store or sqlite_store
+
+    async def save(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        """保存一份报告版本。"""
+        payload = dict(report or {})
+        await self._store.execute(
+            """
+            INSERT INTO reports (report_id, incident_id, format, created_at, payload_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                str(payload.get("report_id") or ""),
+                str(payload.get("incident_id") or ""),
+                str(payload.get("format") or ""),
+                str(payload.get("generated_at") or payload.get("created_at") or ""),
+                self._store.dumps_json(payload),
+            ),
+        )
+        return payload
+
+    async def get_latest(self, incident_id: str) -> Optional[Dict[str, Any]]:
+        """获取指定故障最新一版报告。"""
+        row = await self._store.fetchone(
+            """
+            SELECT payload_json FROM reports
+            WHERE incident_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (incident_id,),
+        )
+        if row is None:
+            return None
+        return self._store.loads_json(row["payload_json"], {})
+
+    async def get_latest_by_format(
+        self,
+        incident_id: str,
+        format: str,
+    ) -> Optional[Dict[str, Any]]:
+        """获取指定格式的最新报告。"""
+        row = await self._store.fetchone(
+            """
+            SELECT payload_json FROM reports
+            WHERE incident_id = ? AND format = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (incident_id, format),
+        )
+        if row is None:
+            return None
+        return self._store.loads_json(row["payload_json"], {})
+
+    async def list_by_incident(self, incident_id: str) -> List[Dict[str, Any]]:
+        """列出同一故障的全部历史报告版本。"""
+        rows = await self._store.fetchall(
+            """
+            SELECT payload_json FROM reports
+            WHERE incident_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (incident_id,),
+        )
+        return [self._store.loads_json(row["payload_json"], {}) for row in rows]
+
+    async def save_share_token(self, token: str, incident_id: str) -> None:
+        """记录分享 token 到 incident 的映射关系。"""
+        await self._store.execute(
+            """
+            INSERT OR REPLACE INTO share_tokens (token, incident_id, created_at)
+            VALUES (?, ?, datetime('now'))
+            """,
+            (token, incident_id),
+        )
+
+    async def get_incident_id_by_share_token(self, token: str) -> Optional[str]:
+        """根据分享 token 反查对应 incident。"""
+        row = await self._store.fetchone(
+            "SELECT incident_id FROM share_tokens WHERE token = ?",
+            (token,),
+        )
+        if row is None:
+            return None
+        return str(row["incident_id"] or "")

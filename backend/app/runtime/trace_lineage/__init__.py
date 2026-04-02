@@ -16,7 +16,7 @@
 - summary: 摘要记录
 
 存储结构：
-- {LOCAL_STORE_DIR}/lineage/{session_id}.jsonl
+- SQLite.lineage_events
 
 使用场景：
 - 问题排查：追溯执行过程

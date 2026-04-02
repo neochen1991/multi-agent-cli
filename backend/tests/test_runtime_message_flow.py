@@ -992,6 +992,58 @@ def test_extract_agent_commands_fill_defaults_includes_impact_analysis_agent():
     assert "影响功能" in commands["ImpactAnalysisAgent"]["task"]
 
 
+def test_resolve_selected_agents_from_payload_prefers_llm_selection_with_budget():
+    """验证 selected_agents 会作为主路径，并受允许名单和并发预算约束。"""
+
+    orchestrator = _orchestrator()
+    orchestrator.PARALLEL_ANALYSIS_AGENTS = ("LogAgent", "CodeAgent", "DatabaseAgent", "MetricsAgent")
+    orchestrator._max_parallel_analysis_agents = 2
+
+    selected = orchestrator._resolve_selected_agents_from_payload(
+        {
+            "selected_agents": ["LogAgent", "JudgeAgent", "CodeAgent", "DatabaseAgent"],
+            "commands": [
+                {"target_agent": "MetricsAgent", "task": "分析指标"},
+            ],
+        },
+        allowed_agents=list(orchestrator.PARALLEL_ANALYSIS_AGENTS),
+        fallback_parallel_agents=list(orchestrator.PARALLEL_ANALYSIS_AGENTS),
+        max_count=orchestrator._max_parallel_analysis_agents,
+    )
+
+    assert selected == ["LogAgent", "CodeAgent"]
+
+
+def test_resolve_selected_agents_from_payload_falls_back_to_commands_then_next_agent():
+    """验证旧输出格式下仍可从 commands 或 next_agent 回退恢复目标专家。"""
+
+    orchestrator = _orchestrator()
+
+    selected_from_commands = orchestrator._resolve_selected_agents_from_payload(
+        {
+            "commands": [
+                {"target_agent": "DatabaseAgent", "task": "分析锁等待"},
+                {"target_agent": "LogAgent", "task": "分析错误时间线"},
+            ]
+        },
+        allowed_agents=["LogAgent", "DatabaseAgent", "JudgeAgent"],
+        fallback_parallel_agents=["LogAgent", "DatabaseAgent"],
+        max_count=3,
+    )
+    assert selected_from_commands == ["DatabaseAgent", "LogAgent"]
+
+    selected_from_next_agent = orchestrator._resolve_selected_agents_from_payload(
+        {
+            "next_mode": "single",
+            "next_agent": "JudgeAgent",
+        },
+        allowed_agents=["LogAgent", "DatabaseAgent", "JudgeAgent"],
+        fallback_parallel_agents=["LogAgent", "DatabaseAgent"],
+        max_count=3,
+    )
+    assert selected_from_next_agent == ["JudgeAgent"]
+
+
 def test_enrich_agent_commands_adds_default_skill_hints():
     """验证enrichAgentcommandsadds默认Skill提示。"""
     

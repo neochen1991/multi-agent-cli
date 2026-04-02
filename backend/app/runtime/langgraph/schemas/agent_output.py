@@ -100,6 +100,7 @@ class CommanderOutputSchema(BaseModel):
     chat_message: str = ""
     analysis: str = ""
     conclusion: str = ""
+    selected_agents: List[str] = Field(default_factory=list)
     next_mode: str = ""
     next_agent: str = ""
     should_stop: bool = False

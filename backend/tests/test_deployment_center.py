@@ -20,6 +20,8 @@ def test_deployment_center_selects_baseline_for_quick_mode(tmp_path, monkeypatch
     selected = center.select(severity="warning", execution_mode="quick")
     assert selected["name"] == "baseline"
     assert selected["collaboration_enabled"] is False
+    assert selected["max_parallel_agents"] == 3
+    assert "RunbookAgent" in selected["allowed_agents"]
 
 
 def test_deployment_center_selects_governed_for_critical(tmp_path, monkeypatch):
@@ -40,3 +42,16 @@ def test_deployment_center_keeps_background_aligned_with_standard(tmp_path, monk
     selected = center.select(severity="warning", execution_mode="background")
     assert selected["name"] == "skill_enabled"
     assert selected["require_verification_plan"] is True
+    assert selected["max_parallel_agents"] == 5
+
+
+def test_deployment_center_keeps_same_allowed_agents_for_quick_and_standard(tmp_path, monkeypatch):
+    """验证 quick/standard 的部署档只在预算上差异，不切换专家可选空间。"""
+
+    center = DeploymentCenter()
+    monkeypatch.setattr(center, "_file", tmp_path / "deployment_profile.json")
+    quick = center.select(severity="warning", execution_mode="quick")
+    standard = center.select(severity="warning", execution_mode="standard")
+
+    assert quick["allowed_agents"] == standard["allowed_agents"]
+    assert quick["max_parallel_agents"] < standard["max_parallel_agents"]

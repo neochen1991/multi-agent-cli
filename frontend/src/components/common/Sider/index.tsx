@@ -4,6 +4,7 @@ import {
   ApartmentOutlined,
   BookOutlined,
   DeploymentUnitOutlined,
+  RadarChartOutlined,
   AlertOutlined,
   HistoryOutlined,
   HomeOutlined,
@@ -46,6 +47,11 @@ const AppSider: React.FC = () => {
         label: '知识库',
       },
       {
+        key: '/monitoring',
+        icon: <RadarChartOutlined />,
+        label: '监控中心',
+      },
+      {
         key: '/settings',
         icon: <SettingOutlined />,
         label: '设置',
@@ -84,6 +90,9 @@ const AppSider: React.FC = () => {
     }
     if (location.pathname.startsWith('/knowledge')) {
       return '/knowledge';
+    }
+    if (location.pathname.startsWith('/monitoring')) {
+      return '/monitoring';
     }
     const matched = menuItems
       .filter((item) => item.key !== '/')

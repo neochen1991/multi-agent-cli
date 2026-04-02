@@ -10,11 +10,11 @@
 4. 最终裁决结果存储
 
 存储结构：
-- {LOCAL_STORE_DIR}/runtime/sessions/{session_id}.json - 会话状态
-- {LOCAL_STORE_DIR}/runtime/events/{session_id}.jsonl - 事件流
+- SQLite.runtime_sessions - 会话状态
+- SQLite.runtime_events - 事件流
 
 使用场景：
-- 断点恢复：从磁盘加载之前的执行状态
+- 断点恢复：从 SQLite 加载之前的执行状态
 - 事件回放：按时间顺序读取事件流
 - 状态同步：多进程间共享执行状态
 
@@ -24,27 +24,20 @@ Local runtime session checkpoint store.
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from app.config import settings
 from app.runtime.messages import RuntimeState, RoundCheckpoint, FinalVerdict
+from app.storage import SqliteStore, sqlite_store
 
 
 class RuntimeSessionStore:
     """
-    基于文件的运行时检查点/事件存储
-
-    无需外部数据库，使用本地文件系统持久化：
-    - 会话状态：JSON 格式，原子写入
-    - 事件流：JSONL 格式，追加写入
+    基于 SQLite 的运行时检查点/事件存储
 
     属性：
-    - _root: 运行时存储根目录
-    - _state_dir: 会话状态目录
-    - _events_dir: 事件流目录
+    - _store: SQLite 结构化存储
     - _lock: 异步锁，保证并发安全
 
     状态生命周期：
@@ -55,44 +48,12 @@ class RuntimeSessionStore:
         """
         初始化运行时会话存储
 
-        创建存储目录结构：
-        - {base_dir}/runtime/sessions/ - 会话状态
-        - {base_dir}/runtime/events/ - 事件流
-
         Args:
-            base_dir: 基础存储目录，未提供则使用配置值
+            base_dir: 兼容旧调用方保留，当前不再用于文件落盘
         """
-        root = Path(base_dir or settings.LOCAL_STORE_DIR)
-        self._root = root / "runtime"
-        self._state_dir = self._root / "sessions"
-        self._events_dir = self._root / "events"
-        self._state_dir.mkdir(parents=True, exist_ok=True)
-        self._events_dir.mkdir(parents=True, exist_ok=True)
+        store_path = str(base_dir or getattr(settings, "LOCAL_STORE_SQLITE_PATH", "") or "")
+        self._store: SqliteStore = sqlite_store if not store_path else SqliteStore(store_path)
         self._lock = asyncio.Lock()
-
-    def _state_path(self, session_id: str) -> Path:
-        """
-        获取会话状态文件路径
-
-        Args:
-            session_id: 会话 ID
-
-        Returns:
-            Path: 状态文件路径
-        """
-        return self._state_dir / f"{session_id}.json"
-
-    def _events_path(self, session_id: str) -> Path:
-        """
-        获取事件流文件路径
-
-        Args:
-            session_id: 会话 ID
-
-        Returns:
-            Path: 事件流文件路径
-        """
-        return self._events_dir / f"{session_id}.jsonl"
 
     async def create(
         self,
@@ -126,7 +87,7 @@ class RuntimeSessionStore:
         """
         加载运行时状态
 
-        从磁盘读取会话状态，用于断点恢复。
+        从 SQLite 读取会话状态，用于断点恢复。
 
         Args:
             session_id: 会话 ID
@@ -135,11 +96,13 @@ class RuntimeSessionStore:
             Optional[RuntimeState]: 状态对象，不存在则返回 None
         """
         async with self._lock:
-            path = self._state_path(session_id)
-            if not path.exists():
+            row = await self._store.fetchone(
+                "SELECT payload_json FROM runtime_sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            if row is None:
                 return None
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            return RuntimeState.model_validate(payload)
+            return RuntimeState.model_validate(self._store.loads_json(row["payload_json"], {}))
 
     async def append_round(self, session_id: str, checkpoint: RoundCheckpoint) -> None:
         """
@@ -152,7 +115,7 @@ class RuntimeSessionStore:
             checkpoint: 回合检查点数据
         """
         async with self._lock:
-            state = self._load_state_locked(session_id)
+            state = await self._load_state_locked(session_id)
             if not state:
                 return
             state.rounds.append(checkpoint)
@@ -170,7 +133,7 @@ class RuntimeSessionStore:
             verdict: 最终裁决结果
         """
         async with self._lock:
-            state = self._load_state_locked(session_id)
+            state = await self._load_state_locked(session_id)
             if not state:
                 return
             state.final_verdict = verdict
@@ -189,7 +152,7 @@ class RuntimeSessionStore:
             verdict: 待审核的裁决结果
         """
         async with self._lock:
-            state = self._load_state_locked(session_id)
+            state = await self._load_state_locked(session_id)
             if not state:
                 return
             state.final_verdict = verdict
@@ -207,7 +170,7 @@ class RuntimeSessionStore:
             session_id: 会话 ID
         """
         async with self._lock:
-            state = self._load_state_locked(session_id)
+            state = await self._load_state_locked(session_id)
             if not state:
                 return
             state.status = "failed"
@@ -218,18 +181,40 @@ class RuntimeSessionStore:
         """
         追加事件
 
-        将事件追加到事件流文件（JSONL 格式）。
+        将事件追加到运行时事件表。
 
         Args:
             session_id: 会话 ID
             event: 事件数据字典
         """
         async with self._lock:
-            path = self._events_path(session_id)
-            line = json.dumps(event, ensure_ascii=False, default=str)
-            with path.open("a", encoding="utf-8") as fp:
-                fp.write(line)
-                fp.write("\n")
+            payload = dict(event or {})
+            await self._store.execute(
+                """
+                INSERT INTO runtime_events (session_id, event_type, agent_name, created_at, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    str(payload.get("type") or ""),
+                    str(payload.get("agent_name") or ""),
+                    str(payload.get("timestamp") or datetime.utcnow().isoformat()),
+                    self._store.dumps_json(payload),
+                ),
+            )
+
+    async def list_events(self, session_id: str) -> list[Dict[str, Any]]:
+        """按写入顺序返回指定会话的运行时事件。"""
+        async with self._lock:
+            rows = await self._store.fetchall(
+                """
+                SELECT payload_json FROM runtime_events
+                WHERE session_id = ?
+                ORDER BY id ASC
+                """,
+                (session_id,),
+            )
+            return [self._store.loads_json(row["payload_json"], {}) for row in rows]
 
     async def _save_state(self, state: RuntimeState) -> None:
         """
@@ -241,7 +226,7 @@ class RuntimeSessionStore:
         async with self._lock:
             await self._save_state_locked(state)
 
-    def _load_state_locked(self, session_id: str) -> Optional[RuntimeState]:
+    async def _load_state_locked(self, session_id: str) -> Optional[RuntimeState]:
         """
         加载状态（已持有锁）
 
@@ -253,29 +238,36 @@ class RuntimeSessionStore:
         Returns:
             Optional[RuntimeState]: 状态对象
         """
-        path = self._state_path(session_id)
-        if not path.exists():
+        row = await self._store.fetchone(
+            "SELECT payload_json FROM runtime_sessions WHERE session_id = ?",
+            (session_id,),
+        )
+        if row is None:
             return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        return RuntimeState.model_validate(payload)
+        return RuntimeState.model_validate(self._store.loads_json(row["payload_json"], {}))
 
     async def _save_state_locked(self, state: RuntimeState) -> None:
         """
         保存状态（已持有锁）
 
-        使用临时文件原子写入，避免进程中断导致数据损坏。
-
         Args:
             state: 运行时状态
         """
-        path = self._state_path(state.session_id)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(state.model_dump(mode="json"), ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        payload = state.model_dump(mode="json")
+        await self._store.execute(
+            """
+            INSERT OR REPLACE INTO runtime_sessions
+            (session_id, trace_id, status, updated_at, payload_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                state.session_id,
+                state.trace_id,
+                state.status,
+                str(payload.get("updated_at") or datetime.utcnow().isoformat()),
+                self._store.dumps_json(payload),
+            ),
         )
-        tmp.replace(path)
-
 
 # 全局实例
 runtime_session_store = RuntimeSessionStore()

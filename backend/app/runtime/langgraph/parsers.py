@@ -421,6 +421,18 @@ def normalize_commander_output(parsed: Dict[str, Any], raw_content: str) -> Dict
     """对输入执行归一化主Agentoutput，将原始数据整理为稳定的内部结构。"""
     normalized = normalize_normal_output(parsed, raw_content)
 
+    def _normalize_selected_agents(value: Any) -> List[str]:
+        """把主 Agent 选中的专家列表清洗成稳定数组。"""
+        if not isinstance(value, list):
+            return []
+        picks: List[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            picks.append(text[:80])
+        return list(dict.fromkeys(picks))[:10]
+
     def _normalize_tables(value: Any) -> List[str]:
         """对输入执行归一化tables，将原始数据整理为稳定的内部结构。"""
         if not isinstance(value, list):
@@ -483,6 +495,7 @@ def normalize_commander_output(parsed: Dict[str, Any], raw_content: str) -> Dict
     if not str(normalized.get("chat_message") or "").strip():
         normalized["chat_message"] = "我来拆解问题并给各专家Agent下达命令。"
     normalized["commands"] = commands
+    normalized["selected_agents"] = _normalize_selected_agents(parsed.get("selected_agents"))
     next_mode = str(parsed.get("next_mode") or "").strip().lower()
     next_agent = str(parsed.get("next_agent") or "").strip()
     should_stop = parsed.get("should_stop")

@@ -18,10 +18,7 @@
 7. CommanderSettleRule (50): Commander 置信度决策
 8. NoCritiqueRevisitRule (55): 无批评重访
 9. NoCritiqueTargetedSettleRule (56): 无批评模式下阻止对已有效专家的重复追问
-10. NoCritiqueRouteMissSettleRule (57): 无批评模式下对网关本地 404 快速收口
-11. StandardSecondRoundTargetedRule (58): standard 第二轮后优先定向补证
-12. NoCritiqueGapTargetRule (59): 无批评模式下优先定向补证
-13. NoCritiqueParallelSettleRule (60): 无批评模式下阻止重复整轮并行分析
+10. NoCritiqueParallelSettleRule (60): 无批评模式下阻止重复整轮并行分析
 
 工作流程：
 1. 状态变化 -> 构建路由上下文
@@ -94,11 +91,8 @@ class RoutingRuleEngine:
             CommanderSettleRule,
             ConsensusRule,
             CritiqueCycleRule,
-            NoCritiqueGapTargetRule,
             NoCritiqueParallelSettleRule,
-            NoCritiqueRouteMissSettleRule,
             NoCritiqueTargetedSettleRule,
-            StandardSecondRoundTargetedRule,
             JudgeReadyRule,
             NoCritiqueRevisitRule,
             PostRebuttalSettleRule,
@@ -122,12 +116,6 @@ class RoutingRuleEngine:
             NoCritiqueRevisitRule(priority=55),
             # 若当前定向追问的专家已经给出有效覆盖，则不再重复补证，直接交给 Judge 收敛。
             NoCritiqueTargetedSettleRule(priority=56),
-            # quick 模式下，网关本地 404 的最小证据链闭合后直接收口，避免继续补无关数据库证据。
-            NoCritiqueRouteMissSettleRule(priority=57),
-            # standard 第二轮后不再默认整轮重跑，优先根据缺口摘要和 Judge 动作定向补证。
-            StandardSecondRoundTargetedRule(priority=58),
-            # 若缺口已经能归属到某个专家，优先定向追问，而不是整轮重跑并行分析。
-            NoCritiqueGapTargetRule(priority=59),
             # 无批判模式下，分析覆盖足够后不再整轮重跑并行专家。
             NoCritiqueParallelSettleRule(priority=60),
         ]

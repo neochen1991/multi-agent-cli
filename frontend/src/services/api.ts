@@ -195,6 +195,80 @@ export interface ReportDiff {
   diff_lines: string[];
 }
 
+export interface MonitorStatusResponse {
+  running: boolean;
+  tick_seconds: number;
+  active_targets: number;
+  last_loop_at: string;
+}
+
+export interface MonitorTarget {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  check_interval_sec: number;
+  timeout_sec: number;
+  cooldown_sec: number;
+  service_name: string;
+  environment: string;
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  cookie_header: string;
+  tags: string[];
+  metadata: Record<string, unknown>;
+  last_checked_at?: string;
+  last_triggered_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MonitorTargetCreatePayload {
+  name: string;
+  url: string;
+  enabled?: boolean;
+  check_interval_sec?: number;
+  timeout_sec?: number;
+  cooldown_sec?: number;
+  service_name?: string;
+  environment?: string;
+  severity?: 'critical' | 'high' | 'medium' | 'low';
+  cookie_header?: string;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface MonitorTargetUpdatePayload {
+  name?: string;
+  url?: string;
+  enabled?: boolean;
+  check_interval_sec?: number;
+  timeout_sec?: number;
+  cooldown_sec?: number;
+  service_name?: string;
+  environment?: string;
+  severity?: 'critical' | 'high' | 'medium' | 'low';
+  cookie_header?: string;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface PageMonitorFinding {
+  target_id: string;
+  target_name: string;
+  url: string;
+  checked_at: string;
+  has_error: boolean;
+  frontend_errors: string[];
+  api_errors: string[];
+  browser_error: string;
+  summary: string;
+  raw: Record<string, unknown>;
+}
+
+export interface MonitorEventListResponse {
+  items: Array<Record<string, unknown>>;
+}
+
 // 分析深度模式存到本地，保证设置页和 Incident 页在新开会话时使用同一份偏好。
 const ANALYSIS_DEPTH_MODE_STORAGE_KEY = 'analysis_depth_mode';
 const DEFAULT_MAX_ROUNDS_BY_DEPTH_MODE: Record<AnalysisDepthMode, number> = {
@@ -853,6 +927,54 @@ export const assetApi = {
       form,
       {
         headers: { 'Content-Type': 'multipart/form-data' },
+      },
+    );
+    return data;
+  },
+};
+
+export const monitoringApi = {
+  async getStatus(): Promise<MonitorStatusResponse> {
+    const { data } = await api.get<MonitorStatusResponse>('/monitoring/status');
+    return data;
+  },
+  async start(): Promise<{ status: string }> {
+    const { data } = await api.post<{ status: string }>('/monitoring/control/start');
+    return data;
+  },
+  async stop(): Promise<{ status: string }> {
+    const { data } = await api.post<{ status: string }>('/monitoring/control/stop');
+    return data;
+  },
+  async listTargets(enabledOnly = false): Promise<MonitorTarget[]> {
+    const { data } = await api.get<MonitorTarget[]>('/monitoring/targets', {
+      params: { enabled_only: enabledOnly },
+    });
+    return data;
+  },
+  async createTarget(payload: MonitorTargetCreatePayload): Promise<MonitorTarget> {
+    const { data } = await api.post<MonitorTarget>('/monitoring/targets', payload);
+    return data;
+  },
+  async updateTarget(targetId: string, payload: MonitorTargetUpdatePayload): Promise<MonitorTarget> {
+    const { data } = await api.put<MonitorTarget>(`/monitoring/targets/${encodeURIComponent(targetId)}`, payload);
+    return data;
+  },
+  async deleteTarget(targetId: string): Promise<{ deleted: boolean }> {
+    const { data } = await api.delete<{ deleted: boolean }>(`/monitoring/targets/${encodeURIComponent(targetId)}`);
+    return data;
+  },
+  async scanTarget(targetId: string): Promise<{ finding: PageMonitorFinding }> {
+    const { data } = await api.post<{ finding: PageMonitorFinding }>(
+      `/monitoring/targets/${encodeURIComponent(targetId)}/scan`,
+    );
+    return data;
+  },
+  async listEvents(targetId: string, limit = 50): Promise<MonitorEventListResponse> {
+    const { data } = await api.get<MonitorEventListResponse>(
+      `/monitoring/targets/${encodeURIComponent(targetId)}/events`,
+      {
+        params: { limit },
       },
     );
     return data;

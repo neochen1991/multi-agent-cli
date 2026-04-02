@@ -15,8 +15,9 @@ def test_deep_mode_expands_runtime_policy_beyond_round_count():
     )
 
     assert policy.max_discussion_steps > 8
-    assert "ChangeAgent" in policy.parallel_analysis_agents
-    assert "RunbookAgent" in policy.parallel_analysis_agents
+    assert policy.max_parallel_agents == 6
+    assert "ChangeAgent" in policy.allowed_analysis_agents
+    assert "RunbookAgent" in policy.allowed_analysis_agents
     assert policy.enable_critique is True
     assert policy.enable_collaboration is True
 

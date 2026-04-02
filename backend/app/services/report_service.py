@@ -38,6 +38,7 @@ from app.repositories.report_repository import (
     InMemoryReportRepository,
     FileReportRepository,
     ReportRepository,
+    SqliteReportRepository,
 )
 from app.services.debate_service import debate_service
 from app.services.incident_service import incident_service
@@ -71,9 +72,9 @@ class ReportService:
             repository: 报告仓储，未提供则根据配置选择
         """
         self._repository = repository or (
-            FileReportRepository()
-            if settings.LOCAL_STORE_BACKEND == "file"
-            else InMemoryReportRepository()
+            InMemoryReportRepository()
+            if settings.LOCAL_STORE_BACKEND == "memory"
+            else SqliteReportRepository()
         )
 
     async def get_report(self, incident_id: str) -> Optional[Dict[str, Any]]:

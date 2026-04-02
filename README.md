@@ -59,6 +59,10 @@
 - 专家 Agent 已支持可扩展 `skill/tool` 能力：
   - `skill` 支持读取 `metadata.json`（可声明 `required_tools`）
   - `tool` 支持从 `backend/extensions/tools/*/tool.json` 动态加载并执行插件入口
+- 已新增自动化运维巡检闭环：
+  - 定时巡检多个业务页面（优先 Playwright 捕获前端异常与接口失败）
+  - 命中异常后自动创建 Incident 并拉起多专家 RCA
+  - 自动查询知识库案例/SOP，将处置建议注入故障上下文
 
 ## Code Wiki
 
@@ -142,6 +146,8 @@ sequenceDiagram
 - `backend/app/runtime/langgraph/services/state_transition_service.py`：阶段状态回写与快照合并
 - `backend/app/runtime/langgraph/services/judgment_boundary.py`：Judge 边界 helper
 - `backend/app/runtime/langgraph/services/review_boundary.py`：人工审核边界 helper
+- `backend/app/services/page_monitoring_service.py`：页面巡检、异常触发与自动 RCA 编排
+- `backend/app/api/monitoring.py`：巡检目标和巡检状态 API
 
 ### 2.3 前端
 
@@ -225,6 +231,7 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+python -m playwright install chromium
 ```
 
 前端：
@@ -260,6 +267,54 @@ npm run stop:all
 npm run stop:all:force
 ```
 
+### 6.4 Windows 部署（含 Playwright）
+
+`Playwright` 在 Windows 下可正常使用（推荐 `chromium`）。  
+如果是另一台 Windows 机器从零部署，可按以下步骤执行：
+
+1. 安装基础环境
+- Python `3.11+`（建议 3.11/3.12）
+- Node.js `18+`
+- Git
+
+2. 后端安装（PowerShell）
+
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m playwright install chromium
+```
+
+3. 前端安装（PowerShell）
+
+```powershell
+cd frontend
+npm install
+```
+
+4. 启动服务
+
+```powershell
+# Backend
+cd backend
+.\.venv\Scripts\python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Frontend（新开一个终端）
+cd frontend
+npm run dev
+```
+
+5. 监控能力相关说明
+- 监控目标需要登录态时，可在“监控中心”配置 `Cookie`（明文）。
+- 只有安装了 Playwright 浏览器后，才能捕获前端运行时异常与页面内接口错误。
+- 若 Playwright 不可用，系统会自动降级为 HTTP 巡检（仍可识别接口状态码异常）。
+
+排查建议：
+- 若出现 `playwright` 相关报错，先重新执行 `python -m playwright install chromium`。
+- 若端口不可访问，检查 Windows 防火墙是否放行后端端口（如 `8000`）。
+
 ## 7. 关键配置
 
 主要配置位于：
@@ -283,10 +338,17 @@ npm run stop:all:force
 
 其他常用：
 
-- `LOCAL_STORE_BACKEND=file|memory`
+- `LOCAL_STORE_BACKEND=sqlite|memory`
 - `LOCAL_STORE_DIR=/tmp/sre_debate_store`
+- `LOCAL_STORE_SQLITE_PATH=/tmp/sre_debate_store/app.db`
 - `DEBATE_MAX_ROUNDS=1`
 - `AUTH_ENABLED=false`
+
+说明：
+
+- 当前项目的结构化持久化唯一事实源已经切到 SQLite。
+- `incident / debate / report / runtime session / runtime events / lineage / feedback / remediation` 默认都写入 `LOCAL_STORE_SQLITE_PATH`。
+- 旧的 `incidents.json / debates.json / reports.json / runtime/*.json*` 不再作为主路径写入源，也不会自动导入。
 
 ### 7.1 本地调试：记录完整 LLM Prompt / Response
 
@@ -361,6 +423,16 @@ curl http://127.0.0.1:8000/api/v1/debates/output-refs/{ref_id}
 - Settings
   - `GET /settings/tooling`
   - `PUT /settings/tooling`
+- Monitoring
+  - `GET /monitoring/status`
+  - `POST /monitoring/control/start`
+  - `POST /monitoring/control/stop`
+  - `GET /monitoring/targets`
+  - `POST /monitoring/targets`
+  - `PUT /monitoring/targets/{target_id}`
+  - `DELETE /monitoring/targets/{target_id}`
+  - `POST /monitoring/targets/{target_id}/scan`
+  - `GET /monitoring/targets/{target_id}/events`
 
 WebSocket：
 

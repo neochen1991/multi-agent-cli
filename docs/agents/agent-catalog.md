@@ -7,7 +7,8 @@
   - 职责：拆解问题、分发命令、推进讨论、触发收敛。
   - 深度能力：根据 `analysis_depth_mode` 和当前证据覆盖情况决定 `quick / standard / deep` 下的默认轮次、追问强度和停止条件。
   - 分发原则：主 Agent 只给高层任务方向；系统会把责任田映射出的 `api_endpoints / code_artifacts / class_names / database_tables / monitor_items / dependency_services / trace_ids / error_keywords` 自动注入到各子 Agent 的命令与工具上下文。
-  - 关键输出：`commands`、`next_step`、`should_stop`、`stop_reason`、`top_k_hypotheses`、`evidence_coverage`、`convergence_score`。
+  - 关键输出：`selected_agents`、`commands`、`next_mode`、`next_agent`、`should_stop`、`stop_reason`、`top_k_hypotheses`、`evidence_coverage`、`convergence_score`。
+  - 调度边界：`selected_agents` 负责表达“本轮真正执行谁”；系统只负责按 `allowed_analysis_agents / max_parallel_agents` 做合法性和预算裁剪，不再预设固定专家池。
 
 ## 2. 分析专家 Agent
 
@@ -42,8 +43,10 @@
 
 - `quick`
   - 默认 1 轮，优先快速止血和高信号证据，不追求完整穷举。
+  - 与 `standard` 共用同一批 `allowed_analysis_agents`，只是在 `max_parallel_agents / verification / critique / collaboration` 上更保守。
 - `standard`
   - 默认 2 轮，适合常规排障，允许一轮追问和交叉校验。
+  - 与 `quick` 的差异应主要体现在预算和容错，而不是预设不同的业务分发策略。
 - `deep`
   - 默认 4 轮，适合复杂根因链路，要求更强的追问、证据覆盖和候选根因排序。
   - 运行策略会扩展到更宽的 analysis agent 集合、更高的 discussion budget，以及更宽松的分析 token/timeout 预算。

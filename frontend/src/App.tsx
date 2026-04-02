@@ -10,6 +10,7 @@ const IncidentPage = lazy(() => import('@/pages/Incident'));
 const HistoryPage = lazy(() => import('@/pages/History'));
 const AssetsPage = lazy(() => import('@/pages/Assets'));
 const KnowledgePage = lazy(() => import('@/pages/Knowledge'));
+const MonitoringPage = lazy(() => import('@/pages/Monitoring'));
 const SettingsPage = lazy(() => import('@/pages/Settings'));
 const InvestigationWorkbenchPage = lazy(() => import('@/pages/InvestigationWorkbench'));
 const BenchmarkCenterPage = lazy(() => import('@/pages/BenchmarkCenter'));
@@ -68,6 +69,7 @@ const App: React.FC = () => {
             <Route path="/history" element={<HistoryPage />} />
             <Route path="/assets" element={<AssetsPage />} />
             <Route path="/knowledge" element={<KnowledgePage />} />
+            <Route path="/monitoring" element={<MonitoringPage />} />
             <Route path="/advanced" element={<AdvancedPage />} />
             <Route path="/workbench" element={<InvestigationWorkbenchPage />} />
             <Route path="/benchmark" element={<BenchmarkCenterPage />} />

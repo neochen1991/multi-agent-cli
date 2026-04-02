@@ -240,3 +240,17 @@ def test_normalize_commander_output_recovers_commands_from_markdown_table() -> N
     assert normalized["commands"][0]["skill_hints"] == ["postgres-lock-check"]
     assert normalized["commands"][0]["tool_hints"] == ["design_spec_alignment"]
     assert normalized["commands"][1]["target_agent"] == "LogAgent"
+
+
+def test_normalize_commander_output_preserves_selected_agents() -> None:
+    """验证 commander 结构化输出里的 selected_agents 不会在归一化阶段丢失。"""
+
+    normalized = normalize_commander_output(
+        {
+            "selected_agents": ["LogAgent", "DatabaseAgent", "LogAgent"],
+            "commands": [{"target_agent": "LogAgent", "task": "分析日志"}],
+        },
+        raw_content="",
+    )
+
+    assert normalized["selected_agents"] == ["LogAgent", "DatabaseAgent"]

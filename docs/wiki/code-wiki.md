@@ -33,6 +33,7 @@ backend/app/
     debate_service.py              # 会话主流程（资产采集、运行时执行、报告）
     agent_tool_context_service.py  # 工具上下文 + 命令门禁 + Skill 合并
     agent_skill_service.py         # Skill 加载/匹配/选择
+    page_monitoring_service.py     # 页面巡检 + 异常自动触发 RCA
   runtime/
     langgraph_runtime.py           # LangGraph 运行时总编排
     langgraph/builder.py           # Graph 节点和边
@@ -139,9 +140,11 @@ flowchart TB
 - `backend/app/runtime/deployment_center.py`：选择 `deployment_profile`（是否启用 Metrics/Skill/协作等）。
 - `backend/app/services/agent_tool_context_service.py`：工具上下文与命令门禁、Skill 合并。
 - `backend/app/services/agent_skill_service.py`：Skill 读取、匹配与审计。
+- `backend/app/services/page_monitoring_service.py`：定时巡检页面，发现前端/接口错误后自动创建 incident 并触发分析。
 - `backend/app/runtime/langgraph/routing/rule_engine.py`：路由规则引擎调度。
 - `backend/app/runtime/langgraph/routing/rules_impl.py`：核心路由规则集合。
 - `backend/app/api/debates.py`：会话创建/执行/后台执行入口。
+- `backend/app/api/monitoring.py`：巡检目标管理、手动巡检和巡检事件查询入口。
 - `backend/app/api/ws_debates.py`：WebSocket 实时事件流与恢复入口。
 - `frontend/src/pages/Incident/index.tsx`：前端分析主页面，汇总资产映射/过程/结果。
 - `frontend/src/pages/History/index.tsx`：历史列表展示（开始时间与模式展示）。
@@ -835,7 +838,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     A["Agent 结构化输出"] --> B["event_dispatcher"]
-    B --> C["runtime/events/*.jsonl"]
+    B --> C["SQLite.runtime_events"]
     B --> D["WebSocket /ws/debates/{session_id}"]
     D --> E["Incident 页面实时刷新"]
     D --> F["History 页面更新状态/开始时间"]
@@ -902,20 +905,40 @@ flowchart TD
 
 ### 9.4 断点续跑
 
-- 事件：`runtime/events/*.jsonl`
-- 会话：`runtime/sessions/*.json`
-- 心跳：`runtime/tasks.json`
+- 事件：`SQLite.runtime_events`
+- 会话：`SQLite.runtime_sessions`
+- 心跳：`SQLite.runtime_tasks`
 - WS 支持 `resume` 和 `snapshot`
 
 ```mermaid
 flowchart LR
-    A["运行中事件"] --> B["runtime/events/*.jsonl"]
-    A --> C["runtime/sessions/*.json"]
-    A --> D["runtime/tasks.json"]
+    A["运行中事件"] --> B["SQLite.runtime_events"]
+    A --> C["SQLite.runtime_sessions"]
+    A --> D["SQLite.runtime_tasks"]
     E["前端重连"] --> F["WS resume/snapshot"]
     F --> C
     F --> B
 ```
+
+### 9.4.1 当前结构化持久化事实源
+
+- `incidents`：故障主数据
+- `debate_sessions`：辩论会话
+- `debate_results`：辩论结果
+- `reports`：报告版本
+- `share_tokens`：报告分享 token 映射
+- `runtime_sessions`：断点恢复状态
+- `runtime_events`：运行时事件流
+- `runtime_tasks`：后台任务与心跳状态
+- `lineage_events`：谱系回放与审计
+- `feedback_items`：人工反馈
+- `remediation_actions`：修复动作状态机
+
+说明：
+
+- 这些结构化数据统一写入 `LOCAL_STORE_SQLITE_PATH`，默认是 `LOCAL_STORE_DIR/app.db`。
+- 旧的 `debates.json / reports.json / incidents.json / runtime/sessions/*.json / runtime/events/*.jsonl` 已退出主写路径。
+- 文件系统仍保留 `assets / knowledge / tool_cache / 导出报告文件` 这类“文件本体”资源，不纳入 SQLite。
 
 ---
 

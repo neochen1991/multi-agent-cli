@@ -7,11 +7,11 @@ session event files and compacts them into a small context block.
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List
 
-from app.config import settings
+from app.storage import sqlite_store
 
 
 class WorkLogManager:
@@ -19,33 +19,29 @@ class WorkLogManager:
 
     def __init__(self) -> None:
         """初始化当前对象，并准备后续执行所需的内部状态与依赖。"""
-        root = Path(settings.LOCAL_STORE_DIR)
-        self._events_dir = root / "runtime" / "events"
-        self._events_dir.mkdir(parents=True, exist_ok=True)
-
-    def _events_path(self, session_id: str) -> Path:
-        """执行eventspath相关逻辑，并为当前模块提供可复用的处理能力。"""
-        return self._events_dir / f"{session_id}.jsonl"
+        self._store = sqlite_store
 
     def _read_events(self, session_id: str) -> List[Dict[str, Any]]:
         """负责读取events，并返回后续流程可直接消费的数据结果。"""
         if not session_id:
             return []
-        path = self._events_path(session_id)
-        if not path.exists():
-            return []
-        rows: List[Dict[str, Any]] = []
         try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                text = str(line or "").strip()
-                if not text:
-                    continue
-                payload = json.loads(text)
-                if isinstance(payload, dict):
-                    rows.append(payload)
+            conn = sqlite3.connect(str(self._store.db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT payload_json FROM runtime_events
+                    WHERE session_id = ?
+                    ORDER BY id ASC
+                    """,
+                    (session_id,),
+                ).fetchall()
+            finally:
+                conn.close()
+            return [self._store.loads_json(row["payload_json"], {}) for row in rows]
         except Exception:
             return []
-        return rows
 
     @staticmethod
     def _norm_dt(value: Any) -> str:

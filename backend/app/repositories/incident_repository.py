@@ -5,11 +5,11 @@
 
 核心功能：
 1. 故障事件的 CRUD 操作
-2. 支持内存存储和文件存储两种后端
+2. 支持内存存储和 SQLite 存储两种后端
 
 存储后端：
 - InMemoryIncidentRepository: 内存存储，适合测试
-- FileIncidentRepository: 文件存储，适合单机部署
+- SqliteIncidentRepository: SQLite 存储，适合单机部署
 
 存储结构：
 - {LOCAL_STORE_DIR}/incidents.json
@@ -29,6 +29,7 @@ from typing import Dict, List, Optional
 
 from app.config import settings
 from app.models.incident import Incident
+from app.storage import SqliteStore, sqlite_store
 
 
 class IncidentRepository(ABC):
@@ -329,3 +330,60 @@ class FileIncidentRepository(IncidentRepository):
         tmp = self._file.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self._file)
+
+
+class SqliteIncidentRepository(IncidentRepository):
+    """基于 SQLite 的故障事件仓储。"""
+
+    def __init__(self, store: Optional[SqliteStore] = None):
+        # 中文注释：所有结构化 incident 数据统一落到 incidents 表，避免继续写 incidents.json。
+        self._store = store or sqlite_store
+
+    async def create(self, incident: Incident) -> Incident:
+        """创建故障事件。"""
+        payload = incident.model_dump(mode="json")
+        await self._store.execute(
+            """
+            INSERT OR REPLACE INTO incidents (id, created_at, updated_at, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                incident.id,
+                str(payload.get("created_at") or ""),
+                str(payload.get("updated_at") or ""),
+                self._store.dumps_json(payload),
+            ),
+        )
+        return incident
+
+    async def get(self, incident_id: str) -> Optional[Incident]:
+        """按 ID 获取故障事件。"""
+        row = await self._store.fetchone(
+            "SELECT payload_json FROM incidents WHERE id = ?",
+            (incident_id,),
+        )
+        if row is None:
+            return None
+        return Incident.model_validate(self._store.loads_json(row["payload_json"], {}))
+
+    async def update(self, incident: Incident) -> Incident:
+        """更新故障事件。"""
+        return await self.create(incident)
+
+    async def delete(self, incident_id: str) -> bool:
+        """删除故障事件。"""
+        existed = await self.get(incident_id)
+        if existed is None:
+            return False
+        await self._store.execute("DELETE FROM incidents WHERE id = ?", (incident_id,))
+        return True
+
+    async def list_all(self) -> List[Incident]:
+        """列出所有故障事件。"""
+        rows = await self._store.fetchall(
+            "SELECT payload_json FROM incidents ORDER BY created_at DESC, id DESC"
+        )
+        return [
+            Incident.model_validate(self._store.loads_json(row["payload_json"], {}))
+            for row in rows
+        ]

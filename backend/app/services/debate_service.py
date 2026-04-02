@@ -62,6 +62,7 @@ from app.repositories.debate_repository import (
     DebateRepository,
     InMemoryDebateRepository,
     FileDebateRepository,
+    SqliteDebateRepository,
 )
 
 logger = structlog.get_logger()
@@ -170,9 +171,9 @@ class DebateService:
             repository: 辩论数据存储库，如果未提供则根据配置选择文件或内存存储
         """
         self._repository = repository or (
-            FileDebateRepository()
-            if settings.LOCAL_STORE_BACKEND == "file"
-            else InMemoryDebateRepository()
+            InMemoryDebateRepository()
+            if settings.LOCAL_STORE_BACKEND == "memory"
+            else SqliteDebateRepository()
         )
 
     @staticmethod

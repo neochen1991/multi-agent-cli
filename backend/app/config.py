@@ -28,8 +28,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 ROOT_CONFIG_FILE = Path(__file__).resolve().parents[2] / "config.json"
 
 
-def _load_root_llm_overrides(config_file: Optional[Path] = None) -> Dict[str, Any]:
-    """从仓库根目录 config.json 读取 LLM 配置覆盖项。"""
+def _load_root_config_payload(config_file: Optional[Path] = None) -> Dict[str, Any]:
+    """读取仓库根目录 config.json 原始载荷。"""
     target = Path(config_file) if config_file is not None else ROOT_CONFIG_FILE
     if not target.exists() or not target.is_file():
         return {}
@@ -39,6 +39,12 @@ def _load_root_llm_overrides(config_file: Optional[Path] = None) -> Dict[str, An
         return {}
     if not isinstance(payload, dict):
         return {}
+    return payload
+
+
+def _load_root_llm_overrides(config_file: Optional[Path] = None) -> Dict[str, Any]:
+    """从仓库根目录 config.json 读取 LLM 配置覆盖项。"""
+    payload = _load_root_config_payload(config_file=config_file)
     llm = payload.get("llm")
     if not isinstance(llm, dict):
         return {}
@@ -80,11 +86,20 @@ def _load_root_llm_overrides(config_file: Optional[Path] = None) -> Dict[str, An
 
 
 ROOT_LLM_OVERRIDES = _load_root_llm_overrides()
+ROOT_CONFIG_PAYLOAD = _load_root_config_payload()
 
 
 def _llm_default(name: str, fallback: Any) -> Any:
     """读取 config.json 的同名 LLM 配置，缺失时回退到内置默认值。"""
     return ROOT_LLM_OVERRIDES.get(name, fallback)
+
+
+def _monitor_default(name: str, fallback: Any) -> Any:
+    """读取 config.json 的 monitoring 配置，缺失时回退。"""
+    monitoring = ROOT_CONFIG_PAYLOAD.get("monitoring")
+    if not isinstance(monitoring, dict):
+        return fallback
+    return monitoring.get(name, fallback)
 
 
 class Settings(BaseSettings):
@@ -101,7 +116,7 @@ class Settings(BaseSettings):
     1. 应用基础配置：APP_NAME, APP_VERSION, DEBUG, ENVIRONMENT
     2. API 配置：API_PREFIX, CORS_ORIGINS
     3. 数据库配置：DATABASE_URL, REDIS_URL, NEO4J_*
-    4. 本地存储配置：LOCAL_STORE_BACKEND, LOCAL_STORE_DIR
+    4. 本地存储配置：LOCAL_STORE_BACKEND, LOCAL_STORE_DIR, LOCAL_STORE_SQLITE_PATH
     5. LLM 配置：LLM_MODEL, LLM_BASE_URL, LLM_API_KEY 等
     6. 辩论配置：DEBATE_MAX_ROUNDS, DEBATE_CONSENSUS_THRESHOLD 等
     7. 安全配置：SECRET_KEY, AUTH_ENABLED 等
@@ -147,10 +162,12 @@ class Settings(BaseSettings):
     NEO4J_PASSWORD: str = "password"
 
     # 本地存储配置（无外部数据库场景）
-    # file: 使用文件存储，数据持久化到 LOCAL_STORE_DIR
+    # sqlite: 使用 SQLite 作为结构化持久化唯一事实源
     # memory: 使用内存存储，重启后数据丢失
-    LOCAL_STORE_BACKEND: str = Field(default="file")  # file | memory
+    LOCAL_STORE_BACKEND: str = Field(default="sqlite")  # sqlite | memory
     LOCAL_STORE_DIR: str = Field(default="/tmp/sre_debate_store")
+    # 中文注释：默认将 SQLite 文件放在 LOCAL_STORE_DIR 下，便于单机演示和排障。
+    LOCAL_STORE_SQLITE_PATH: str = Field(default="/tmp/sre_debate_store/app.db")
 
     # LLM / LangGraph 配置
     # 模型名称，默认使用 kimi-k2.5
@@ -218,6 +235,13 @@ class Settings(BaseSettings):
     DEBATE_REPORT_MAX_TOKENS: int = 700  # 报告生成
     # 是否要求 LLM 产出有效结论
     DEBATE_REQUIRE_EFFECTIVE_LLM_CONCLUSION: bool = True
+
+    # 页面自动巡检配置
+    PAGE_MONITOR_ENABLED: bool = bool(_monitor_default("enabled", True))
+    PAGE_MONITOR_TICK_SECONDS: int = int(_monitor_default("tick_seconds", 15))
+    PAGE_MONITOR_AUTO_EXECUTION_MODE: str = str(_monitor_default("auto_execution_mode", "quick"))
+    PAGE_MONITOR_AUTO_ANALYSIS_DEPTH_MODE: str = str(_monitor_default("auto_analysis_depth_mode", "standard"))
+    PAGE_MONITOR_AUTO_MAX_ROUNDS: int = int(_monitor_default("auto_max_rounds", 1))
 
     # 安全配置
     # JWT 密钥，生产环境必须更换
@@ -303,7 +327,7 @@ class Settings(BaseSettings):
         """
         标准化本地存储后端配置
 
-        确保值为 "file" 或 "memory" 之一，默认为 "file"。
+        确保值为 "sqlite" 或 "memory" 之一，默认为 "sqlite"。
 
         Args:
             v: 输入值
@@ -312,16 +336,34 @@ class Settings(BaseSettings):
             str: 标准化后的值
         """
         if not v:
-            return "file"
+            return "sqlite"
         value = str(v).strip().lower()
-        if value not in {"file", "memory"}:
-            return "file"
+        if value not in {"sqlite", "memory"}:
+            return "sqlite"
         return value
 
     @field_validator("DEBATE_ANALYSIS_DEPTH_MODE", mode="before")
     @classmethod
     def normalize_debate_analysis_depth_mode(cls, v):
         """标准化分析深度模式，仅允许 quick/standard/deep。"""
+        value = str(v or "standard").strip().lower()
+        if value not in {"quick", "standard", "deep"}:
+            return "standard"
+        return value
+
+    @field_validator("PAGE_MONITOR_AUTO_EXECUTION_MODE", mode="before")
+    @classmethod
+    def normalize_page_monitor_execution_mode(cls, v):
+        """标准化页面巡检触发的执行模式。"""
+        value = str(v or "quick").strip().lower()
+        if value not in {"quick", "standard", "background"}:
+            return "quick"
+        return value
+
+    @field_validator("PAGE_MONITOR_AUTO_ANALYSIS_DEPTH_MODE", mode="before")
+    @classmethod
+    def normalize_page_monitor_analysis_depth_mode(cls, v):
+        """标准化页面巡检触发的分析深度。"""
         value = str(v or "standard").strip().lower()
         if value not in {"quick", "standard", "deep"}:
             return "standard"

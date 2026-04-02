@@ -131,8 +131,8 @@ def test_fallback_route_uses_agent_outputs_when_round_cards_empty(monkeypatch):
     assert decision["should_stop"] is False
 
 
-def test_fallback_route_targets_gap_owner_when_open_question_is_specific(monkeypatch):
-    """当未决问题已经指向数据库缺口时，应优先点名 DatabaseAgent。"""
+def test_fallback_route_keeps_parallel_when_open_question_only_contains_text_hint(monkeypatch):
+    """阶段 3 后，fallback 不再根据 open_questions 文本直接替主 Agent 指名专家。"""
 
     orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
     monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", False)
@@ -157,7 +157,7 @@ def test_fallback_route_targets_gap_owner_when_open_question_is_specific(monkeyp
         ],
     )
 
-    assert decision["next_step"] == "speak:DatabaseAgent"
+    assert decision["next_step"] == "analysis_parallel"
     assert decision["should_stop"] is False
 
 
@@ -534,8 +534,8 @@ def test_route_guardrail_shortcuts_to_judge_when_targeted_reask_hits_already_eff
     assert guarded["should_stop"] is False
 
 
-def test_route_guardrail_standard_second_round_targets_gap_owner_instead_of_parallel(monkeypatch):
-    """standard 第二轮后，若 Judge 已明确缺口归属，应优先定向补证而不是整轮重跑。"""
+def test_route_guardrail_standard_second_round_keeps_parallel_when_only_text_gap_owner_exists(monkeypatch):
+    """阶段 3 后，guardrail 不再根据文本化缺口摘要替主 Agent 决定第二轮补证专家。"""
 
     orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=2)
     monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", False)
@@ -584,12 +584,12 @@ def test_route_guardrail_standard_second_round_targets_gap_owner_instead_of_para
         route_decision=route_decision,
     )
 
-    assert guarded["next_step"] == "speak:MetricsAgent"
+    assert guarded["next_step"] == "analysis_parallel"
     assert guarded["should_stop"] is False
 
 
-def test_route_guardrail_standard_second_round_settles_when_no_new_gap_owner(monkeypatch):
-    """standard 第二轮后若没有新的缺口归属，不应继续整轮重跑。"""
+def test_route_guardrail_standard_second_round_does_not_force_settle_without_generic_guardrail(monkeypatch):
+    """阶段 3 后，standard 第二轮是否收口主要由 LLM 决定，guardrail 不再硬编码该策略。"""
 
     orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=2)
     monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", False)
@@ -631,12 +631,12 @@ def test_route_guardrail_standard_second_round_settles_when_no_new_gap_owner(mon
         route_decision=route_decision,
     )
 
-    assert guarded["next_step"] == "speak:JudgeAgent"
+    assert guarded["next_step"] == "analysis_parallel"
     assert guarded["should_stop"] is False
 
 
-def test_route_guardrail_shortcuts_route_miss_case_to_judge_in_quick_mode(monkeypatch):
-    """quick 模式的网关本地 404 场景，应在首轮专家完成后直接切 Judge。"""
+def test_route_guardrail_does_not_force_route_miss_case_to_judge_in_quick_mode(monkeypatch):
+    """阶段 3 后，guardrail 不应再根据特定业务场景强制改写 quick 模式路由。"""
 
     orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
     monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", False)
@@ -747,12 +747,12 @@ def test_route_guardrail_shortcuts_route_miss_case_to_judge_in_quick_mode(monkey
         route_decision=route_decision,
     )
 
-    assert guarded["next_step"] == "speak:JudgeAgent"
+    assert guarded["next_step"] == "analysis_parallel"
     assert guarded["should_stop"] is False
 
 
-def test_route_guardrail_shortcuts_route_miss_cases_to_judge(monkeypatch):
-    """网关本地 404 路由缺失场景下，不应继续重复追问专家。"""
+def test_route_guardrail_does_not_force_route_miss_cases_to_judge(monkeypatch):
+    """阶段 3 后，业务场景收口应由 LLM 决定，guardrail 不再硬编码 route miss 直切 Judge。"""
 
     orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
     monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", False)
@@ -845,8 +845,8 @@ def test_route_guardrail_shortcuts_route_miss_cases_to_judge(monkeypatch):
     assert guarded["should_stop"] is False
 
 
-def test_route_guardrail_redirects_parallel_revisit_to_gap_owner_without_critique(monkeypatch):
-    """无批判模式下，若缺口已明确指向单个专家，不应再次整轮并行分析。"""
+def test_route_guardrail_keeps_parallel_revisit_when_only_text_gap_owner_exists(monkeypatch):
+    """阶段 3 后，guardrail 不再根据文本缺口摘要替主 Agent 决定具体补证专家。"""
 
     orchestrator = LangGraphRuntimeOrchestrator(consensus_threshold=0.75, max_rounds=1)
     monkeypatch.setattr(settings, "DEBATE_ENABLE_CRITIQUE", False)
@@ -916,7 +916,7 @@ def test_route_guardrail_redirects_parallel_revisit_to_gap_owner_without_critiqu
         route_decision=route_decision,
     )
 
-    assert guarded["next_step"] == "speak:DomainAgent"
+    assert guarded["next_step"] == "analysis_parallel"
     assert guarded["should_stop"] is False
 
 

@@ -21,13 +21,28 @@
 - governance baseline 趋势
 - team 维度治理指标
 
-## 3. 当前落地点
+## 3. 路由治理边界
+
+- `ProblemAnalysisAgent.selected_agents` 是业务语义分发的主信号。
+- runtime policy / deployment profile 只负责：
+  - `allowed_analysis_agents`
+  - `max_parallel_agents`
+  - `max_discussion_steps`
+  - critique / verification 开关
+- `rule_engine` 默认只做系统护栏，不负责根据故障关键词或场景模板决定具体找哪个专家。
+- 允许保留兼容 fallback，但 fallback 应尽量弱化为：
+  - 预算耗尽收口
+  - 重复追问熔断
+  - degraded / missing 证据兜底
+  - 有效裁决后的强制收口
+
+## 4. 当前落地点
 
 - benchmark 评分：`/Users/neochen/multi-agent-cli_v2/backend/app/benchmark/scoring.py`
 - 治理聚合：`/Users/neochen/multi-agent-cli_v2/backend/app/services/governance_ops_service.py`
 - 运行时收口：`/Users/neochen/multi-agent-cli_v2/backend/app/runtime/langgraph_runtime.py`
 
-## 4. Claim Graph 质量门
+## 5. Claim Graph 质量门
 
 最小 `claim_graph` 当前要求包含：
 - `primary_claim`

@@ -311,7 +311,10 @@ class LangGraphRuntimeOrchestrator:
         self._deployment_profile_name = policy.deployment_profile_name
         self._execution_mode_name = policy.execution_mode
         self.analysis_depth_mode = str(policy.analysis_depth_mode or self.analysis_depth_mode)
-        self.PARALLEL_ANALYSIS_AGENTS = tuple(policy.parallel_analysis_agents)
+        # 中文注释：当前阶段仍复用 PARALLEL_ANALYSIS_AGENTS 这个字段名，
+        # 但其语义已经调整为“LLM 可选专家允许名单”。
+        self.PARALLEL_ANALYSIS_AGENTS = tuple(policy.allowed_analysis_agents)
+        self._max_parallel_analysis_agents = int(policy.max_parallel_agents)
         self.MAX_DISCUSSION_STEPS_PER_ROUND = int(policy.max_discussion_steps)
         self._enable_collaboration = bool(policy.enable_collaboration)
         self._enable_critique = bool(policy.enable_critique)
@@ -326,7 +329,9 @@ class LangGraphRuntimeOrchestrator:
                 if isinstance(deployment_profile, dict)
                 else ""
             ),
+            allowed_analysis_agents=list(self.PARALLEL_ANALYSIS_AGENTS),
             parallel_analysis_agents=list(self.PARALLEL_ANALYSIS_AGENTS),
+            max_parallel_agents=self._max_parallel_analysis_agents,
             max_discussion_steps=self.MAX_DISCUSSION_STEPS_PER_ROUND,
             enable_collaboration=self._enable_collaboration,
             enable_critique=self._enable_critique,
@@ -1387,6 +1392,79 @@ class LangGraphRuntimeOrchestrator:
                     }
         return commands
 
+    def _normalize_selected_agents(
+        self,
+        value: Any,
+        *,
+        allowed_agents: Optional[List[str]] = None,
+        max_count: Optional[int] = None,
+    ) -> List[str]:
+        """清洗并校验 LLM 选中的专家列表，只保留允许且未超预算的目标。"""
+        if not isinstance(value, list):
+            return []
+        allowed = {
+            str(name or "").strip()
+            for name in list(allowed_agents or [])
+            if str(name or "").strip()
+        }
+        picks: List[str] = []
+        for item in value:
+            name = str(item or "").strip()
+            if not name:
+                continue
+            if allowed and name not in allowed:
+                continue
+            picks.append(name)
+        deduped = list(dict.fromkeys(picks))
+        if max_count is not None:
+            return deduped[: max(0, int(max_count))]
+        return deduped
+
+    def _resolve_selected_agents_from_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        allowed_agents: List[str],
+        fallback_parallel_agents: Optional[List[str]] = None,
+        max_count: Optional[int] = None,
+    ) -> List[str]:
+        """解析主 Agent 规划结果里的专家选择，并为旧输出格式保留兼容兜底。"""
+        # 中文注释：优先信任新的 selected_agents 字段；如果旧 prompt 还没产出该字段，
+        # 再退回 commands/next_agent/parallel 默认集合，确保历史回放和弱模型场景不被打断。
+        selected_agents = self._normalize_selected_agents(
+            payload.get("selected_agents"),
+            allowed_agents=allowed_agents,
+            max_count=max_count,
+        )
+        if selected_agents:
+            return selected_agents
+
+        raw_commands = payload.get("commands")
+        if isinstance(raw_commands, list):
+            command_targets = self._normalize_selected_agents(
+                [item.get("target_agent") for item in raw_commands if isinstance(item, dict)],
+                allowed_agents=allowed_agents,
+                max_count=max_count,
+            )
+            if command_targets:
+                return command_targets
+
+        next_mode = str(payload.get("next_mode") or "").strip().lower()
+        next_agent = str(payload.get("next_agent") or "").strip()
+        if next_mode in ("parallel_analysis", "analysis_parallel"):
+            return self._normalize_selected_agents(
+                list(fallback_parallel_agents or []),
+                allowed_agents=allowed_agents,
+                max_count=max_count,
+            )
+        if next_agent:
+            return self._normalize_selected_agents(
+                [next_agent],
+                allowed_agents=allowed_agents,
+                max_count=max_count,
+            )
+        return []
+
     @staticmethod
     def _normalize_text_items(value: Any, *, limit: int = 20, width: int = 160) -> List[str]:
         """把任意输入清洗成稳定的文本列表。"""
@@ -1806,11 +1884,22 @@ class LangGraphRuntimeOrchestrator:
         # 命令提取后还会追加两层系统增强：
         # 1. 责任田映射出的接口、表名、类名等调查线索
         # 2. 针对不同 Agent 的默认 skill hints
-        commands = self._extract_agent_commands_from_payload(payload, fill_defaults=True)
+        selected_agents = self._resolve_selected_agents_from_payload(
+            payload,
+            allowed_agents=list(self.PARALLEL_ANALYSIS_AGENTS),
+            fallback_parallel_agents=list(self.PARALLEL_ANALYSIS_AGENTS),
+            max_count=self._max_parallel_analysis_agents,
+        )
+        commands = self._extract_agent_commands_from_payload(
+            payload,
+            fill_defaults=False,
+            targets_hint=selected_agents,
+        )
         commands = self._enrich_agent_commands_with_asset_mapping(commands, compact_context)
         commands = self._enrich_agent_commands_with_skill_hints(commands, compact_context)
         return {
             "commands": commands,
+            "selected_agents": selected_agents,
             "next_mode": str(payload.get("next_mode") or "").strip().lower(),
             "next_agent": str(payload.get("next_agent") or "").strip(),
             "should_stop": bool(payload.get("should_stop") or False),
@@ -1880,21 +1969,23 @@ class LangGraphRuntimeOrchestrator:
         await self._record_turn(turn=turn, loop_round=loop_round, history_cards=history_cards)
         payload = turn.output_content if isinstance(turn.output_content, dict) else {}
         next_agent = str(payload.get("next_agent") or "").strip()
-        targets_hint: List[str] = []
         next_mode = str(payload.get("next_mode") or "").strip().lower()
-        if next_mode in ("parallel_analysis", "analysis_parallel"):
-            targets_hint = list(self.PARALLEL_ANALYSIS_AGENTS)
-        elif next_agent:
-            targets_hint = [next_agent]
+        selected_agents = self._resolve_selected_agents_from_payload(
+            payload,
+            allowed_agents=[spec.name for spec in self._agent_sequence()],
+            fallback_parallel_agents=list(self.PARALLEL_ANALYSIS_AGENTS),
+            max_count=self._max_parallel_analysis_agents,
+        )
         commands = self._extract_agent_commands_from_payload(
             payload,
             fill_defaults=False,
-            targets_hint=targets_hint,
+            targets_hint=selected_agents,
         )
         commands = self._enrich_agent_commands_with_asset_mapping(commands, compact_context)
         commands = self._enrich_agent_commands_with_skill_hints(commands, compact_context)
         return {
             "commands": commands,
+            "selected_agents": selected_agents,
             "next_mode": next_mode,
             "next_agent": next_agent,
             "should_stop": bool(payload.get("should_stop") or False),

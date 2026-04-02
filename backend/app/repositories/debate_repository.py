@@ -6,11 +6,11 @@
 核心功能：
 1. 辩论会话的 CRUD 操作
 2. 辩论结果的存储和查询
-3. 支持内存存储和文件存储两种后端
+3. 支持内存存储和 SQLite 存储两种后端
 
 存储后端：
 - InMemoryDebateRepository: 内存存储，适合测试
-- FileDebateRepository: 文件存储，适合单机部署
+- SqliteDebateRepository: SQLite 存储，适合单机部署
 
 存储结构：
 - {LOCAL_STORE_DIR}/debates.json
@@ -30,6 +30,7 @@ from typing import Dict, List, Optional
 
 from app.config import settings
 from app.models.debate import DebateResult, DebateSession
+from app.storage import SqliteStore, sqlite_store
 
 
 class DebateRepository(ABC):
@@ -340,3 +341,80 @@ class FileDebateRepository(DebateRepository):
         tmp = self._file.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self._file)
+
+
+class SqliteDebateRepository(DebateRepository):
+    """基于 SQLite 的辩论仓储。"""
+
+    def __init__(self, store: Optional[SqliteStore] = None):
+        # 中文注释：会话与结果分表存储，便于独立查询和后续治理统计。
+        self._store = store or sqlite_store
+
+    async def save_session(self, session: DebateSession) -> DebateSession:
+        """保存辩论会话。"""
+        payload = session.model_dump(mode="json")
+        await self._store.execute(
+            """
+            INSERT OR REPLACE INTO debate_sessions
+            (id, incident_id, status, phase, created_at, updated_at, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session.id,
+                session.incident_id,
+                str(session.status.value if hasattr(session.status, "value") else session.status),
+                str(session.current_phase.value if getattr(session.current_phase, "value", None) else session.current_phase or ""),
+                str(payload.get("created_at") or ""),
+                str(payload.get("updated_at") or ""),
+                self._store.dumps_json(payload),
+            ),
+        )
+        return session
+
+    async def get_session(self, session_id: str) -> Optional[DebateSession]:
+        """获取辩论会话。"""
+        row = await self._store.fetchone(
+            "SELECT payload_json FROM debate_sessions WHERE id = ?",
+            (session_id,),
+        )
+        if row is None:
+            return None
+        return DebateSession.model_validate(self._store.loads_json(row["payload_json"], {}))
+
+    async def list_sessions(self) -> List[DebateSession]:
+        """列出所有辩论会话。"""
+        rows = await self._store.fetchall(
+            "SELECT payload_json FROM debate_sessions ORDER BY created_at DESC, id DESC"
+        )
+        return [
+            DebateSession.model_validate(self._store.loads_json(row["payload_json"], {}))
+            for row in rows
+        ]
+
+    async def save_result(self, result: DebateResult) -> DebateResult:
+        """保存辩论结果。"""
+        payload = result.model_dump(mode="json")
+        await self._store.execute(
+            """
+            INSERT OR REPLACE INTO debate_results
+            (session_id, incident_id, created_at, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                result.session_id,
+                result.incident_id,
+                str(payload.get("created_at") or ""),
+                self._store.dumps_json(payload),
+            ),
+        )
+        return result
+
+    async def get_result(self, session_id: str) -> Optional[DebateResult]:
+        """获取辩论结果。"""
+        row = await self._store.fetchone(
+            "SELECT payload_json FROM debate_results WHERE session_id = ?",
+            (session_id,),
+        )
+        if row is None:
+            return None
+        return DebateResult.model_validate(self._store.loads_json(row["payload_json"], {}))

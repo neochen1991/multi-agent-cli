@@ -23,7 +23,7 @@ def build_system_card() -> Dict[str, Any]:
         "boundaries": [
             "不直接执行生产变更命令",
             "不自动回滚线上服务，仅输出建议",
-            "无外部数据库依赖（本地文件/内存）",
+            "结构化状态默认依赖本地 SQLite/内存，不直接依赖外部数据库",
         ],
         "disabled_scenarios": [
             "未审批的高风险修复动作禁止自动执行",
@@ -38,9 +38,9 @@ def build_system_card() -> Dict[str, Any]:
             "No-Regression Gate 不通过时阻断执行",
         ],
         "audit": {
-            "lineage_store": "local_store/lineage/*.jsonl",
+            "lineage_store": "sqlite.lineage_events",
             "tool_audit_api": "/api/v1/settings/tooling/audit/{session_id}",
-            "remediation_audit_store": "local_store/remediation_actions.json",
+            "remediation_audit_store": "sqlite.remediation_actions",
         },
         "known_limits": [
             "结果依赖输入日志和工具可用性",

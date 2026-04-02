@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
 from app.config import settings
+from app.storage import sqlite_store
 from app.runtime_ext.integrations import ADAPTERS
 from app.runtime.trace_lineage import replay_session_lineage
 
@@ -28,6 +30,7 @@ class GovernanceOpsService:
         self._sync_settings_file = root / "external_sync_settings.json"
         self._debates_file = root / "debates.json"
         self._runtime_events_dir = root / "runtime" / "events"
+        self._store = sqlite_store
         self._lock = asyncio.Lock()
 
     def _read_json(self, path: Path, default: Any) -> Any:
@@ -67,16 +70,36 @@ class GovernanceOpsService:
             return default
 
     def _load_debate_snapshot(self) -> Dict[str, Any]:
-        """读取 debates.json 快照，供人工审核和治理统计使用。"""
-        payload = self._read_json(self._debates_file, {})
-        if not isinstance(payload, dict):
-            return {"sessions": [], "results": []}
-        sessions = payload.get("sessions")
-        results = payload.get("results")
-        return {
-            "sessions": sessions if isinstance(sessions, list) else [],
-            "results": results if isinstance(results, list) else [],
-        }
+        """读取 debate 快照；显式文件夹具优先，其余场景优先使用 SQLite。"""
+        if self._debates_file.exists():
+            payload = self._read_json(self._debates_file, {})
+            if isinstance(payload, dict):
+                sessions = payload.get("sessions")
+                results = payload.get("results")
+                return {
+                    "sessions": sessions if isinstance(sessions, list) else [],
+                    "results": results if isinstance(results, list) else [],
+                }
+
+        try:
+            conn = sqlite3.connect(str(self._store.db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                session_rows = conn.execute(
+                    "SELECT payload_json FROM debate_sessions ORDER BY created_at DESC"
+                ).fetchall()
+                result_rows = conn.execute(
+                    "SELECT payload_json FROM debate_results ORDER BY created_at DESC"
+                ).fetchall()
+            finally:
+                conn.close()
+            sessions = [self._store.loads_json(row["payload_json"], {}) for row in session_rows]
+            results = [self._store.loads_json(row["payload_json"], {}) for row in result_rows]
+            if sessions or results:
+                return {"sessions": sessions, "results": results}
+        except Exception:
+            pass
+        return {"sessions": [], "results": []}
 
     @staticmethod
     def _extract_review_root_cause(session: Dict[str, Any]) -> str:
@@ -104,27 +127,42 @@ class GovernanceOpsService:
         except (TypeError, ValueError):
             return 0.0
 
-    def _runtime_events_path(self, session_id: str) -> Path:
-        """执行运行时eventspath相关逻辑，并为当前模块提供可复用的处理能力。"""
-        return self._runtime_events_dir / f"{session_id}.jsonl"
-
     def _load_runtime_events(self, session_id: str) -> List[Dict[str, Any]]:
-        """负责加载运行时events，并返回后续流程可直接消费的数据结果。"""
-        path = self._runtime_events_path(session_id)
-        if not path.exists():
-            return []
-        rows: List[Dict[str, Any]] = []
+        path = self._runtime_events_dir / f"{session_id}.jsonl"
+        if path.exists():
+            rows: List[Dict[str, Any]] = []
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    text = str(line or "").strip()
+                    if not text:
+                        continue
+                    payload = json.loads(text)
+                    if isinstance(payload, dict):
+                        rows.append(payload)
+            except Exception:
+                return []
+            return rows
+
         try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                text = str(line or "").strip()
-                if not text:
-                    continue
-                payload = json.loads(text)
-                if isinstance(payload, dict):
-                    rows.append(payload)
+            conn = sqlite3.connect(str(self._store.db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                db_rows = conn.execute(
+                    """
+                    SELECT payload_json FROM runtime_events
+                    WHERE session_id = ?
+                    ORDER BY id ASC
+                    """,
+                    (session_id,),
+                ).fetchall()
+            finally:
+                conn.close()
+            rows = [self._store.loads_json(row["payload_json"], {}) for row in db_rows]
+            if rows:
+                return rows
         except Exception:
-            return []
-        return rows
+            pass
+        return []
 
     def _resolve_team_name(self, session: Dict[str, Any], result: Dict[str, Any]) -> str:
         """执行resolveteamname相关逻辑，并为当前模块提供可复用的处理能力。"""

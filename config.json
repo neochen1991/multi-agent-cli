@@ -32,5 +32,12 @@
       "log_full_prompt": false,
       "log_full_response": false
     }
+  },
+  "monitoring": {
+    "enabled": true,
+    "tick_seconds": 15,
+    "auto_execution_mode": "quick",
+    "auto_analysis_depth_mode": "standard",
+    "auto_max_rounds": 1
   }
 }

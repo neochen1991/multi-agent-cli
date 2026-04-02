@@ -52,6 +52,30 @@ Constraints:
 - `target` must map to a registered agent
 - command fields should be short, actionable, and non-empty when possible
 
+### `ProblemAnalysisAgent` structured planning output
+
+Purpose:
+- records the planner-style dispatch decision emitted by `ProblemAnalysisAgent`
+
+Required fields:
+- `selected_agents`: agents chosen for the current step
+- `commands`: structured commands aligned with `selected_agents`
+- `next_mode`
+- `should_stop`
+
+Recommended fields:
+- `next_agent`
+- `analysis`
+- `conclusion`
+- `evidence_chain`
+- `confidence`
+
+Constraints:
+- `selected_agents` should be the primary dispatch signal for the current step
+- `commands.target_agent` should stay aligned with `selected_agents`
+- runtime may trim `selected_agents` by `allowed_analysis_agents` and `max_parallel_agents`
+- if `selected_agents` is absent, runtime may fall back to `commands` and then `next_agent` for compatibility
+
 ## 4. Feedback Protocol
 
 ### `agent_command_feedback`

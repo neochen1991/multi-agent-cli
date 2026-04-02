@@ -7,16 +7,19 @@ from app.repositories.incident_repository import (
     IncidentRepository,
     InMemoryIncidentRepository,
     FileIncidentRepository,
+    SqliteIncidentRepository,
 )
 from app.repositories.debate_repository import (
     DebateRepository,
     InMemoryDebateRepository,
     FileDebateRepository,
+    SqliteDebateRepository,
 )
 from app.repositories.report_repository import (
     ReportRepository,
     InMemoryReportRepository,
     FileReportRepository,
+    SqliteReportRepository,
 )
 from app.repositories.asset_repository import (
     AssetRepository,
@@ -32,12 +35,15 @@ __all__ = [
     "IncidentRepository",
     "InMemoryIncidentRepository",
     "FileIncidentRepository",
+    "SqliteIncidentRepository",
     "DebateRepository",
     "InMemoryDebateRepository",
     "FileDebateRepository",
+    "SqliteDebateRepository",
     "ReportRepository",
     "InMemoryReportRepository",
     "FileReportRepository",
+    "SqliteReportRepository",
     "AssetRepository",
     "InMemoryAssetRepository",
     "KnowledgeRepository",

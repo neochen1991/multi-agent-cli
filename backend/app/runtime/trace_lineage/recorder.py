@@ -24,26 +24,20 @@ Lineage recorder for runtime event/agent/tool tracking.
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.config import settings
+from app.storage import SqliteStore, sqlite_store
 from app.runtime.trace_lineage.models import LineageRecord
 
 
 class LineageRecorder:
     """
-    基于文件的审计轨迹记录器
-
-    无需外部数据库，使用本地文件系统存储审计轨迹。
-
-    存储路径：
-    - {LOCAL_STORE_DIR}/lineage/{session_id}.jsonl
+    基于 SQLite 的审计轨迹记录器
 
     属性：
-    - _root: 轨迹存储根目录
+    - _store: SQLite 结构化存储
     - _lock: 异步锁，保证并发安全
     - _seq_by_session: 各会话的序号计数器
 
@@ -57,28 +51,13 @@ class LineageRecorder:
         """
         初始化审计轨迹记录器
 
-        创建轨迹存储目录。
-
         Args:
-            base_dir: 基础存储目录，未提供则使用配置值
+            base_dir: 兼容旧调用方保留，当前不再用于文件落盘
         """
-        root = Path(base_dir or settings.LOCAL_STORE_DIR)
-        self._root = root / "lineage"
-        self._root.mkdir(parents=True, exist_ok=True)
+        store_path = str(base_dir or getattr(settings, "LOCAL_STORE_SQLITE_PATH", "") or "")
+        self._store: SqliteStore = sqlite_store if not store_path else SqliteStore(store_path)
         self._lock = asyncio.Lock()
         self._seq_by_session: Dict[str, int] = {}
-
-    def _file(self, session_id: str) -> Path:
-        """
-        获取会话轨迹文件路径
-
-        Args:
-            session_id: 会话 ID
-
-        Returns:
-            Path: 轨迹文件路径
-        """
-        return self._root / f"{session_id}.jsonl"
 
     def _next_seq(self, session_id: str) -> int:
         """
@@ -151,12 +130,18 @@ class LineageRecorder:
             payload=payload or {},
         )
 
-        # 追加写入 JSONL 文件
-        line = json.dumps(record.model_dump(mode="json"), ensure_ascii=False, default=str)
         async with self._lock:
-            with self._file(session_id).open("a", encoding="utf-8") as fp:
-                fp.write(line)
-                fp.write("\n")
+            await self._store.execute(
+                """
+                INSERT INTO lineage_events (session_id, created_at, payload_json)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    session_id,
+                    record.timestamp.isoformat(),
+                    self._store.dumps_json(record.model_dump(mode="json")),
+                ),
+            )
 
         return record
 
@@ -172,18 +157,19 @@ class LineageRecorder:
         Returns:
             List[LineageRecord]: 审计记录列表
         """
-        path = self._file(session_id)
-        if not path.exists():
-            return []
-
         rows: List[LineageRecord] = []
         async with self._lock:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                text = str(line or "").strip()
-                if not text:
-                    continue
+            db_rows = await self._store.fetchall(
+                """
+                SELECT payload_json FROM lineage_events
+                WHERE session_id = ?
+                ORDER BY id ASC
+                """,
+                (session_id,),
+            )
+            for row in db_rows:
                 try:
-                    rows.append(LineageRecord.model_validate(json.loads(text)))
+                    rows.append(LineageRecord.model_validate(self._store.loads_json(row["payload_json"], {})))
                 except Exception:
                     continue
 

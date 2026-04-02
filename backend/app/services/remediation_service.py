@@ -20,7 +20,7 @@ PROPOSED -> SIMULATED -> APPROVED -> EXECUTED -> VERIFIED
 - 变更窗口风险标记
 
 存储路径：
-- {LOCAL_STORE_DIR}/remediation_actions.json
+- SQLite.remediation_actions
 
 使用场景：
 - 自动修复提案审批
@@ -32,13 +32,10 @@ Remediation Service
 
 from __future__ import annotations
 
-import asyncio
-import json
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.config import settings
+from app.storage import sqlite_store
 
 
 class RemediationService:
@@ -56,8 +53,7 @@ class RemediationService:
     - ROLLED_BACK: 已回滚
 
     属性：
-    - _file: 数据文件路径
-    - _lock: 异步锁
+    - _store: SQLite 存储
     """
 
     # 状态流转顺序
@@ -67,12 +63,9 @@ class RemediationService:
         """
         初始化修复工作流服务
 
-        创建本地持久化文件和并发锁。
+        初始化 SQLite 存储。
         """
-        root = Path(settings.LOCAL_STORE_DIR)
-        root.mkdir(parents=True, exist_ok=True)
-        self._file = root / "remediation_actions.json"
-        self._lock = asyncio.Lock()
+        self._store = sqlite_store
 
     def _now(self) -> str:
         """
@@ -83,31 +76,26 @@ class RemediationService:
         """
         return datetime.utcnow().isoformat()
 
-    def _load(self) -> List[Dict[str, Any]]:
-        """
-        读取全部修复动作记录
+    async def _load(self) -> List[Dict[str, Any]]:
+        """读取全部修复动作记录。"""
+        rows = await self._store.fetchall(
+            "SELECT payload_json FROM remediation_actions ORDER BY created_at ASC"
+        )
+        return [self._store.loads_json(row["payload_json"], {}) for row in rows]
 
-        Returns:
-            List[Dict[str, Any]]: 修复动作列表
-        """
-        if not self._file.exists():
-            return []
-        try:
-            payload = json.loads(self._file.read_text(encoding="utf-8"))
-            return payload if isinstance(payload, list) else []
-        except Exception:
-            return []
-
-    def _save(self, items: List[Dict[str, Any]]) -> None:
-        """
-        保存修复动作列表到文件
-
-        Args:
-            items: 修复动作列表
-        """
-        tmp = self._file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self._file)
+    async def _save_row(self, item: Dict[str, Any]) -> None:
+        """保存单条修复动作记录。"""
+        await self._store.execute(
+            """
+            INSERT OR REPLACE INTO remediation_actions (id, created_at, payload_json)
+            VALUES (?, ?, ?)
+            """,
+            (
+                str(item.get("id") or ""),
+                str(item.get("created_at") or self._now()),
+                self._store.dumps_json(item),
+            ),
+        )
 
     def _find(self, items: List[Dict[str, Any]], action_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -182,8 +170,7 @@ class RemediationService:
         Returns:
             List[Dict[str, Any]]: 修复动作列表（按时间倒序）
         """
-        async with self._lock:
-            items = self._load()
+        items = await self._load()
         return list(reversed(items))[: max(1, int(limit or 200))]
 
     async def get_action(self, action_id: str) -> Optional[Dict[str, Any]]:
@@ -196,10 +183,9 @@ class RemediationService:
         Returns:
             Optional[Dict[str, Any]]: 动作详情
         """
-        async with self._lock:
-            items = self._load()
-            row = self._find(items, action_id)
-            return dict(row) if isinstance(row, dict) else None
+        items = await self._load()
+        row = self._find(items, action_id)
+        return dict(row) if isinstance(row, dict) else None
 
     async def propose(
         self,
@@ -244,10 +230,7 @@ class RemediationService:
             "updated_at": self._now(),
         }
         self._append_audit(record, "proposed", {"summary": summary})
-        async with self._lock:
-            items = self._load()
-            items.append(record)
-            self._save(items)
+        await self._save_row(record)
         return record
 
     async def simulate(self, action_id: str, simulated_slo: Dict[str, Any]) -> Dict[str, Any]:
@@ -266,17 +249,16 @@ class RemediationService:
         Raises:
             ValueError: 动作不存在
         """
-        async with self._lock:
-            items = self._load()
-            row = self._find(items, action_id)
-            if not row:
-                raise ValueError(f"action not found: {action_id}")
-            row["state"] = "SIMULATED"
-            row["simulated_slo"] = dict(simulated_slo or {})
-            row["updated_at"] = self._now()
-            self._append_audit(row, "simulated", {"simulated_slo": row["simulated_slo"]})
-            self._save(items)
-            return dict(row)
+        items = await self._load()
+        row = self._find(items, action_id)
+        if not row:
+            raise ValueError(f"action not found: {action_id}")
+        row["state"] = "SIMULATED"
+        row["simulated_slo"] = dict(simulated_slo or {})
+        row["updated_at"] = self._now()
+        self._append_audit(row, "simulated", {"simulated_slo": row["simulated_slo"]})
+        await self._save_row(row)
+        return dict(row)
 
     async def approve(self, action_id: str, approver: str, comment: str = "") -> Dict[str, Any]:
         """
@@ -295,21 +277,20 @@ class RemediationService:
         Raises:
             ValueError: 动作不存在
         """
-        async with self._lock:
-            items = self._load()
-            row = self._find(items, action_id)
-            if not row:
-                raise ValueError(f"action not found: {action_id}")
-            approvals = row.get("approvals")
-            if not isinstance(approvals, list):
-                approvals = []
-            approvals.append({"approver": approver, "comment": comment, "at": self._now()})
-            row["approvals"] = approvals
-            row["state"] = "APPROVED"
-            row["updated_at"] = self._now()
-            self._append_audit(row, "approved", {"approver": approver, "comment": comment})
-            self._save(items)
-            return dict(row)
+        items = await self._load()
+        row = self._find(items, action_id)
+        if not row:
+            raise ValueError(f"action not found: {action_id}")
+        approvals = row.get("approvals")
+        if not isinstance(approvals, list):
+            approvals = []
+        approvals.append({"approver": approver, "comment": comment, "at": self._now()})
+        row["approvals"] = approvals
+        row["state"] = "APPROVED"
+        row["updated_at"] = self._now()
+        self._append_audit(row, "approved", {"approver": approver, "comment": comment})
+        await self._save_row(row)
+        return dict(row)
 
     async def execute(
         self,
@@ -339,39 +320,38 @@ class RemediationService:
         Raises:
             ValueError: 动作不存在、未审批、或 Gate 失败
         """
-        async with self._lock:
-            items = self._load()
-            row = self._find(items, action_id)
-            if not row:
-                raise ValueError(f"action not found: {action_id}")
+        items = await self._load()
+        row = self._find(items, action_id)
+        if not row:
+            raise ValueError(f"action not found: {action_id}")
 
-            # 检查高风险操作是否已审批
-            risk_level = str(row.get("risk_level") or "medium").lower()
-            approvals = row.get("approvals") if isinstance(row.get("approvals"), list) else []
-            if risk_level in {"high", "critical"} and not approvals:
-                raise ValueError("high-risk action requires manual approval before execution")
+        # 检查高风险操作是否已审批
+        risk_level = str(row.get("risk_level") or "medium").lower()
+        approvals = row.get("approvals") if isinstance(row.get("approvals"), list) else []
+        if risk_level in {"high", "critical"} and not approvals:
+            raise ValueError("high-risk action requires manual approval before execution")
 
-            # 检查状态
-            if str(row.get("state") or "") != "APPROVED":
-                raise ValueError("action must be APPROVED before execution")
+        # 检查状态
+        if str(row.get("state") or "") != "APPROVED":
+            raise ValueError("action must be APPROVED before execution")
 
-            # No-Regression Gate 检查
-            gate = self._no_regression(dict(row.get("pre_slo") or {}), dict(post_slo or {}))
-            row["regression_gate"] = gate
-            row["post_slo"] = dict(post_slo or {})
+        # No-Regression Gate 检查
+        gate = self._no_regression(dict(row.get("pre_slo") or {}), dict(post_slo or {}))
+        row["regression_gate"] = gate
+        row["post_slo"] = dict(post_slo or {})
 
-            if not bool(gate.get("passed")):
-                row["state"] = "APPROVED"
-                row["updated_at"] = self._now()
-                self._append_audit(row, "execution_blocked_by_no_regression_gate", {"operator": operator, "gate": gate})
-                self._save(items)
-                raise ValueError("no-regression gate failed; execution blocked")
-
-            row["state"] = "EXECUTED"
+        if not bool(gate.get("passed")):
+            row["state"] = "APPROVED"
             row["updated_at"] = self._now()
-            self._append_audit(row, "executed", {"operator": operator, "post_slo": row["post_slo"]})
-            self._save(items)
-            return dict(row)
+            self._append_audit(row, "execution_blocked_by_no_regression_gate", {"operator": operator, "gate": gate})
+            await self._save_row(row)
+            raise ValueError("no-regression gate failed; execution blocked")
+
+        row["state"] = "EXECUTED"
+        row["updated_at"] = self._now()
+        self._append_audit(row, "executed", {"operator": operator, "post_slo": row["post_slo"]})
+        await self._save_row(row)
+        return dict(row)
 
     async def verify(self, action_id: str, verifier: str, verification: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -390,19 +370,18 @@ class RemediationService:
         Raises:
             ValueError: 动作不存在或状态不正确
         """
-        async with self._lock:
-            items = self._load()
-            row = self._find(items, action_id)
-            if not row:
-                raise ValueError(f"action not found: {action_id}")
-            if str(row.get("state") or "") != "EXECUTED":
-                raise ValueError("action must be EXECUTED before verification")
-            row["state"] = "VERIFIED"
-            row["verification"] = dict(verification or {})
-            row["updated_at"] = self._now()
-            self._append_audit(row, "verified", {"verifier": verifier, "verification": row["verification"]})
-            self._save(items)
-            return dict(row)
+        items = await self._load()
+        row = self._find(items, action_id)
+        if not row:
+            raise ValueError(f"action not found: {action_id}")
+        if str(row.get("state") or "") != "EXECUTED":
+            raise ValueError("action must be EXECUTED before verification")
+        row["state"] = "VERIFIED"
+        row["verification"] = dict(verification or {})
+        row["updated_at"] = self._now()
+        self._append_audit(row, "verified", {"verifier": verifier, "verification": row["verification"]})
+        await self._save_row(row)
+        return dict(row)
 
     async def rollback(self, action_id: str, reason: str, execute: bool = False) -> Dict[str, Any]:
         """
@@ -419,34 +398,33 @@ class RemediationService:
         Raises:
             ValueError: 动作不存在
         """
-        async with self._lock:
-            items = self._load()
-            row = self._find(items, action_id)
-            if not row:
-                raise ValueError(f"action not found: {action_id}")
+        items = await self._load()
+        row = self._find(items, action_id)
+        if not row:
+            raise ValueError(f"action not found: {action_id}")
 
-            # 生成回滚计划
-            plan = {
-                "summary": f"回滚 {row.get('id')} 到执行前版本",
-                "steps": [
-                    "恢复上一个稳定版本",
-                    "恢复配置快照",
-                    "回放关键业务探针并验证 SLO",
-                ],
-                "reason": reason,
-                "generated_at": self._now(),
-            }
-            row["rollback_plan"] = plan
+        # 生成回滚计划
+        plan = {
+            "summary": f"回滚 {row.get('id')} 到执行前版本",
+            "steps": [
+                "恢复上一个稳定版本",
+                "恢复配置快照",
+                "回放关键业务探针并验证 SLO",
+            ],
+            "reason": reason,
+            "generated_at": self._now(),
+        }
+        row["rollback_plan"] = plan
 
-            if execute:
-                row["state"] = "ROLLED_BACK"
-                self._append_audit(row, "rollback_executed", {"reason": reason})
-            else:
-                self._append_audit(row, "rollback_plan_generated", {"reason": reason})
+        if execute:
+            row["state"] = "ROLLED_BACK"
+            self._append_audit(row, "rollback_executed", {"reason": reason})
+        else:
+            self._append_audit(row, "rollback_plan_generated", {"reason": reason})
 
-            row["updated_at"] = self._now()
-            self._save(items)
-            return {"action": dict(row), "rollback_plan": plan}
+        row["updated_at"] = self._now()
+        await self._save_row(row)
+        return {"action": dict(row), "rollback_plan": plan}
 
     async def link_change_window(
         self,
@@ -477,30 +455,29 @@ class RemediationService:
         Raises:
             ValueError: 动作不存在
         """
-        async with self._lock:
-            items = self._load()
-            row = self._find(items, action_id)
-            if not row:
-                raise ValueError(f"action not found: {action_id}")
+        items = await self._load()
+        row = self._find(items, action_id)
+        if not row:
+            raise ValueError(f"action not found: {action_id}")
 
-            # 检测风险信号
-            risk_signals = []
-            if str(release_type).lower() in {"schema", "infra", "major"}:
-                risk_signals.append("high-risk-release-type")
-            if "freeze" in str(window).lower() or "night" in str(window).lower():
-                risk_signals.append("non-business-change-window")
+        # 检测风险信号
+        risk_signals = []
+        if str(release_type).lower() in {"schema", "infra", "major"}:
+            risk_signals.append("high-risk-release-type")
+        if "freeze" in str(window).lower() or "night" in str(window).lower():
+            risk_signals.append("non-business-change-window")
 
-            row["change_link"] = {
-                "change_id": change_id,
-                "window": window,
-                "release_type": release_type,
-                "risk_signals": risk_signals,
-                "high_risk": bool(risk_signals),
-            }
-            row["updated_at"] = self._now()
-            self._append_audit(row, "change_linked", {"change_link": row["change_link"]})
-            self._save(items)
-            return dict(row)
+        row["change_link"] = {
+            "change_id": change_id,
+            "window": window,
+            "release_type": release_type,
+            "risk_signals": risk_signals,
+            "high_risk": bool(risk_signals),
+        }
+        row["updated_at"] = self._now()
+        self._append_audit(row, "change_linked", {"change_link": row["change_link"]})
+        await self._save_row(row)
+        return dict(row)
 
 
 # 全局实例
