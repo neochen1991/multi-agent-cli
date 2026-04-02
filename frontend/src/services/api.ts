@@ -935,7 +935,10 @@ export const assetApi = {
 
 export const monitoringApi = {
   async getStatus(): Promise<MonitorStatusResponse> {
-    const { data } = await api.get<MonitorStatusResponse>('/monitoring/status');
+    const { data } = await api.get<MonitorStatusResponse>('/monitoring/status', {
+      // 监控中心状态刷新不应长时间阻塞页面交互。
+      timeout: 15000,
+    });
     return data;
   },
   async start(): Promise<{ status: string }> {
@@ -949,11 +952,15 @@ export const monitoringApi = {
   async listTargets(enabledOnly = false): Promise<MonitorTarget[]> {
     const { data } = await api.get<MonitorTarget[]>('/monitoring/targets', {
       params: { enabled_only: enabledOnly },
+      timeout: 15000,
     });
     return data;
   },
   async createTarget(payload: MonitorTargetCreatePayload): Promise<MonitorTarget> {
-    const { data } = await api.post<MonitorTarget>('/monitoring/targets', payload);
+    const { data } = await api.post<MonitorTarget>('/monitoring/targets', payload, {
+      // 添加目标需要快速反馈，避免请求链路异常时出现“长时间转圈”。
+      timeout: 8000,
+    });
     return data;
   },
   async updateTarget(targetId: string, payload: MonitorTargetUpdatePayload): Promise<MonitorTarget> {

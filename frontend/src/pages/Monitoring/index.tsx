@@ -150,7 +150,8 @@ const MonitoringPage: React.FC = () => {
         cooldown_sec: 300,
         cookie_header: '',
       });
-      await loadAll();
+      // 中文注释：列表刷新放到后台执行，避免刷新链路异常时让“添加目标”按钮一直 loading。
+      void loadAll();
     } catch (error: any) {
       message.error(error?.response?.data?.detail || error?.message || '创建失败');
     } finally {
