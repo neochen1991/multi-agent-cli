@@ -153,17 +153,6 @@ const MonitoringPage: React.FC = () => {
     setCreating(true);
     const startedAt = Date.now();
     setCreateTrace({ status: 'running', startedAt, message: '正在提交创建请求...' });
-    // 中文注释：兜底定时器，防止极端情况下 Promise 状态异常导致按钮一直转圈。
-    const creatingWatchdog = window.setTimeout(() => {
-      setCreating(false);
-      setCreateTrace({
-        status: 'error',
-        startedAt,
-        endedAt: Date.now(),
-        message: '创建请求超时（12s），请检查后端/API 代理后重试',
-      });
-      message.warning('创建请求超时，请检查后端可用性后重试');
-    }, 12000);
     const payload: MonitorTargetCreatePayload = {
       name: values.name.trim(),
       url: values.url.trim(),
@@ -179,12 +168,7 @@ const MonitoringPage: React.FC = () => {
       metadata: {},
     };
     try {
-      const created = await Promise.race([
-        monitoringApi.createTarget(payload),
-        new Promise<never>((_, reject) => {
-          window.setTimeout(() => reject(new Error('创建请求超时（8s）')), 8000);
-        }),
-      ]);
+      const created = await monitoringApi.createTarget(payload);
       message.success('巡检目标创建成功');
       setCreateTrace({
         status: 'success',
@@ -218,8 +202,26 @@ const MonitoringPage: React.FC = () => {
       });
       message.error(detail);
     } finally {
-      window.clearTimeout(creatingWatchdog);
       setCreating(false);
+    }
+  };
+
+  const handleCreateClick = async () => {
+    if (creating) {
+      return;
+    }
+    try {
+      const values = await form.validateFields();
+      await handleCreate(values);
+    } catch (error: any) {
+      const detail = String(error?.errorFields?.[0]?.errors?.[0] || error?.message || '表单校验未通过');
+      setCreateTrace({
+        status: 'error',
+        startedAt: Date.now(),
+        endedAt: Date.now(),
+        message: detail,
+      });
+      message.warning(detail);
     }
   };
 
@@ -457,9 +459,6 @@ const MonitoringPage: React.FC = () => {
             cooldown_sec: 300,
             cookie_header: '',
           }}
-          onFinish={(values) => {
-            void handleCreate(values);
-          }}
         >
           <Space align="start" wrap style={{ width: '100%' }}>
             <Form.Item label="名称" name="name" rules={[{ required: true, message: '请输入监控目标名称' }]}>
@@ -507,7 +506,7 @@ const MonitoringPage: React.FC = () => {
               <Switch />
             </Form.Item>
             <Form.Item label=" " colon={false}>
-              <Button type="primary" htmlType="submit" loading={creating}>
+              <Button type="primary" htmlType="button" loading={creating} onClick={() => void handleCreateClick()}>
                 添加目标
               </Button>
             </Form.Item>
