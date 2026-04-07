@@ -805,7 +805,8 @@ class LLMClient:
             return float(max(12, int(settings.llm_report_timeout_retry)))
         if phase_name == "asset_analysis":
             return float(max(12, int(settings.llm_asset_timeout)))
-        return float(max(12, min(int(settings.llm_total_timeout), 60)))
+        # 中文注释：移除 60s 硬上限，改为跟随配置（上限 240s），避免中长上下文场景频繁超时。
+        return float(max(20, min(int(settings.llm_total_timeout), 240)))
 
     def _run_llm_reply(
         self,

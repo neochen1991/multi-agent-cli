@@ -460,6 +460,36 @@ const IncidentPage: React.FC = () => {
         .filter(Boolean)
         .join('\n');
     }
+    if (toolName === 'mcp_gateway' || preview.mcp_context) {
+      const ctx = preview.mcp_context && typeof preview.mcp_context === 'object'
+        ? asRecord(preview.mcp_context)
+        : preview;
+      const summary = String(ctx.summary || '-');
+      const servers = Array.isArray(ctx.servers) ? ctx.servers.map((item) => asRecord(item)) : [];
+      const items = Array.isArray(ctx.items) ? ctx.items.map((item) => asRecord(item)) : [];
+      const topServers = servers
+        .map((item) => `${String(item.name || item.id || '-')}`)
+        .slice(0, truncate ? 3 : 10);
+      const topItems = items
+        .map((item) => {
+          const server = String(item.server_name || item.server_id || '-');
+          const cap = String(item.capability || '-');
+          const tool = String(item.tool_name || '-');
+          const data = asRecord(item.data);
+          const matchCount = String(data.match_count || data.result_count || data.hits_count || '');
+          return `${server}/${cap}${tool && tool !== '-' ? `/${tool}` : ''}${matchCount ? ` (count=${matchCount})` : ''}`;
+        })
+        .slice(0, truncate ? 4 : 12);
+      return [
+        `MCP摘要：${summary}`,
+        `服务数量：${servers.length}`,
+        `命中条数：${items.length}`,
+        topServers.length ? `服务清单：${topServers.join('；')}` : '',
+        topItems.length ? `命中明细：${topItems.join('；')}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    }
     const lines = Object.entries(preview)
       .slice(0, 6)
       .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : toDisplayText(value)}`);
@@ -1124,6 +1154,7 @@ const IncidentPage: React.FC = () => {
         git_repo_search: '代码仓检索工具',
         git_change_window: '变更窗口分析工具',
         agent_skill_router: 'Skill 路由工具',
+        mcp_gateway: 'MCP 网关工具',
         metrics_snapshot_analyzer: '监控指标分析工具',
         runbook_case_library: '案例库检索工具',
       };

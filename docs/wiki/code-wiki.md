@@ -33,6 +33,7 @@ backend/app/
     debate_service.py              # 会话主流程（资产采集、运行时执行、报告）
     agent_tool_context_service.py  # 工具上下文 + 命令门禁 + Skill 合并
     agent_skill_service.py         # Skill 加载/匹配/选择
+    mcp_service.py                 # MCP 服务管理 + Agent 绑定 + 证据抓取
     page_monitoring_service.py     # 页面巡检 + 异常自动触发 RCA
   runtime/
     langgraph_runtime.py           # LangGraph 运行时总编排
@@ -52,6 +53,7 @@ backend/app/
 frontend/src/
   pages/Incident/index.tsx         # 分析主页面（实时事件、工具/skill展示）
   pages/History/index.tsx          # 历史任务列表（开始时间/模式/结果摘要）
+  pages/McpCenter/index.tsx        # MCP 配置中心（服务配置 + Agent 绑定）
   v2/pages/HistoryV2.tsx           # 新版历史页（同样优先展示 requested_execution_mode）
 backend/skills/
   */SKILL.md                       # 本地 Skill 文档库
@@ -140,14 +142,17 @@ flowchart TB
 - `backend/app/runtime/deployment_center.py`：选择 `deployment_profile`（是否启用 Metrics/Skill/协作等）。
 - `backend/app/services/agent_tool_context_service.py`：工具上下文与命令门禁、Skill 合并。
 - `backend/app/services/agent_skill_service.py`：Skill 读取、匹配与审计。
+- `backend/app/services/mcp_service.py`：MCP 服务配置管理、Agent 绑定与证据采集。
 - `backend/app/services/page_monitoring_service.py`：定时巡检页面，发现前端/接口错误后自动创建 incident 并触发分析。
 - `backend/app/runtime/langgraph/routing/rule_engine.py`：路由规则引擎调度。
 - `backend/app/runtime/langgraph/routing/rules_impl.py`：核心路由规则集合。
 - `backend/app/api/debates.py`：会话创建/执行/后台执行入口。
 - `backend/app/api/monitoring.py`：巡检目标管理、手动巡检和巡检事件查询入口。
+- `backend/app/api/settings.py`：MCP 配置中心接口（服务配置与 Agent 绑定）。
 - `backend/app/api/ws_debates.py`：WebSocket 实时事件流与恢复入口。
 - `frontend/src/pages/Incident/index.tsx`：前端分析主页面，汇总资产映射/过程/结果。
 - `frontend/src/pages/History/index.tsx`：历史列表展示（开始时间与模式展示）。
+- `frontend/src/pages/McpCenter/index.tsx`：MCP 服务配置与 Agent 绑定管理页面。
 
 ---
 
@@ -623,6 +628,11 @@ agents: LogAgent,RebuttalAgent,CriticAgent
 
 - `GET /api/v1/settings/tooling`
 - `PUT /api/v1/settings/tooling`
+- `GET /api/v1/settings/tooling/mcp/servers`
+- `POST /api/v1/settings/tooling/mcp/servers`
+- `DELETE /api/v1/settings/tooling/mcp/servers/{server_id}`
+- `GET /api/v1/settings/tooling/mcp/bindings`
+- `PUT /api/v1/settings/tooling/mcp/bindings`
 
 ### 7.3.1 Skill 配置链路图（前端入口 + 后端持久化）
 
@@ -638,6 +648,32 @@ flowchart LR
     TOOLCFG --> CTX["agent_tool_context_service"]
     CTX --> SKSEL["agent_skill_service.select_skills()"]
 ```
+
+### 7.3.3 MCP 配置中心链路（新增）
+
+```mermaid
+flowchart LR
+    U["用户"] --> FE["Frontend /mcp 页面"]
+    FE --> API1["/api/v1/settings/tooling/mcp/servers"]
+    FE --> API2["/api/v1/settings/tooling/mcp/bindings"]
+    API1 --> SVC["mcp_service"]
+    API2 --> SVC
+    SVC --> TOOLING["tooling_service.update_config"]
+    TOOLING --> REPO["tooling_repository"]
+    REPO --> FILE["tooling_config.json"]
+
+    ORCH["Agent 执行阶段"] --> CTX["agent_tool_context_service._merge_mcp_context"]
+    CTX --> SVC
+    SVC --> MCP["MCP Server (http/sse/stdio)"]
+    MCP --> CTX
+```
+
+MCP 关键行为说明：
+
+1. `mcp_service.resolve_agent_servers()` 会根据 `mcp_bindings` 解析“当前 Agent 可用服务”。  
+2. `collect_agent_evidence()` 会聚合多个 MCP 服务返回，统一写入 `mcp_context.items`。  
+3. `AgentToolContextService._merge_mcp_context()` 把 MCP 结果并入 `tool_context`，并把每次调用写入审计 `audit_log`。  
+4. 当基础工具没命中但 MCP 命中时，`tool_context.name` 会切到 `mcp_gateway`，确保前端可见。  
 
 ### 7.3.2 前端入口定位图
 

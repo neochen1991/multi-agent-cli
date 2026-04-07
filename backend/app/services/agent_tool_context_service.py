@@ -64,6 +64,7 @@ from app.services.code_analysis.symbol_resolver import (
 )
 from app.services.tooling_service import tooling_service
 from app.services.agent_skill_service import agent_skill_service
+from app.services.mcp_service import mcp_service
 from app.services.tool_plugin_gateway import ToolPluginGateway
 from app.services.knowledge_service import knowledge_service
 from app.services.tool_context.audit import ToolAuditBuilder
@@ -141,6 +142,18 @@ class AgentToolContextService:
         # 中文注释：插件网关负责执行 extensions/tools 下的可扩展工具，不替代内置 provider。
         self._tool_plugin_gateway = ToolPluginGateway()
         self._audit_builder = ToolAuditBuilder()
+        # 中文注释：仅专家类 Agent 默认尝试调用 MCP 服务，避免协调/裁决角色产生无效外部请求。
+        self._mcp_expert_agents = {
+            "LogAgent",
+            "MetricsAgent",
+            "DatabaseAgent",
+            "DomainAgent",
+            "CodeAgent",
+            "ChangeAgent",
+            "ImpactAnalysisAgent",
+            "RunbookAgent",
+            "RuleSuggestionAgent",
+        }
 
     async def build_context(
         self,
@@ -196,6 +209,13 @@ class AgentToolContextService:
         result = self._merge_plugin_tool_context(
             result=result,
             cfg=cfg,
+            agent_name=agent_name,
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
+        )
+        result = await self._merge_mcp_context(
+            result=result,
             agent_name=agent_name,
             compact_context=compact_context,
             incident_context=incident_context,
@@ -341,6 +361,72 @@ class AgentToolContextService:
         result.audit_log = [*list(result.audit_log or []), *normalized_skill_audit]
         if not result.execution_path:
             result.execution_path = "local"
+        return result
+
+    async def _merge_mcp_context(
+        self,
+        *,
+        result: ToolContextResult,
+        agent_name: str,
+        compact_context: Dict[str, Any],
+        incident_context: Dict[str, Any],
+        assigned_command: Optional[Dict[str, Any]],
+    ) -> ToolContextResult:
+        """将 MCP 取证结果并入工具上下文。"""
+        if agent_name not in self._mcp_expert_agents:
+            return result
+        gate = dict(result.command_gate or {})
+        if not bool(gate.get("has_command")) or not bool(gate.get("allow_tool")):
+            return result
+
+        mcp_result = await mcp_service.collect_agent_evidence(
+            agent_name=agent_name,
+            compact_context=compact_context,
+            incident_context=incident_context,
+            assigned_command=assigned_command,
+        )
+        if not bool(mcp_result.get("enabled")):
+            return result
+
+        combined_data = dict(result.data or {})
+        combined_data["mcp_context"] = {
+            "summary": str(mcp_result.get("summary") or ""),
+            "servers": list(mcp_result.get("servers") or []),
+            "items": list(mcp_result.get("items") or []),
+        }
+        mcp_audit = [
+            self._audit(
+                tool_name="mcp_gateway",
+                action=str(item.get("action") or "mcp_fetch"),
+                status=str(item.get("status") or "ok"),
+                detail=dict(item.get("detail") or {}),
+            )
+            for item in list(mcp_result.get("audit_log") or [])
+            if isinstance(item, dict)
+        ]
+
+        mcp_summary = str(mcp_result.get("summary") or "MCP 取证完成。")
+        if result.name in {"none", ""}:
+            return ToolContextResult(
+                name="mcp_gateway",
+                enabled=True,
+                used=bool(mcp_result.get("used")),
+                status="ok" if bool(mcp_result.get("used")) else "skipped",
+                summary=mcp_summary,
+                data=combined_data,
+                command_gate=dict(result.command_gate or {}),
+                audit_log=[*list(result.audit_log or []), *mcp_audit],
+                execution_path="remote",
+                permission_decision=dict(result.permission_decision or {}),
+            )
+
+        result.data = combined_data
+        result.summary = f"{str(result.summary or '').strip()}；{mcp_summary}".strip("；")
+        result.audit_log = [*list(result.audit_log or []), *mcp_audit]
+        if bool(mcp_result.get("used")):
+            result.used = True
+            if result.execution_path == "none":
+                result.execution_path = "remote"
         return result
 
     def _merge_plugin_tool_context(

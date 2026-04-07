@@ -124,7 +124,7 @@ const MonitoringPage: React.FC = () => {
     setStarting(true);
     try {
       await monitoringApi.start();
-      message.success('页面巡检服务已启动');
+      message.success('演练页面感知服务已启动');
       await loadAll();
     } catch (error: any) {
       message.error(error?.response?.data?.detail || error?.message || '启动失败');
@@ -137,7 +137,7 @@ const MonitoringPage: React.FC = () => {
     setStopping(true);
     try {
       await monitoringApi.stop();
-      message.success('页面巡检服务已停止');
+      message.success('演练页面感知服务已停止');
       await loadAll();
     } catch (error: any) {
       message.error(error?.response?.data?.detail || error?.message || '停止失败');
@@ -169,7 +169,7 @@ const MonitoringPage: React.FC = () => {
     };
     try {
       const created = await monitoringApi.createTarget(payload);
-      message.success('巡检目标创建成功');
+      message.success('感知目标创建成功');
       setCreateTrace({
         status: 'success',
         startedAt,
@@ -242,7 +242,7 @@ const MonitoringPage: React.FC = () => {
     setUpdatingId(row.id);
     try {
       await monitoringApi.deleteTarget(row.id);
-      message.success('巡检目标已删除');
+      message.success('感知目标已删除');
       await loadAll({ silent: true });
     } catch (error: any) {
       message.error(error?.response?.data?.detail || error?.message || '删除失败');
@@ -254,16 +254,16 @@ const MonitoringPage: React.FC = () => {
   const handleScan = async (row: MonitorTarget) => {
     setScanningId(row.id);
     try {
-      // 中文注释：手动巡检后立即刷新目标列表与事件流，保证用户留在当前页也能看到最新分析入口。
+      // 中文注释：手动触发感知后立即刷新目标列表与事件流，保证用户留在当前页也能看到最新分析入口。
       const result = await monitoringApi.scanTarget(row.id);
       if (result.finding.has_error) {
         message.warning('检测到异常，系统已自动拉起故障分析流程');
       } else {
-        message.success('巡检完成，未发现异常');
+        message.success('感知完成，未发现异常');
       }
       await Promise.all([loadAll({ silent: true }), openEvents(row)]);
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || error?.message || '巡检失败');
+      message.error(error?.response?.data?.detail || error?.message || '感知失败');
     } finally {
       setScanningId('');
     }
@@ -276,7 +276,7 @@ const MonitoringPage: React.FC = () => {
       const data = await monitoringApi.listEvents(row.id, 50);
       setEvents(Array.isArray(data.items) ? data.items : []);
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || error?.message || '加载巡检事件失败');
+      message.error(error?.response?.data?.detail || error?.message || '加载感知事件失败');
       setEvents([]);
     } finally {
       setEventsLoading(false);
@@ -316,14 +316,14 @@ const MonitoringPage: React.FC = () => {
       render: (value: string) => <Tag color={severityColor[value] || 'default'}>{String(value || '').toUpperCase()}</Tag>,
     },
     {
-      title: '巡检间隔',
+      title: '感知间隔',
       dataIndex: 'check_interval_sec',
       key: 'check_interval_sec',
       width: 106,
       render: (value: number) => `${value}s`,
     },
     {
-      title: '最近巡检',
+      title: '最近感知',
       dataIndex: 'last_checked_at',
       key: 'last_checked_at',
       width: 170,
@@ -372,7 +372,7 @@ const MonitoringPage: React.FC = () => {
               void handleScan(row);
             }}
           >
-            立即巡检
+            立即感知
           </Button>
           <Button
             size="small"
@@ -415,24 +415,24 @@ const MonitoringPage: React.FC = () => {
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Card>
         <Space direction="vertical" size={8} style={{ width: '100%' }}>
-          <Title level={3} style={{ margin: 0 }}>自动监控中心</Title>
+          <Title level={3} style={{ margin: 0 }}>红蓝对抗感知</Title>
           <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-            监控指定业务页面，发现前端报错或接口异常后自动创建故障并拉起多 Agent 根因分析。
+            自动访问目标页面并监听接口/控制台异常，识别查询接口后触发查询交互回放；命中异常时自动创建故障并拉起多 Agent 根因分析。
           </Paragraph>
           <Space wrap>
             <Tag color={status?.running ? 'success' : 'default'}>
               服务状态：{status?.running ? '运行中' : '已停止'}
             </Tag>
-            <Tag>巡检目标：{status?.active_targets ?? 0}</Tag>
-            <Tag>巡检周期：{status?.tick_seconds ?? '-'}s</Tag>
+            <Tag>感知目标：{status?.active_targets ?? 0}</Tag>
+            <Tag>感知周期：{status?.tick_seconds ?? '-'}s</Tag>
             <Tag>最近轮询：{formatBeijingDateTime(status?.last_loop_at, '-').replace(' (北京时间)', '')}</Tag>
           </Space>
           <Space wrap>
             <Button type="primary" loading={starting} onClick={() => void handleStart()}>
-              启动巡检
+              启动感知
             </Button>
             <Button loading={stopping} onClick={() => void handleStop()}>
-              停止巡检
+              停止感知
             </Button>
             <Button loading={refreshing} onClick={() => void handleRefresh()}>
               刷新
@@ -446,7 +446,7 @@ const MonitoringPage: React.FC = () => {
         </Space>
       </Card>
 
-      <Card title="新增巡检目标">
+      <Card title="新增演练页面感知目标">
         <Form<TargetFormValues>
           form={form}
           layout="vertical"
@@ -484,7 +484,7 @@ const MonitoringPage: React.FC = () => {
                 ]}
               />
             </Form.Item>
-            <Form.Item label="巡检间隔(秒)" name="check_interval_sec">
+            <Form.Item label="感知间隔(秒)" name="check_interval_sec">
               <InputNumber min={15} max={3600} style={{ width: 130 }} />
             </Form.Item>
             <Form.Item label="超时(秒)" name="timeout_sec">
@@ -527,7 +527,7 @@ const MonitoringPage: React.FC = () => {
         </Form>
       </Card>
 
-      <Card title="巡检目标列表">
+      <Card title="演练页面感知目标列表">
         <Table<MonitorTarget>
           loading={loading}
           rowKey="id"
@@ -535,7 +535,7 @@ const MonitoringPage: React.FC = () => {
           columns={columns}
           pagination={{ pageSize: 10, showSizeChanger: false }}
           locale={{
-            emptyText: <Empty description="暂无巡检目标，先添加一个页面开始监控" />,
+            emptyText: <Empty description="暂无感知目标，先添加一个页面开始感知" />,
           }}
           scroll={{ x: 1300 }}
         />
@@ -543,7 +543,7 @@ const MonitoringPage: React.FC = () => {
 
       <Drawer
         width={640}
-        title={eventsTarget ? `巡检事件：${eventsTarget.name}` : '巡检事件'}
+        title={eventsTarget ? `感知事件：${eventsTarget.name}` : '感知事件'}
         open={Boolean(eventsTarget)}
         onClose={() => {
           setEventsTarget(null);

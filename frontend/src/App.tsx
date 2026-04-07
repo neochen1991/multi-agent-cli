@@ -17,6 +17,7 @@ const BenchmarkCenterPage = lazy(() => import('@/pages/BenchmarkCenter'));
 const GovernanceCenterPage = lazy(() => import('@/pages/GovernanceCenter'));
 const ToolsCenterPage = lazy(() => import('@/pages/ToolsCenter'));
 const AdvancedPage = lazy(() => import('@/pages/Advanced'));
+const McpCenterPage = lazy(() => import('@/pages/McpCenter'));
 
 const { Content, Footer } = Layout;
 
@@ -75,6 +76,7 @@ const App: React.FC = () => {
             <Route path="/benchmark" element={<BenchmarkCenterPage />} />
             <Route path="/governance" element={<GovernanceCenterPage />} />
             <Route path="/tools" element={<ToolsCenterPage />} />
+            <Route path="/mcp" element={<McpCenterPage />} />
             <Route path="/war-room" element={<Navigate to="/workbench" replace />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Route>

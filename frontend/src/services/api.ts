@@ -540,6 +540,40 @@ export interface AgentToolPluginConfig {
   allowed_tools: string[];
 }
 
+export interface MCPServerConfig {
+  id: string;
+  name: string;
+  enabled: boolean;
+  type: 'remote' | 'local' | string;
+  transport: 'http' | 'sse' | 'stdio' | string;
+  protocol_mode: 'gateway' | 'mcp' | 'local' | string;
+  endpoint: string;
+  command: string;
+  command_list: string[];
+  args: string[];
+  env: Record<string, string>;
+  api_token: string;
+  timeout_seconds: number;
+  capabilities: string[];
+  tool_paths: Record<string, string>;
+  metadata: Record<string, string>;
+}
+
+export interface AgentMCPBindingConfig {
+  enabled: boolean;
+  bindings: Record<string, string[]>;
+}
+
+export interface MCPProbeResult {
+  ok: boolean;
+  server_id: string;
+  server_name?: string;
+  error?: string;
+  items_count?: number;
+  items?: Array<Record<string, unknown>>;
+  audit_log?: Array<Record<string, unknown>>;
+}
+
 export interface AgentToolingConfig {
   code_repo: CodeRepoToolConfig;
   log_file: LogFileToolConfig;
@@ -555,6 +589,8 @@ export interface AgentToolingConfig {
   alert_platform_source?: AlertPlatformSourceConfig;
   skills?: AgentSkillConfig;
   tool_plugins?: AgentToolPluginConfig;
+  mcp_servers?: MCPServerConfig[];
+  mcp_bindings?: AgentMCPBindingConfig;
   updated_at: string;
 }
 
@@ -1044,6 +1080,34 @@ export const settingsApi = {
   },
   async trialRunTool(payload: ToolTrialRunRequest): Promise<ToolTrialRunResponse> {
     const { data } = await api.post<ToolTrialRunResponse>('/settings/tooling/trial-run', payload);
+    return data;
+  },
+  async listMCPServers(): Promise<MCPServerConfig[]> {
+    const { data } = await api.get<MCPServerConfig[]>('/settings/tooling/mcp/servers');
+    return data;
+  },
+  async upsertMCPServer(payload: MCPServerConfig): Promise<MCPServerConfig> {
+    const { data } = await api.post<MCPServerConfig>('/settings/tooling/mcp/servers', payload);
+    return data;
+  },
+  async deleteMCPServer(serverId: string): Promise<{ deleted: boolean; server_id: string }> {
+    const { data } = await api.delete<{ deleted: boolean; server_id: string }>(
+      `/settings/tooling/mcp/servers/${encodeURIComponent(serverId)}`,
+    );
+    return data;
+  },
+  async probeMCPServer(serverId: string): Promise<MCPProbeResult> {
+    const { data } = await api.post<MCPProbeResult>(
+      `/settings/tooling/mcp/servers/${encodeURIComponent(serverId)}/probe`,
+    );
+    return data;
+  },
+  async getMCPBindings(): Promise<AgentMCPBindingConfig> {
+    const { data } = await api.get<AgentMCPBindingConfig>('/settings/tooling/mcp/bindings');
+    return data;
+  },
+  async updateMCPBindings(payload: AgentMCPBindingConfig): Promise<AgentMCPBindingConfig> {
+    const { data } = await api.put<AgentMCPBindingConfig>('/settings/tooling/mcp/bindings', payload);
     return data;
   },
 };

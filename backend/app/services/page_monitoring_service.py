@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from datetime import UTC, datetime
+from time import perf_counter
+import re
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import structlog
@@ -45,6 +48,9 @@ class PageMonitoringService:
         self._running = False
         self._last_loop_at: Optional[datetime] = None
         self._loop_lock = asyncio.Lock()
+        # 中文注释：全局串行巡检锁。无论是定时轮询还是手动“立即感知”，都必须排队执行，
+        # 避免多个页面或同一页面同时触发 Playwright/HTTP 巡检导致并发抖动。
+        self._scan_serial_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """启动巡检循环。"""
@@ -146,7 +152,7 @@ class PageMonitoringService:
         target = await self.get_target(target_id)
         if not target:
             return None
-        finding = await self._scan_target(target)
+        finding = await self._scan_target_serialized(target, trigger="manual")
         await self._record_finding(finding)
         if finding.has_error:
             await self._handle_anomaly(target, finding)
@@ -185,13 +191,36 @@ class PageMonitoringService:
             for target in targets:
                 if not self._should_check(target):
                     continue
-                finding = await self._scan_target(target)
+                finding = await self._scan_target_serialized(target, trigger="loop")
                 await self._record_finding(finding)
                 if finding.has_error:
                     await self._handle_anomaly(target, finding)
                 target.last_checked_at = finding.checked_at
                 target.updated_at = _utcnow()
                 await self._save_target(target)
+
+    async def _scan_target_serialized(self, target: MonitorTarget, *, trigger: str) -> PageMonitorFinding:
+        """串行执行单目标巡检，统一为所有入口提供排队门禁。"""
+        queued_at = perf_counter()
+        async with self._scan_serial_lock:
+            wait_ms = round((perf_counter() - queued_at) * 1000, 2)
+            # 中文注释：显式记录排队耗时，便于定位“为什么感知慢/按钮转圈久”。
+            logger.info(
+                "page_monitor_scan_started",
+                target_id=target.id,
+                target_name=target.name,
+                trigger=trigger,
+                queue_wait_ms=wait_ms,
+            )
+            finding = await self._scan_target(target)
+            logger.info(
+                "page_monitor_scan_completed",
+                target_id=target.id,
+                target_name=target.name,
+                trigger=trigger,
+                has_error=finding.has_error,
+            )
+            return finding
 
     def _should_check(self, target: MonitorTarget) -> bool:
         """判断目标是否到达巡检时间。"""
@@ -214,9 +243,21 @@ class PageMonitoringService:
         api_errors = list(playwright_result.get("api_errors") or [])
         browser_error = str(playwright_result.get("browser_error") or "").strip()
         summary = str(playwright_result.get("summary") or "").strip()
+        observed_query_apis = list(playwright_result.get("observed_query_apis") or [])
+        triggered_actions = list(playwright_result.get("triggered_actions") or [])
+        replay_api_errors = list(playwright_result.get("replay_api_errors") or [])
         has_error = bool(frontend_errors or api_errors or browser_error)
         if not summary:
-            summary = "页面巡检未发现异常" if not has_error else "页面巡检检测到异常"
+            if has_error:
+                summary = (
+                    f"页面感知检测到异常（前端报错{len(frontend_errors)}条，"
+                    f"接口异常{len(api_errors)}条，回放异常{len(replay_api_errors)}条）"
+                )
+            else:
+                summary = (
+                    f"页面感知正常（识别查询接口{len(observed_query_apis)}个，"
+                    f"触发交互{len(triggered_actions)}次）"
+                )
         return PageMonitorFinding(
             target_id=target.id,
             target_name=target.name,
@@ -239,7 +280,55 @@ class PageMonitoringService:
 
         frontend_errors: List[str] = []
         api_errors: List[str] = []
+        replay_api_errors: List[str] = []
+        observed_query_api_map: Dict[str, Dict[str, Any]] = {}
+        triggered_actions: List[str] = []
         browser_error = ""
+        replay_started = {"value": False}
+
+        def _record_response(resp: Any) -> None:
+            """记录页面接口响应与异常。"""
+            status = int(getattr(resp, "status", 0) or 0)
+            request = getattr(resp, "request", None)
+            method = str(getattr(request, "method", "") or "").upper()
+            url = str(getattr(resp, "url", "") or "")
+            resource_type = str(getattr(request, "resource_type", "") or "").lower()
+            phase = "replay" if replay_started.get("value") else "initial"
+            if resource_type in {"xhr", "fetch"} and self._is_query_api_candidate(method=method, url=url):
+                api_key = self._api_fingerprint(method=method, url=url)
+                observed_query_api_map[api_key] = {
+                    "method": method,
+                    "url": self._strip_url_for_display(url),
+                    "phase": phase,
+                    "status": status,
+                }
+            if status >= 400 and resource_type in {"xhr", "fetch", "document"}:
+                msg = f"{status} {method} {url}"
+                api_errors.append(msg)
+                if phase == "replay":
+                    replay_api_errors.append(msg)
+
+        def _record_request_failed(req: Any) -> None:
+            """记录接口请求失败事件。"""
+            resource_type = str(getattr(req, "resource_type", "") or "").lower()
+            if resource_type not in {"xhr", "fetch", "document"}:
+                return
+            method = str(getattr(req, "method", "") or "").upper()
+            url = str(getattr(req, "url", "") or "")
+            failure = str(getattr(req, "failure", "") or "")
+            msg = f"failed {method} {url} {failure}".strip()
+            api_errors.append(msg)
+            if replay_started.get("value"):
+                replay_api_errors.append(msg)
+            if self._is_query_api_candidate(method=method, url=url):
+                api_key = self._api_fingerprint(method=method, url=url)
+                observed_query_api_map[api_key] = {
+                    "method": method,
+                    "url": self._strip_url_for_display(url),
+                    "phase": "replay" if replay_started.get("value") else "initial",
+                    "status": "failed",
+                }
+
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
@@ -258,22 +347,9 @@ class PageMonitoringService:
                     if str(msg.type or "").lower() == "error"
                     else None,
                 )
-                # 中文注释：对 fetch/xhr/document 的 4xx/5xx 响应打点，作为接口异常信号。
-                page.on(
-                    "response",
-                    lambda resp: api_errors.append(
-                        f"{resp.status} {resp.request.method} {resp.url}"
-                    )
-                    if int(getattr(resp, "status", 0) or 0) >= 400
-                    and str(resp.request.resource_type or "").lower() in {"xhr", "fetch", "document"}
-                    else None,
-                )
-                page.on(
-                    "requestfailed",
-                    lambda req: api_errors.append(f"failed {req.method} {req.url} {req.failure}")
-                    if str(req.resource_type or "").lower() in {"xhr", "fetch", "document"}
-                    else None,
-                )
+                # 中文注释：统一记录接口响应，可同时用于“接口报错监控”和“查询接口清单识别”。
+                page.on("response", _record_response)
+                page.on("requestfailed", _record_request_failed)
 
                 await page.goto(
                     target.url,
@@ -281,19 +357,36 @@ class PageMonitoringService:
                     timeout=max(5, int(target.timeout_sec or 20)) * 1000,
                 )
                 await page.wait_for_timeout(800)
+                # 中文注释：进入“回放阶段”后自动点击查询类控件，主动触发页面查询请求用于二次观测。
+                replay_started["value"] = True
+                triggered_actions = await self._trigger_query_actions(page)
+                if triggered_actions:
+                    await page.wait_for_timeout(900)
                 await context.close()
                 await browser.close()
         except Exception as exc:
             browser_error = str(exc)
 
         has_error = bool(frontend_errors or api_errors or browser_error)
+        observed_query_apis = list(observed_query_api_map.values())
         return {
             "checker": "playwright",
             "has_error": has_error,
             "frontend_errors": frontend_errors,
             "api_errors": api_errors,
+            "replay_api_errors": replay_api_errors,
+            "observed_query_apis": observed_query_apis,
+            "triggered_actions": triggered_actions,
             "browser_error": browser_error,
-            "summary": "Playwright 页面巡检发现异常" if has_error else "Playwright 页面巡检正常",
+            "summary": (
+                f"Playwright 页面感知发现异常（查询接口{len(observed_query_apis)}个，"
+                f"触发交互{len(triggered_actions)}次，回放异常{len(replay_api_errors)}条）"
+                if has_error
+                else (
+                    f"Playwright 页面感知正常（查询接口{len(observed_query_apis)}个，"
+                    f"触发交互{len(triggered_actions)}次）"
+                )
+            ),
         }
 
     async def _scan_with_http(self, target: MonitorTarget) -> Dict[str, Any]:
@@ -372,6 +465,15 @@ class PageMonitoringService:
         if finding.api_errors:
             desc_lines.append("接口异常：")
             desc_lines.extend([f"- {line}" for line in finding.api_errors[:8]])
+        raw_query_apis = list((finding.raw or {}).get("observed_query_apis") or [])
+        if raw_query_apis:
+            desc_lines.append("识别到的查询接口：")
+            for item in raw_query_apis[:8]:
+                method = str((item or {}).get("method") or "").upper()
+                api_url = str((item or {}).get("url") or "")
+                phase = str((item or {}).get("phase") or "")
+                status = str((item or {}).get("status") or "")
+                desc_lines.append(f"- [{phase}] {status} {method} {api_url}".strip())
         if kb_text:
             desc_lines.append("知识库建议：")
             desc_lines.extend([f"- {line}" for line in kb_summaries[:3]])
@@ -487,6 +589,83 @@ class PageMonitoringService:
         return headers
 
     @staticmethod
+    def _api_fingerprint(*, method: str, url: str) -> str:
+        """生成接口指纹，便于接口去重。"""
+        parsed = urlparse(str(url or ""))
+        return f"{str(method or '').upper()} {parsed.path or '/'}"
+
+    @staticmethod
+    def _strip_url_for_display(url: str) -> str:
+        """对 URL 做脱敏与裁剪，避免 query 参数泄漏敏感值。"""
+        parsed = urlparse(str(url or ""))
+        if not parsed.query:
+            return str(url or "")
+        query_keys = list(parse_qs(parsed.query).keys())
+        query_hint = "&".join([f"{key}=*" for key in query_keys[:8]])
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{query_hint}"
+
+    @staticmethod
+    def _is_query_api_candidate(*, method: str, url: str) -> bool:
+        """判断接口是否属于查询类请求。"""
+        method_up = str(method or "").upper()
+        parsed = urlparse(str(url or ""))
+        path = str(parsed.path or "").lower()
+        query = str(parsed.query or "").lower()
+        if method_up == "GET":
+            return True
+        # 中文注释：POST 也可能是“查询接口”（如 /search、/query），按关键词识别以覆盖常见后端风格。
+        keywords = ("query", "search", "list", "page", "find", "lookup", "filter")
+        if any(token in path for token in keywords):
+            return True
+        if any(token in query for token in keywords):
+            return True
+        return False
+
+    async def _trigger_query_actions(self, page: Any) -> List[str]:
+        """自动触发页面查询操作，扩大接口观测覆盖。"""
+        action_labels: List[str] = []
+        selectors = [
+            "button:has-text('查询')",
+            "button:has-text('搜索')",
+            "button:has-text('查找')",
+            "[role='button']:has-text('查询')",
+            "[role='button']:has-text('搜索')",
+            "[aria-label*='查询']",
+            "[aria-label*='搜索']",
+            "[data-testid*='search']",
+            "[data-testid*='query']",
+            "input[type='search']",
+        ]
+        max_actions = 5
+        for selector in selectors:
+            if len(action_labels) >= max_actions:
+                break
+            with suppress(Exception):
+                locator = page.locator(selector)
+                count = await locator.count()
+                if count <= 0:
+                    continue
+                for idx in range(min(count, 2)):
+                    if len(action_labels) >= max_actions:
+                        break
+                    item = locator.nth(idx)
+                    if not await item.is_visible():
+                        continue
+                    if selector.startswith("input"):
+                        # 中文注释：搜索输入框优先触发回车，尽量避免输入新值污染业务状态。
+                        await item.focus(timeout=1200)
+                        await page.keyboard.press("Enter")
+                        action_labels.append(f"enter:{selector}")
+                    else:
+                        label = (await item.inner_text(timeout=800)).strip() if hasattr(item, "inner_text") else ""
+                        if re.search(r"(删除|移除|取消|清空)", label):
+                            continue
+                        await item.click(timeout=1500)
+                        action_labels.append(f"click:{label or selector}")
+                    await page.wait_for_timeout(500)
+        return action_labels[:max_actions]
+
+    @staticmethod
     def _row_to_target(raw: Any) -> MonitorTarget:
         payload = sqlite_store.loads_json(raw, default={}) or {}
         target = MonitorTarget(**payload)
@@ -495,6 +674,7 @@ class PageMonitoringService:
         target.created_at = _from_iso(payload.get("created_at")) or _utcnow()
         target.updated_at = _from_iso(payload.get("updated_at")) or target.created_at
         return target
+
 
 
 page_monitoring_service = PageMonitoringService()

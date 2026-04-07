@@ -1,9 +1,9 @@
 {
   "llm": {
-    "provider_id": "langgraph",
+    "provider_id": "dashscope-openai-compatible",
     "model": "kimi-k2.5",
-    "base_url": "https://coding.dashscope.aliyuncs.com/v1",
-    "api_key": "sk-sp-18ef22cce0a24275a54eb6d97574c366",
+    "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+    "api_key": "7b446c97-7172-4c90-a4ef-3f3ff5a8f894",
     "max_turns": 1,
     "max_retries": 0,
     "max_concurrency": 3,

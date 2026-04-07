@@ -59,6 +59,10 @@
 - 专家 Agent 已支持可扩展 `skill/tool` 能力：
   - `skill` 支持读取 `metadata.json`（可声明 `required_tools`）
   - `tool` 支持从 `backend/extensions/tools/*/tool.json` 动态加载并执行插件入口
+- 已支持 MCP 服务配置中心与 Agent 绑定：
+  - 支持在前端配置 MCP 服务（`http/sse/stdio`）及能力映射（logs/metrics/alerts/traces）
+  - 支持按 Agent 绑定 MCP 服务，专家 Agent 可在分析阶段自动拉取外部证据
+  - MCP 调用结果会进入 `tool_context.data.mcp_context`，并写入统一工具审计链路
 - 已新增自动化运维巡检闭环：
   - 定时巡检多个业务页面（优先 Playwright 捕获前端异常与接口失败）
   - 命中异常后自动创建 Incident 并拉起多专家 RCA
@@ -157,6 +161,7 @@ sequenceDiagram
   - `/incident` 分析页
   - `/history` 历史记录
   - `/assets` 资产视图
+  - `/mcp` MCP 配置中心
   - `/settings` 工具与登录配置
 
 分析页关键文件：
@@ -198,6 +203,7 @@ sequenceDiagram
 - `LogAgent`：本地日志文件读取
 - `DomainAgent`：责任田 Excel/CSV 查询
 - `DatabaseAgent`：数据库快照/结构化数据库上下文
+- `MCP Gateway`：按 Agent 绑定调用外部 MCP 服务，补充日志/指标/告警/链路证据
 
 设计约束：
 
@@ -213,6 +219,32 @@ sequenceDiagram
   - 工具执行状态
   - 核心返回数据摘要
   - I/O 审计轨迹（例如文件读取、Git 命令）
+
+### 5.1 MCP 配置中心（新增）
+
+后端关键代码：
+
+- `backend/app/models/tooling.py`
+  - `MCPServerConfig`：MCP 服务配置模型
+  - `AgentMCPBindingConfig`：Agent 与 MCP 服务绑定关系
+- `backend/app/services/mcp_service.py`
+  - MCP 服务增删改查
+  - Agent 绑定解析
+  - MCP 证据抓取（`http/sse/stdio`）
+- `backend/app/api/settings.py`
+  - `GET /api/v1/settings/tooling/mcp/servers`
+  - `POST /api/v1/settings/tooling/mcp/servers`
+  - `DELETE /api/v1/settings/tooling/mcp/servers/{server_id}`
+  - `GET /api/v1/settings/tooling/mcp/bindings`
+  - `PUT /api/v1/settings/tooling/mcp/bindings`
+- `backend/app/services/agent_tool_context_service.py`
+  - `_merge_mcp_context()`：把 MCP 证据合并到 Agent 的工具上下文
+
+前端关键代码：
+
+- `frontend/src/pages/McpCenter/index.tsx`：MCP 配置中心页面
+- `frontend/src/services/api.ts`：`settingsApi` MCP 接口封装
+- `frontend/src/App.tsx`、`frontend/src/components/common/Sider/index.tsx`：`/mcp` 路由与菜单入口
 
 ## 6. 快速启动
 

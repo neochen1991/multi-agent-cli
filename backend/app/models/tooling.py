@@ -11,7 +11,7 @@ Agent 工具配置模型。
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List
+from typing import Dict, List
 from pydantic import BaseModel, Field
 
 
@@ -145,6 +145,52 @@ class AgentToolPluginConfig(BaseModel):
     allowed_tools: List[str] = Field(default_factory=list, description="允许调用的插件工具名单；为空表示全部")
 
 
+class MCPServerConfig(BaseModel):
+    """MCP 服务配置。"""
+
+    id: str = Field(default="", description="服务唯一 ID")
+    name: str = Field(default="", description="服务名称")
+    enabled: bool = Field(default=True, description="是否启用")
+    type: str = Field(default="remote", description="服务类型：remote/local")
+    transport: str = Field(default="http", description="传输协议：http/sse/stdio")
+    protocol_mode: str = Field(
+        default="gateway",
+        description="调用模式：gateway=HTTP网关查询；mcp=远程标准MCP；local=本地STDIO MCP",
+    )
+    endpoint: str = Field(default="", description="MCP 服务地址（http/sse）")
+    command: str = Field(default="", description="stdio 模式命令")
+    command_list: List[str] = Field(default_factory=list, description="stdio 命令数组（兼容 OpenCode 风格）")
+    args: List[str] = Field(default_factory=list, description="stdio 模式参数")
+    env: Dict[str, str] = Field(default_factory=dict, description="stdio 模式环境变量")
+    api_token: str = Field(default="", description="访问令牌")
+    timeout_seconds: int = Field(default=12, ge=2, le=120, description="调用超时时间")
+    capabilities: List[str] = Field(
+        default_factory=lambda: ["logs", "metrics"],
+        description="MCP 能力声明，例如 logs/metrics/alerts/traces/cmdb",
+    )
+    # 中文注释：支持按能力配置服务端 path，便于兼容不同 MCP 网关实现。
+    tool_paths: Dict[str, str] = Field(
+        default_factory=lambda: {
+            "logs": "/logs/search",
+            "metrics": "/metrics/query",
+            "alerts": "/alerts/query",
+            "traces": "/traces/query",
+        },
+        description="能力到 HTTP 路径的映射（仅 http/sse）",
+    )
+    metadata: Dict[str, str] = Field(default_factory=dict, description="扩展元数据")
+
+
+class AgentMCPBindingConfig(BaseModel):
+    """Agent 与 MCP 服务绑定配置。"""
+
+    enabled: bool = Field(default=True, description="是否启用 MCP 绑定")
+    bindings: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="agent_name -> [mcp_server_id...]",
+    )
+
+
 class AgentToolingConfig(BaseModel):
     """整套 Agent Tooling 配置聚合模型。"""
     code_repo: CodeRepoToolConfig = Field(default_factory=CodeRepoToolConfig)
@@ -161,4 +207,6 @@ class AgentToolingConfig(BaseModel):
     alert_platform_source: AlertPlatformSourceConfig = Field(default_factory=AlertPlatformSourceConfig)
     skills: AgentSkillConfig = Field(default_factory=AgentSkillConfig)
     tool_plugins: AgentToolPluginConfig = Field(default_factory=AgentToolPluginConfig)
+    mcp_servers: List[MCPServerConfig] = Field(default_factory=list)
+    mcp_bindings: AgentMCPBindingConfig = Field(default_factory=AgentMCPBindingConfig)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

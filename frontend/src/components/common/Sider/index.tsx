@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Layout, Menu } from 'antd';
 import {
   ApartmentOutlined,
+  ApiOutlined,
   BookOutlined,
   DeploymentUnitOutlined,
   RadarChartOutlined,
@@ -49,7 +50,12 @@ const AppSider: React.FC = () => {
       {
         key: '/monitoring',
         icon: <RadarChartOutlined />,
-        label: '监控中心',
+        label: '红蓝对抗感知',
+      },
+      {
+        key: '/mcp',
+        icon: <ApiOutlined />,
+        label: 'MCP中心',
       },
       {
         key: '/settings',
@@ -93,6 +99,9 @@ const AppSider: React.FC = () => {
     }
     if (location.pathname.startsWith('/monitoring')) {
       return '/monitoring';
+    }
+    if (location.pathname.startsWith('/mcp')) {
+      return '/mcp';
     }
     const matched = menuItems
       .filter((item) => item.key !== '/')

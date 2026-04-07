@@ -10,8 +10,9 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.models.tooling import AgentToolingConfig
+from app.models.tooling import AgentMCPBindingConfig, AgentToolingConfig, MCPServerConfig
 from app.services.tooling_service import tooling_service
+from app.services.mcp_service import mcp_service
 from app.runtime.tool_registry import tool_registry_service
 from app.runtime.trace_lineage import lineage_recorder
 from app.services.agent_tool_context_service import agent_tool_context_service
@@ -70,6 +71,27 @@ class ConnectorCallToolRequest(BaseModel):
     """通过连接器转发工具调用时的参数载荷。"""
 
     input: Dict[str, Any] = Field(default_factory=dict, description="连接器透传给工具的参数")
+
+
+class MCPServerUpsertRequest(BaseModel):
+    """MCP 服务创建/更新请求。"""
+
+    id: str = Field(default="", description="服务 ID，留空时自动生成")
+    name: str = Field(..., min_length=1, description="服务名称")
+    enabled: bool = Field(default=True, description="是否启用")
+    type: str = Field(default="remote", description="服务类型：remote/local")
+    transport: str = Field(default="http", description="传输协议：http/sse/stdio")
+    protocol_mode: str = Field(default="gateway", description="调用模式：gateway/mcp/local")
+    endpoint: str = Field(default="", description="服务地址（http/sse）")
+    command: str = Field(default="", description="stdio 命令")
+    command_list: list[str] = Field(default_factory=list, description="stdio 命令数组（兼容 OpenCode 风格）")
+    args: list[str] = Field(default_factory=list, description="stdio 参数")
+    env: Dict[str, str] = Field(default_factory=dict, description="stdio 环境变量")
+    api_token: str = Field(default="", description="访问令牌")
+    timeout_seconds: int = Field(default=12, ge=2, le=120, description="请求超时")
+    capabilities: list[str] = Field(default_factory=lambda: ["logs", "metrics"], description="能力列表")
+    tool_paths: Dict[str, str] = Field(default_factory=dict, description="能力路径映射")
+    metadata: Dict[str, str] = Field(default_factory=dict, description="扩展元数据")
 
 
 def _agent_for_tool(tool_name: str) -> str:
@@ -330,3 +352,68 @@ async def trial_run_tool(payload: ToolTrialRunRequest):
         "agent_name": agent_name,
         **result,
     }
+
+
+@router.get(
+    "/tooling/mcp/servers",
+    response_model=list[MCPServerConfig],
+    summary="获取 MCP 服务配置清单",
+)
+async def list_mcp_servers():
+    """获取 MCP 服务配置。"""
+    return await mcp_service.list_servers()
+
+
+@router.post(
+    "/tooling/mcp/servers",
+    response_model=MCPServerConfig,
+    summary="创建或更新 MCP 服务配置",
+)
+async def upsert_mcp_server(payload: MCPServerUpsertRequest):
+    """创建或更新 MCP 服务配置。"""
+    model = MCPServerConfig(**payload.model_dump(mode="json"))
+    return await mcp_service.upsert_server(model)
+
+
+@router.delete(
+    "/tooling/mcp/servers/{server_id}",
+    summary="删除 MCP 服务配置",
+)
+async def delete_mcp_server(server_id: str):
+    """删除指定 MCP 服务。"""
+    deleted = await mcp_service.delete_server(server_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"MCP 服务不存在: {server_id}")
+    return {"deleted": True, "server_id": server_id}
+
+
+@router.post(
+    "/tooling/mcp/servers/{server_id}/probe",
+    summary="探测 MCP 服务可用性",
+)
+async def probe_mcp_server(server_id: str):
+    """对指定 MCP 服务执行一次探测。"""
+    result = await mcp_service.probe_server(server_id)
+    if not bool(result.get("ok")) and str(result.get("error") or "") == "server_not_found":
+        raise HTTPException(status_code=404, detail=f"MCP 服务不存在: {server_id}")
+    return result
+
+
+@router.get(
+    "/tooling/mcp/bindings",
+    response_model=AgentMCPBindingConfig,
+    summary="获取 Agent 与 MCP 绑定配置",
+)
+async def get_mcp_bindings():
+    """获取 Agent MCP 绑定。"""
+    return await mcp_service.get_bindings()
+
+
+@router.put(
+    "/tooling/mcp/bindings",
+    response_model=AgentMCPBindingConfig,
+    summary="更新 Agent 与 MCP 绑定配置",
+)
+async def update_mcp_bindings(payload: AgentMCPBindingConfig):
+    """更新 Agent MCP 绑定。"""
+    return await mcp_service.update_bindings(payload)
